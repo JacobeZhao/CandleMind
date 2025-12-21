@@ -1,0 +1,18 @@
+{
+  // 编辑器字体（PyCharm 代码默认）
+  "editor.fontFamily": "JetBrains Mono, monospace",
+  "editor.fontSize": 16,
+  "editor.fontLigatures": true, // 启用连字（JetBrains Mono 特性）
+  "editor.lineHeight": 1.4, // 匹配 PyCharm 行高
+  "editor.fontWeight": "800", // 特粗（视觉冲击力强，适合大屏）
+
+  // 终端字体（和编辑器统一）
+  "terminal.integrated.fontFamily": "'JetBrains Mono', monospace",
+  "terminal.integrated.fontSize": 16,
+  "terminal.integrated.fontWeight": "800", // 与编辑器保持一致
+
+  // UI 字体（匹配 PyCharm 菜单/工具栏）
+  "workbench.fontAliasing": "auto",
+  "workbench.productIconTheme": "jetbrains-icons", // 可选，安装 JetBrains Icons 插件后启用
+  "workbench.iconTheme": "jetbrains-icons" // 同上
+}

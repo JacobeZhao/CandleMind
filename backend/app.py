@@ -2,8 +2,13 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from binance.binance_kline_stream import BinanceKlineStream
+
+class SwitchRequest(BaseModel):
+    symbol: str
+    interval: str
 
 app = FastAPI(
     title="CandleMind Market Service",
@@ -79,3 +84,17 @@ def get_klines(limit: int = 100):
         klines = klines[-limit:]
 
     return klines
+
+@app.post("/klines/switch")
+def switch_kline(req: SwitchRequest):
+    """
+    切换当前行情的 symbol / interval
+    """
+    global kline_stream
+
+    kline_stream = BinanceKlineStream(
+        symbol=req.symbol,
+        interval=req.interval,
+    )
+
+    return {"status": "ok"}
