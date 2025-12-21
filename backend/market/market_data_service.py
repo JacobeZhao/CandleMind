@@ -76,18 +76,23 @@ class MarketDataService:
     def _load_or_fetch_all(self):
         for s in SYMBOLS:
             for i in INTERVALS:
-                # 尝试加载
-                # klines = load_klines(s, i)
-                # if not klines:
-                #     print(f"⬇️ 拉取 {s.upper()} {i} 历史数据")
-                #     klines = fetch_history(s, i, MAX_LEN)
-                #     save_klines(s, i, klines)
-                # 直接加载
-                print(f"⬇️ 拉取 {s.upper()} {i} 历史数据")
-                klines = fetch_history(s, i, MAX_LEN)
-                save_klines(s, i, klines)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
-                self.data[s][i].load(klines)
+                success = False
+                attempts = 0
+                while not success and attempts < 3:
+                    try:
+                        print(f"⬇️ 拉取 {s.upper()} {i} 历史数据")
+                        klines = fetch_history(s, i, MAX_LEN)
+                        save_klines(s, i, klines)
+                        self.data[s][i].load(klines)
+                        success = True
+                    except Exception as e:
+                        attempts += 1
+                        print(f"❌ {s} {i} 拉取失败 ({attempts}/3): {e}")
+                        if attempts < 3:
+                            time.sleep(2)
+                        else:
+                            print(f"⚠️ {s} {i} 拉取失败超过 3 次，跳过")
+
 
     # ---------- WebSocket ----------
 
@@ -142,55 +147,63 @@ class MarketDataService:
     async def _daily_refresh(self):
         while True:
             now = datetime.now()
-            tomorrow = datetime.combine(
-                now.date(), dtime.min
-            ) + timedelta(days=1)
-
+            tomorrow = datetime.combine(now.date(), dtime.min) + timedelta(days=1)
             await asyncio.sleep((tomorrow - now).seconds)
 
             print("🧹 凌晨刷新历史数据")
             for s in SYMBOLS:
                 for i in INTERVALS:
-                    klines = fetch_history(s, i, MAX_LEN)
+                    print(f"⬇️ 拉取 {s.upper()} {i} 历史数据")
+                    klines = fetch_history(s, i, limit=1000)  # fetch_history 已有重试
                     save_klines(s, i, klines)
-
                     self.data[s][i].klines.clear()
                     self.data[s][i].load(klines)
+                    await asyncio.sleep(0.2)  # 异步延迟
+
 
 
 # ================== Binance REST ==================
 
-def fetch_history(symbol: str, interval: str, limit: int):
+def fetch_history(symbol: str, interval: str, limit: int, max_retries=3, retry_delay=2):
     url = "https://api.binance.com/api/v3/klines"
     result = []
     end_time = None
+    retries = 0
 
     while len(result) < limit:
-        params = {
-            "symbol": symbol.upper(),
-            "interval": interval,
-            "limit": 1000,
-        }
-        if end_time:
-            params["endTime"] = end_time
+        try:
+            params = {"symbol": symbol.upper(), "interval": interval, "limit": 1000}
+            if end_time:
+                params["endTime"] = end_time
 
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        if not data:
-            break
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json()
 
-        for k in data:
-            result.append({
-                "open_time": datetime.fromtimestamp(k[0] / 1000),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume": float(k[5]),
-                "is_closed": True,
-            })
+            if not data:
+                break
 
-        end_time = data[0][0] - 1
-        time.sleep(0.05)
+            for k in data:
+                result.append({
+                    "open_time": datetime.fromtimestamp(k[0] / 1000),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                    "is_closed": True,
+                })
+
+            end_time = data[0][0] - 1
+            time.sleep(0.05)
+            retries = 0  # 成功一次就重置重试计数
+
+        except requests.exceptions.RequestException as e:
+            retries += 1
+            if retries > max_retries:
+                print(f"⚠️ {symbol} {interval} 拉取失败超过 {max_retries} 次，跳过")
+                break
+            print(f"❌ {symbol} {interval} 拉取失败 ({retries}/{max_retries})：{e}，等待 {retry_delay}s 重试...")
+            time.sleep(retry_delay)
 
     return result[-limit:]

@@ -5,7 +5,7 @@ from pprint import pprint
 BASE_URL = "http://127.0.0.1:8000"
 
 current_symbol = "btcusdt"
-current_interval = "1m"
+current_interval = "1d"
 
 symbols_cache = []
 intervals_cache = []
@@ -63,7 +63,7 @@ def health_check():
 
 
 def get_latest_kline():
-    title("最新 K 线（可能未收盘）")
+    title("当前 K 线")
     data = safe_get(
         "/klines/latest",
         params={
@@ -75,9 +75,9 @@ def get_latest_kline():
 
 
 def get_klines():
-    title("已收盘 K 线")
+    title("收盘 K 线")
 
-    limit = input("请输入要查询的 K 线数量（如 5 / 10 / 100）：").strip()
+    limit = input("请输入要查询的 K 线数量（如10）：").strip()
     if not limit.isdigit():
         print("❌ 输入无效，必须是数字")
         return
@@ -106,7 +106,7 @@ def get_klines():
 def change_view():
     global current_symbol, current_interval
 
-    title("切换查看视角")
+    title("切换品种和周期")
 
     show_symbols()
     symbol = input("请输入交易对：").strip().lower()
@@ -122,7 +122,7 @@ def change_view():
 
     current_symbol = symbol
     current_interval = interval
-    print("✅ 查看视角已切换")
+    print("✅ 品种或周期已切换")
 
 
 # ================== 主循环 ==================
@@ -143,11 +143,11 @@ def main():
             """
 请选择操作：
 1️⃣  健康检查
-2️⃣  查看支持的交易对
-3️⃣  查看支持的周期
+2️⃣  查看品种
+3️⃣  查看周期
 4️⃣  查询最新 K 线
-5️⃣  查询已收盘 K 线
-6️⃣  切换查看视角
+5️⃣  查询收盘 K 线
+6️⃣  切换品种或周期
 0️⃣  退出程序
 """
         )
@@ -173,7 +173,7 @@ def main():
             change_view()
 
         elif choice == "0":
-            print("👋 再见，测试结束")
+            print("👋 再见")
             break
 
         else:
