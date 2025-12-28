@@ -2,3 +2,7 @@ fastapi==0.126.0
 uvicorn[standard]==0.38.0
 websockets==15.0.1
 python-dotenv==1.2.1
+passlib==1.7.4
+jose==1.0.0
+bson==0.5.10
+pymongo==4.15.5

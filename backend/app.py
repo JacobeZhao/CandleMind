@@ -1,20 +1,36 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
-from market.market_data_service import MarketDataService
-from api.market_api import router, init_market
+from CandleMind.backend.services.market_service import MarketDataService
+from CandleMind.backend.services.auth_service import AuthService
+from CandleMind.backend.api.market_api import market_router, init_market
+from CandleMind.backend.api.auth_api import auth_router, init_auth
+from env_loader import env_loader
 
+# 加载环境变量
+env_loader.load()
+
+# 初始化服务
 market = MarketDataService()
+auth = AuthService()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动市场服务，拉取历史数据，启动 WS
+    # 启动服务
     await market.start()
-    # 初始化 API 相关依赖
+    await auth.start()
+
+    # 注入 API 依赖
     init_market(market)
+    init_auth(auth)
+
     yield
-    # 可选：关闭市场服务
+
+    # 关闭服务（顺序与启动相反）
+    await auth.stop()
     await market.stop()
+
 
 app = FastAPI(
     title="CandleMind Market Service",
@@ -22,4 +38,14 @@ app = FastAPI(
 )
 
 # 挂载路由
-app.include_router(router)
+app.include_router(market_router)
+app.include_router(auth_router)
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "market": market.ready if market else False,
+        "auth": auth.ready if auth else False,
+    }

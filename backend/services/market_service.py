@@ -1,37 +1,26 @@
+import os
 import asyncio
 import json
 import time
 from datetime import datetime, timedelta, time as dtime
 from collections import deque
 from typing import Dict
+from pathlib import Path
+from typing import List
 
 import requests
 import websockets
-
-from .storage import load_klines, save_klines
-
-# ================== 配置 ==================
-
-SYMBOLS = ["btcusdt", "ethusdt", "solusdt"]
-
-INTERVALS = [
-    "1m", "5m", "15m", "30m",
-    "1h", "2h", "4h", "6h", "12h",
-    "1d", "1w", "1M",
-]
-
-MAX_LEN = 1000
 
 
 # ================== 缓存单元 ==================
 
 class KlineCache:
     def __init__(self):
-        self.klines = deque(maxlen=MAX_LEN)
+        self.klines = deque(maxlen=int(os.environ.get("MAX_LEN", 1000)))
         self.current = None
 
     def load(self, klines: list[dict]):
-        for k in klines[-MAX_LEN:]:
+        for k in klines[-os.environ.get("MAX_LEN", 1000):]:
             self.klines.append(k)
 
     def append_closed(self, kline: dict):
@@ -44,13 +33,41 @@ class KlineCache:
         return list(self.klines)
 
 
+class KlineStorage:
+    def __init__(self, data_dir: str = "datas/kline_data"):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(exist_ok=True)
+
+    def _path(self, symbol: str, interval: str) -> Path:
+        return self.data_dir / f"{symbol}_{interval}.json"
+
+    def load(self, symbol: str, interval: str) -> List[dict]:
+        path = self._path(symbol, interval)
+        if not path.exists():
+            return []
+
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save(self, symbol: str, interval: str, klines: List[dict]):
+        path = self._path(symbol, interval)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(
+                klines,
+                f,
+                ensure_ascii=False,
+                default=str,
+            )
+
+
 # ================== 行情服务 ==================
 
 class MarketDataService:
     def __init__(self):
+        self.storage = KlineStorage()
         self.data: Dict[str, Dict[str, KlineCache]] = {
-            s: {i: KlineCache() for i in INTERVALS}
-            for s in SYMBOLS
+            s: {i: KlineCache() for i in os.environ.get("INTERVALS", "1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M")}
+            for s in os.environ.get("SYMBOLS")
         }
         self.ready = False
         self._running = False
@@ -71,18 +88,23 @@ class MarketDataService:
         self.ready = True
         print("✅ 行情服务已就绪")
 
+    async def stop(self):
+        print("🛑 行情服务停止")
+        self._running = False
+        await asyncio.sleep(1)
+
     # ---------- 历史数据 ----------
 
     def _load_or_fetch_all(self):
-        for s in SYMBOLS:
-            for i in INTERVALS:
+        for s in os.environ.get("SYMBOLS"):
+            for i in os.environ.get("INTERVALS"):
                 success = False
                 attempts = 0
                 while not success and attempts < 3:
                     try:
                         print(f"⬇️ 拉取 {s.upper()} {i} 历史数据")
-                        klines = fetch_history(s, i, MAX_LEN)
-                        save_klines(s, i, klines)
+                        klines = fetch_history(s, i, os.environ.get("MAX_LEN", 1000))
+                        self.storage.save_klines(s, i, klines)
                         self.data[s][i].load(klines)
                         success = True
                     except Exception as e:
@@ -93,14 +115,13 @@ class MarketDataService:
                         else:
                             print(f"⚠️ {s} {i} 拉取失败超过 3 次，跳过")
 
-
     # ---------- WebSocket ----------
 
     async def _run_ws(self):
         streams = [
             f"{s}@kline_{i}"
-            for s in SYMBOLS
-            for i in INTERVALS
+            for s in os.environ.get("SYMBOLS")
+            for i in os.environ.get("INTERVALS")
         ]
 
         url = (
@@ -114,7 +135,7 @@ class MarketDataService:
                     print("✅ WebSocket 已连接")
 
                     async for msg in ws:
-                        data = json.loads(msg)["data"]
+                        data = json.loads(msg)["datas"]
                         self._handle_ws(data)
 
             except Exception as e:
@@ -151,15 +172,14 @@ class MarketDataService:
             await asyncio.sleep((tomorrow - now).seconds)
 
             print("🧹 凌晨刷新历史数据")
-            for s in SYMBOLS:
-                for i in INTERVALS:
+            for s in os.environ.get("SYMBOLS"):
+                for i in os.environ.get("INTERVALS"):
                     print(f"⬇️ 拉取 {s.upper()} {i} 历史数据")
                     klines = fetch_history(s, i, limit=1000)  # fetch_history 已有重试
-                    save_klines(s, i, klines)
+                    self.storage.save_klines(s, i, klines)
                     self.data[s][i].klines.clear()
                     self.data[s][i].load(klines)
                     await asyncio.sleep(0.2)  # 异步延迟
-
 
 
 # ================== Binance REST ==================
