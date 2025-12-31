@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
-from CandleMind.backend.services.auth_service import AuthService
+from backend.services.auth_service import AuthService
 
 auth_router = APIRouter()
 auth: AuthService | None = None
@@ -78,3 +78,10 @@ def profile(token: str):
         }
     except ValueError as e:
         raise HTTPException(401, str(e))
+
+@auth_router.get("/")
+def health():
+    return {
+        "status": "ok",
+        "ready": auth.ready if auth else False,
+    }

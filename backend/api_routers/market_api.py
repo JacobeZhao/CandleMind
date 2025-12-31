@@ -1,7 +1,7 @@
 import os
 
 from fastapi import APIRouter, HTTPException
-from CandleMind.backend.services.market_service import MarketDataService
+from backend.services.market_service import MarketDataService
 
 market_router = APIRouter()
 market: MarketDataService | None = None
@@ -43,3 +43,11 @@ def latest(symbol: str, interval: str):
         raise HTTPException(503, "market not ready")
 
     return market.data[symbol][interval].current
+
+
+@market_router.get("/")
+def health():
+    return {
+        "status": "ok",
+        "market": market.ready if market else False,
+    }
