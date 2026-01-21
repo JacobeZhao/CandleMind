@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CandleMind Desktop</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: transparent;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 顶部标题栏样式 */
+    .title-bar {
+      height: 32px;
+      background: #2c3e50;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      -webkit-app-region: drag; /* 允许拖拽窗口 */
+      color: white;
+      user-select: none;
+    }
+
+    .title-bar.inactive {
+      background: #34495e;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .logo-icon {
+      width: 20px;
+      height: 20px;
+      background: #3498db;
+      border-radius: 4px;
+    }
+
+    .window-controls {
+      display: flex;
+      gap: 4px;
+    }
+
+    .control-btn {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      cursor: pointer;
+      -webkit-app-region: no-drag; /* 防止按钮区域拖拽窗口 */
+    }
+
+    .minimize-btn {
+      background: #ffbd2e;
+    }
+
+    .maximize-btn {
+      background: #28ca42;
+    }
+
+    .close-btn {
+      background: #ff5f57;
+    }
+
+    /* 主内容区域 */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      background: rgba(255, 255, 255, 0.9);
+    }
+
+    /* 透明监控区域 */
+    .monitor-area {
+      flex: 1;
+      border: 2px dashed #3498db;
+      border-radius: 8px;
+      background: rgba(52, 152, 219, 0.1);
+      margin-bottom: 20px;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .monitor-placeholder {
+      color: #7f8c8d;
+      text-align: center;
+      padding: 20px;
+    }
+
+    .monitor-placeholder p {
+      margin: 5px 0;
+    }
+
+    .monitor-status {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    /* 输入区域 */
+    .input-section {
+      background: white;
+      border-radius: 8px;
+      padding: 15px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+
+    .input-section h3 {
+      margin-bottom: 10px;
+      color: #2c3e50;
+    }
+
+    #textInput {
+      width: 100%;
+      height: 100px;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      resize: vertical;
+      font-family: inherit;
+    }
+
+    .analysis-trigger {
+      margin-top: 10px;
+      display: flex;
+      gap: 10px;
+    }
+
+    button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .analyze-btn {
+      background: #3498db;
+      color: white;
+      flex: 1;
+    }
+
+    .analyze-btn:hover {
+      background: #2980b9;
+    }
+
+    .status-indicator {
+      padding: 8px 16px;
+      background: #ecf0f1;
+      border-radius: 4px;
+      color: #7f8c8d;
+      flex: 1;
+      text-align: center;
+    }
+
+    .status-active {
+      color: #27ae60;
+    }
+
+    .status-inactive {
+      color: #e74c3c;
+    }
+
+    /* 分析结果显示 */
+    .analysis-result {
+      margin-top: 15px;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 4px;
+      border-left: 4px solid #3498db;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+
+    .analysis-result h4 {
+      margin-bottom: 5px;
+      color: #2c3e50;
+    }
+
+    .result-content {
+      font-size: 14px;
+      color: #34495e;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <!-- 顶部标题栏 -->
+  <div class="title-bar">
+    <div class="logo">
+      <div class="logo-icon"></div>
+      <span>CandleMind</span>
+    </div>
+    <div class="window-controls">
+      <div class="control-btn minimize-btn" id="minBtn" title="最小化"></div>
+      <div class="control-btn maximize-btn" id="maxBtn" title="最大化"></div>
+      <div class="control-btn close-btn" id="closeBtn" title="关闭"></div>
+    </div>
+  </div>
+
+  <!-- 主内容区域 -->
+  <div class="main-content">
+    <!-- 透明监控区域 -->
+    <div class="monitor-area">
+      <div class="monitor-placeholder">
+        <p>🔍 桌面监控区域</p>
+        <p>正在实时监控桌面内容...</p>
+        <p id="monitorStatus" class="monitor-status">监控中</p>
+      </div>
+    </div>
+
+    <!-- 输入区域 -->
+    <div class="input-section">
+      <h3>AI 分析输入</h3>
+      <textarea id="textInput" placeholder="在这里输入需要AI分析的内容..."></textarea>
+      <div class="analysis-trigger">
+        <button class="analyze-btn" id="analyzeBtn">调用AI分析</button>
+        <div class="status-indicator" id="statusIndicator">
+          <span id="statusText">就绪</span>
+        </div>
+      </div>
+
+      <!-- 分析结果显示 -->
+      <div class="analysis-result" id="analysisResult" style="display: none;">
+        <h4>AI 分析结果:</h4>
+        <div class="result-content" id="resultContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

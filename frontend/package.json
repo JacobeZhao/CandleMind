@@ -1,0 +1,56 @@
+{
+  "name": "candle-mind-desktop",
+  "version": "1.0.0",
+  "description": "Desktop application for desktop monitoring and AI analysis",
+  "main": "main.js",
+  "scripts": {
+    "start": "nodemon --exec electron .",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "build": "electron-builder",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "electron",
+    "desktop",
+    "monitoring",
+    "ai",
+    "analysis"
+  ],
+  "author": "CandleMind",
+  "license": "MIT",
+  "build": {
+    "appId": "com.candle-mind.desktop",
+    "productName": "candle-mind-desktop",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "assets/Bokehlicia-Captiva-Brackets.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "icon": "assets/Bokehlicia-Captiva-Brackets.icns",
+      "target": [
+        "dmg"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^40.0.0",
+    "electron-builder": "^26.4.0",
+    "electron-rebuild": "^3.2.9",
+    "nodemon": "^3.1.11"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "node-fetch": "^2.7.0",
+    "screenshot-desktop": "^1.15.0",
+    "jimp": "^0.22.10"
+  }
+}
