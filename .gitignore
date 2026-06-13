@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Data & models (large binary files on G drive)
+data/
+*.pkl
+*.parquet
+*.h5
+*.hdf5
+*.joblib
+
+# Node
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# IDE
+.idea/
+.vscode/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project tooling
+.gstack/
+.claude/
+*.output
+retrain_optimized.log
+retrain_optimized_err.log
+_retrain_worker.py
+_calib_worker.py
