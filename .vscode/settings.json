@@ -6,12 +6,45 @@
   "editor.lineHeight": 1.4, // 匹配 PyCharm 行高
   "editor.fontWeight": "600", // 特粗（视觉冲击力强，适合大屏）
 
+  // ============ PyCharm 风格终端配置 ============
   // 终端字体（和编辑器统一）
   "terminal.integrated.fontFamily": "'JetBrains Mono', monospace",
   "terminal.integrated.fontSize": 16,
-  "terminal.integrated.fontWeight": "600", // 与编辑器保持一致
+  "terminal.integrated.fontWeight": "600",
 
-  // UI 字体（匹配 PyCharm 菜单/工具栏）
+  // 终端颜色方案（PyCharm Dark 风格）
+  "terminal.integrated.cursorStyle": "block",          // 方块光标（PyCharm 默认）
+  "terminal.integrated.cursorBlinking": true,         // 光标闪烁
+  "terminal.integrated.cursorWidth": 2,               // 光标宽度
+
+  // 终端背景色（PyCharm 风格深灰黑）
+  "terminal.integrated.background": "#1e1e1e",
+
+  // 终端文字颜色
+  "terminal.integrated.foreground": "#cccccc",
+
+  // ANSI 颜色主题（PyCharm 风格）
+  "terminal.integrated.colorScheme": {
+    "black": "#1e1e1e",
+    "red": "#cd3131",
+    "green": "#0dbc79",      // PyCharm 风格绿色提示符
+    "yellow": "#e5e510",
+    "blue": "#2472c8",
+    "magenta": "#bc3fbc",
+    "cyan": "#11a8cd",
+    "white": "#e5e5e5",
+    "brightBlack": "#666666",
+    "brightRed": "#f14c4c",
+    "brightGreen": "#23d18b", // 亮绿色
+    "brightYellow": "#f5f543",
+    "brightBlue": "#3b8eea",
+    "brightMagenta": "#d670d6",
+    "brightCyan": "#29b8db",
+    "brightWhite": "#ffffff",
+    "cursorColor": "#0dbc79"   // 光标颜色（匹配绿色）
+  },
+
+  // ============ UI 字体（匹配 PyCharm 菜单/工具栏）===========
   "workbench.fontAliasing": "auto",
   "workbench.productIconTheme": "jetbrains-icons", // 可选，安装 JetBrains Icons 插件后启用
   "workbench.iconTheme": "jetbrains-icons" // 同上
