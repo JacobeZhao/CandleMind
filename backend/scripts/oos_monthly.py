@@ -2,8 +2,9 @@
 OOS 月度拆解分析：找出哪几个月是系统性亏损
 """
 import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
-os.chdir(os.path.dirname(__file__))
+BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BACKEND)
+os.chdir(BACKEND)
 import warnings; warnings.filterwarnings('ignore')
 
 import pandas as pd
@@ -68,7 +69,7 @@ for sym in SYMBOLS:
               f'{row["cumR"]:>8.2f}R{mark}')
     print()
 
-# ── 合并所有币月度汇总 ────────────────────────────────────────────
+# ── 合并所有币月度汇总
 print('=' * 65)
 print('合并月度汇总（4 币）')
 print('=' * 65)
@@ -87,7 +88,7 @@ if not combined_df.empty:
               f'{row["win_rate"]:>6.1%} {row["stop_rate"]:>6.1%} '
               f'{row["cumR"]:>8.2f}R{mark}')
 
-# ── 多空分离 ────────────────────────────────────────────────────
+# ── 多空分离
 print('\n' + '=' * 65)
 print('多空方向对比（合并4币）')
 print('=' * 65)

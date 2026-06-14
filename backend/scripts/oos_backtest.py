@@ -4,8 +4,9 @@
 SOLUSDT 因校准结果极差（sharpe=-0.2）暂时排除。
 """
 import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
-os.chdir(os.path.dirname(__file__))
+BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BACKEND)
+os.chdir(BACKEND)
 
 import warnings; warnings.filterwarnings('ignore')
 from app.services.ml_strategy import backtest_multi, backtest_ml_trend, MLTrendParams, calc_metrics

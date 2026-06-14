@@ -7,14 +7,15 @@
 """
 import sys, os, shutil
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.path.insert(0, r'E:\File\Projects\binance\backend')
-os.chdir(r'E:\File\Projects\binance\backend')
+BACKEND = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BACKEND)
+os.chdir(BACKEND)
 
 from app.datastore import MARKET_ROOT
 
 SRC_MODELS   = MARKET_ROOT / 'models'
 SRC_FEAT_ML  = MARKET_ROOT / 'features_ml'
-DST_ROOT     = r'E:\File\Projects\binance\data'
+DST_ROOT     = os.path.join(BACKEND, 'data')
 
 def sync_dir(src, dst_root, subdir, pattern=None):
     dst = os.path.join(dst_root, subdir)

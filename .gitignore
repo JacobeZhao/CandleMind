@@ -28,6 +28,9 @@ data/
 *.hdf5
 *.joblib
 
+# CatBoost training artifacts
+catboost_info/
+
 # Node
 node_modules/
 frontend/dist/
@@ -46,7 +49,7 @@ Thumbs.db
 
 # Project tooling
 .gstack/
-.claude/
+# .claude/ contains the tech-debt skill system — keep tracked in git
 *.output
 retrain_optimized.log
 retrain_optimized_err.log
