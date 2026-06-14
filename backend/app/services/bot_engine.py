@@ -44,6 +44,8 @@ class BotEngine:
         self.circuit_open   = False  # True = entries halted by intraday drawdown
         self._day_date      = ""     # YYYY-MM-DD of the current baseline
         self._day_start_eq  = 0.0   # equity at start of today (UTC)
+        # Direction frequency monitor — recent entry history for imbalance detection
+        self._dir_history: list = []  # [(monotonic_seconds, direction)]
 
     @property
     def status(self) -> dict:
@@ -166,13 +168,27 @@ class BotEngine:
 
         can_long  = (sig.long_prob  >= ml_p.entry_long_threshold and
                      sig.long_prob  - sig.short_prob >= ml_p.min_prob_gap)
-        can_short = (sig.short_prob >= ml_p.entry_short_threshold and
+        can_short = (sig.short_prob >= ml_p.entry_short_threshold + ml_p.short_extra_delta and
                      sig.short_prob - sig.long_prob  >= ml_p.min_prob_gap)
+
+        # Direction frequency guard — block shorts when short/long ratio > 10:1 (last 60 trades)
+        if can_short and not can_long:
+            import time as _t
+            now_mono = _t.monotonic()
+            cutoff   = now_mono - 30 * 24 * 3600
+            self._dir_history = [(t, d) for t, d in self._dir_history if t > cutoff]
+            recent = self._dir_history[-60:]
+            if len(recent) >= 10:
+                n_short = sum(1 for _, dd in recent if dd == -1)
+                n_long  = sum(1 for _, dd in recent if dd == 1)
+                if n_long == 0 or n_short / max(n_long, 1) > 10:
+                    can_short = False
+                    self.last_action = (f"[频率监控] 空/多={n_short}/{n_long} > 10:1，暂停做空 {symbol}")
 
         if not (can_long or can_short):
             self.last_signal = "NONE"
             self.last_action = (f"ML观望 long={sig.long_prob:.3f}<{ml_p.entry_long_threshold} "
-                                f"short={sig.short_prob:.3f}<{ml_p.entry_short_threshold}")
+                                f"short={sig.short_prob:.3f}<{ml_p.entry_short_threshold + ml_p.short_extra_delta:.3f}")
             return
 
         # Extreme volatility guard — skip new entries on ATR spikes
@@ -232,6 +248,8 @@ class BotEngine:
                              f"prob={prob:.3f} kelly={kelly:.2f} qty={first_qty} "
                              f"@{price} stop={stop_r}")
         logger.info(f"ML trend entry dir={d} prob={prob:.3f} qty={first_qty} @{price} stop={stop_r}")
+        import time as _t
+        self._dir_history.append((_t.monotonic(), d))
 
     async def _manage_ml_trend_open(self, client, symbol, params, pos, price, atr5, sig, ml_p):
         """实盘 ML 趋势：持仓管理（跟踪止损 + ML 早退 + 加仓）。"""
@@ -352,7 +370,7 @@ class BotEngine:
         # ── 空仓 → 入场 ──────────────────────────────────────────────────────
         can_long  = (sig.long_prob  >= ml_p.entry_long_threshold and
                      sig.long_prob  - sig.short_prob >= ml_p.min_prob_gap)
-        can_short = (sig.short_prob >= ml_p.entry_short_threshold and
+        can_short = (sig.short_prob >= ml_p.entry_short_threshold + ml_p.short_extra_delta and
                      sig.short_prob - sig.long_prob  >= ml_p.min_prob_gap)
 
         if not (can_long or can_short):

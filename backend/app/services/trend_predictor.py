@@ -531,14 +531,19 @@ class BundleModel:
     oos_summary:  dict
     symbol:       str
     shap_top20:   Optional[List[str]] = None
+    calibrator:   Optional[Any] = None   # Isotonic regression calibrator
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         X_f = X[self.feature_cols].copy()
         p_lgb = self.lgb_model.predict_proba(X_f)[:, 1]
         if self.cb_model is not None:
             p_cb = self.cb_model.predict_proba(X_f)[:, 1]
-            return (p_lgb + p_cb) / 2
-        return p_lgb
+            raw = (p_lgb + p_cb) / 2
+        else:
+            raw = p_lgb
+        if self.calibrator is not None:
+            return self.calibrator.transform(raw)
+        return raw
 
 
 def train_final_model(
@@ -652,7 +657,7 @@ def train_symbol(
         return {}
 
     exclude = {
-        'open_time', 'year',
+        'open_time', 'year', 'index',   # 'index' = 行号列，PSI=12.43 时序泄漏
         'long_label',  'long_meta_label',  'long_profit_r',  'long_duration',
         'short_label', 'short_meta_label', 'short_profit_r', 'short_duration',
         'long_trend_sharpe', 'short_trend_sharpe', 'best_direction',
@@ -715,6 +720,23 @@ def train_symbol(
         X, y, selected_feats, lgb_best_params, use_catboost
     )
 
+    # Step 3b: Isotonic 概率校准（在最后 20% 时序片段上拟合）
+    calibrator = None
+    try:
+        from sklearn.isotonic import IsotonicRegression
+        cal_n = max(int(len(X) * 0.2), 500)
+        X_cal = X[selected_feats].iloc[-cal_n:]
+        y_cal = y.iloc[-cal_n:]
+        cal_p = lgb_final.predict_proba(X_cal)[:, 1]
+        if cb_final is not None:
+            cal_p = (cal_p + cb_final.predict_proba(X_cal)[:, 1]) / 2
+        iso = IsotonicRegression(out_of_bounds='clip')
+        iso.fit(cal_p, y_cal.values)
+        calibrator = iso
+        print(f'  Isotonic 校准完成 n_cal={cal_n}', flush=True)
+    except Exception as _e:
+        print(f'  WARN: Isotonic 校准失败: {_e}', flush=True)
+
     # Step 4: 保存
     bundle = BundleModel(
         lgb_model    = lgb_final,
@@ -724,6 +746,7 @@ def train_symbol(
         oos_summary  = oos_summary,
         symbol       = symbol,
         shap_top20   = shap_top20,
+        calibrator   = calibrator,
     )
     save_model(bundle)
 

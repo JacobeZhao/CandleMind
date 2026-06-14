@@ -65,6 +65,13 @@ class MLTrendParams:
     # #7  Hurst 硬门：hurst < hurst_entry_min 时禁止入场（均值回归市场）
     hurst_gate:            bool  = True
     hurst_entry_min:       float = 0.50   # 低于随机游走则市场均值回归，趋势策略禁入
+    # #8  月度趋势过滤：顺长期趋势入场（反趋势方向阈值提高 trend_bias_delta）
+    monthly_trend_filter:  bool  = True
+    monthly_sma_bars:      int   = 8640   # ~30 天 5m K 线数（30×24×12=8640）
+    trend_bias_delta:      float = 0.08   # 反趋势方向入场阈值抬高量
+    short_extra_delta:     float = 0.00   # 做空额外阈值增量（BNB 等高风险品种）
+    # #9  最大逆境 R 保护：浮亏超 max_adverse_r × 初始风险时强制平仓
+    max_adverse_r:         float = 2.0
 
     @classmethod
     def from_thresholds(cls, symbol: str, **kwargs) -> 'MLTrendParams':
@@ -80,23 +87,24 @@ class MLTrendParams:
         if symbol == 'BTCUSDT':
             _coin_defaults = dict(initial_stop_mult=5.0, kelly_frac=0.10,
                                   min_hold_bars=4, risk_pct=0.0043,
-                                  exit_threshold=0.43, reversal_threshold=0.53)
+                                  exit_threshold=0.43, reversal_threshold=0.60)
         elif symbol == 'BNBUSDT':
             _coin_defaults = dict(initial_stop_mult=4.0, kelly_frac=0.15,
                                   min_hold_bars=4, risk_pct=0.0055,
-                                  exit_threshold=0.43, reversal_threshold=0.53)
+                                  exit_threshold=0.43, reversal_threshold=0.60,
+                                  short_extra_delta=0.12)   # BNB 做空信号过度：0.58+0.12=0.70
         elif symbol == 'ETHUSDT':
             _coin_defaults = dict(initial_stop_mult=4.0, kelly_frac=0.25,
                                   risk_pct=0.0095,
-                                  exit_threshold=0.38, reversal_threshold=0.55)
+                                  exit_threshold=0.38, reversal_threshold=0.60)
+        elif symbol == 'XRPUSDT':
+            _coin_defaults = dict(risk_pct=0.0110, reversal_threshold=0.62)
         elif symbol in ('ADAUSDT',):
             _coin_defaults = dict(risk_pct=0.0138)
         elif symbol in ('SOLUSDT',):
             _coin_defaults = dict(risk_pct=0.0123)
         elif symbol in ('DOGEUSDT',):
             _coin_defaults = dict(risk_pct=0.0124)
-        elif symbol in ('XRPUSDT',):
-            _coin_defaults = dict(risk_pct=0.0110)
         elif symbol in ('LINKUSDT',):
             _coin_defaults = dict(risk_pct=0.0108)
         elif symbol in ('AVAXUSDT',):
@@ -259,6 +267,13 @@ def simulate_ml_trend(bars: pd.DataFrame,
     ema_align_arr  = bars['5m_ema_align_score'].values if '5m_ema_align_score' in bars.columns else None
     hurst_arr      = bars['5m_hurst'].values       if '5m_hurst'           in bars.columns else None
 
+    # #8 月度趋势过滤 — 预计算 30 天 SMA
+    if p.monthly_trend_filter:
+        monthly_sma = pd.Series(close_arr).rolling(
+            p.monthly_sma_bars, min_periods=500).mean().values
+    else:
+        monthly_sma = np.full(len(close_arr), np.nan)
+
     for i in range(len(bars)):
         c   = close_arr[i]
         atr = max(atr_arr[i], 1e-8)
@@ -272,12 +287,24 @@ def simulate_ml_trend(bars: pd.DataFrame,
 
         if not in_pos:
             # ── 入场判断 ──────────────────────────────────────────────────
-            gap_req   = p.min_prob_gap_large_cap if symbol in _LARGE_CAP else p.min_prob_gap
+            gap_req = p.min_prob_gap_large_cap if symbol in _LARGE_CAP else p.min_prob_gap
+
+            # #8 月度趋势偏差：反趋势方向阈值抬高
+            sma_now = monthly_sma[i]
+            if p.monthly_trend_filter and not np.isnan(sma_now):
+                above_sma    = c > sma_now
+                eff_long_thr  = p.entry_long_threshold + (p.trend_bias_delta if not above_sma else 0.0)
+                eff_short_thr = (p.entry_short_threshold + p.short_extra_delta
+                                 + (p.trend_bias_delta if above_sma else 0.0))
+            else:
+                eff_long_thr  = p.entry_long_threshold
+                eff_short_thr = p.entry_short_threshold + p.short_extra_delta
+
             can_long  = (p.allowed_direction >= 0 and
-                         lp >= p.entry_long_threshold and
+                         lp >= eff_long_thr and
                          lp - sp >= gap_req)
             can_short = (p.allowed_direction <= 0 and
-                         sp >= p.entry_short_threshold and
+                         sp >= eff_short_thr and
                          sp - lp >= gap_req)
 
             # 改进 #1：高波动 regime 门（vol_regime == 2 = 高波动三分位）
@@ -369,11 +396,22 @@ def simulate_ml_trend(bars: pd.DataFrame,
                     ml_reversal = False
                     ml_exit     = False
 
+            # #9 最大逆境 R 保护：浮亏过深时强制平仓（优先于 ML 信号，低于止损）
+            max_adverse_hit = False
+            if p.max_adverse_r > 0 and not stop_hit:
+                init_r = abs(entry_price - initial_stop) * max(initial_qty, 1e-8)
+                if init_r > 0:
+                    raw_float = (c - avg_price) * direction * qty
+                    if raw_float / init_r < -p.max_adverse_r:
+                        max_adverse_hit = True
+
             reason     = None
             exit_price = c
             if stop_hit:
                 reason     = 'stop'
                 exit_price = stop
+            elif max_adverse_hit:
+                reason = 'max_adverse'
             elif ml_reversal:
                 reason = 'ml_reversal'
             elif ml_exit:

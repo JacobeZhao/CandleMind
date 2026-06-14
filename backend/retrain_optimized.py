@@ -9,24 +9,24 @@
 """
 import warnings; warnings.filterwarnings('ignore')
 import sys, os, time, subprocess, json, textwrap
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
-BACKEND    = r'E:\File\Projects\binance\backend'
+BACKEND    = r'E:\File\Projects\CandleMind\backend'
 SYMBOLS    = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT']
 TRAIN_START = '2023-01-01'
-TRAIN_END   = '2024-06-30'
-VAL_START   = '2024-07-01'
-VAL_END     = '2024-12-31'
+TRAIN_END   = '2025-06-30'   # 扩展至2025H1，纳入多空不同市场环境
+VAL_START   = '2025-07-01'
+VAL_END     = '2025-12-31'
 
 # ── subprocess worker ──────────────────────────────────────────────
 WORKER = textwrap.dedent(r"""
 import warnings; warnings.filterwarnings('ignore')
 import sys, os, json
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-sys.path.insert(0, r'E:\File\Projects\binance\backend')
-os.chdir(r'E:\File\Projects\binance\backend')
+sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+sys.path.insert(0, r'E:\File\Projects\CandleMind\backend')
+os.chdir(r'E:\File\Projects\CandleMind\backend')
 
 sym         = sys.argv[1]
 target      = sys.argv[2]
@@ -55,10 +55,10 @@ with open(WORKER_PATH, 'w', encoding='utf-8') as f:
 CALIB_WORKER = textwrap.dedent(r"""
 import warnings; warnings.filterwarnings('ignore')
 import sys, os, json
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-sys.path.insert(0, r'E:\File\Projects\binance\backend')
-os.chdir(r'E:\File\Projects\binance\backend')
+sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+sys.path.insert(0, r'E:\File\Projects\CandleMind\backend')
+os.chdir(r'E:\File\Projects\CandleMind\backend')
 
 sym       = sys.argv[1]
 val_start = sys.argv[2]
@@ -93,6 +93,37 @@ CALIB_PATH = os.path.join(BACKEND, '_calib_worker.py')
 with open(CALIB_PATH, 'w', encoding='utf-8') as f:
     f.write(CALIB_WORKER)
 
+
+# ── 流式运行 subprocess，实时输出到日志 ───────────────────────────
+def run_streaming(cmd, timeout=3600):
+    """运行子进程，实时打印其 stdout，返回 (returncode, last_json_line)。"""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+    )
+    json_line = ''
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            print(line, flush=True)
+            if line.strip().startswith('{'):
+                json_line = line.strip()
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        print(f'  TIMEOUT after {timeout}s', flush=True)
+    stderr = proc.stderr.read().strip()
+    if stderr:
+        for line in stderr.splitlines()[-10:]:
+            print(f'  WARN: {line}', flush=True)
+    return proc.returncode, json_line
+
+
 # ── 主流程 ─────────────────────────────────────────────────────────
 print('=' * 65)
 print(f'  优化重训练: {TRAIN_START} ~ {TRAIN_END}')
@@ -100,7 +131,7 @@ print(f'  验证集:    {VAL_START} ~ {VAL_END}  (阈值校准)')
 print(f'  真 OOS:   2025-01-01 ~  (未触碰)')
 print(f'  Optuna:   30 trials/模型    SHAP: threshold=0.003')
 print(f'  币种: {SYMBOLS}  (subprocess隔离)')
-print('=' * 65)
+print('=' * 65, flush=True)
 
 t_total = time.time()
 results = []
@@ -111,65 +142,53 @@ for sym in SYMBOLS:
     for target in ['long_label', 'short_label']:
         t0 = time.time()
         print(f'\n[{sym}] 目标={target}')
-        print('=' * 60)
-        proc = subprocess.run(
-            [sys.executable, WORKER_PATH, sym, target, TRAIN_START, TRAIN_END],
-            capture_output=True, errors='ignore', timeout=3600
+        print('=' * 60, flush=True)
+        returncode, json_line = run_streaming(
+            [sys.executable, WORKER_PATH, sym, target, TRAIN_START, TRAIN_END]
         )
         elapsed = time.time() - t0
-        stderr = proc.stderr.strip()
-        if stderr:
-            for line in stderr.splitlines()[-5:]:
-                print(f'  WARN: {line}')
-        if proc.returncode != 0:
-            print(f'  ERROR {sym} {target}: exit={proc.returncode}  耗时={elapsed:.0f}s')
+        if returncode != 0:
+            print(f'  ERROR {sym} {target}: exit={returncode}  耗时={elapsed:.0f}s', flush=True)
             continue
-        json_line = ''
-        for line in reversed(proc.stdout.strip().splitlines()):
-            if line.strip().startswith('{'):
-                json_line = line.strip(); break
         try:
             row = json.loads(json_line)
             print(f'  OK  {sym} {target}: '
-                  f'AUC={row.get("auc",0):.4f}  '
-                  f'n_features={row.get("n_features",0)}  '
-                  f'耗时={elapsed:.0f}s')
+                  f'AUC={row.get("auc", 0):.4f}  '
+                  f'n_features={row.get("n_features", 0)}  '
+                  f'耗时={elapsed:.0f}s', flush=True)
             results.append(row)
         except Exception as e:
-            print(f'  PARSE ERR: {e}  raw={json_line!r}')
+            print(f'  PARSE ERR: {e}  raw={json_line!r}', flush=True)
 
 # Phase 2: 阈值校准
-print('\n── Phase 2: 阈值校准 (2024-H2 验证集) ─────────────')
+print('\n── Phase 2: 阈值校准 (2024-H2 验证集) ─────────────', flush=True)
 thresholds = {}
 for sym in SYMBOLS:
     t0 = time.time()
-    proc = subprocess.run(
+    print(f'\n[{sym}] 校准阈值...', flush=True)
+    returncode, json_line = run_streaming(
         [sys.executable, CALIB_PATH, sym, VAL_START, VAL_END],
-        capture_output=True, errors='ignore', timeout=600
+        timeout=600,
     )
     elapsed = time.time() - t0
-    if proc.returncode != 0:
-        print(f'  {sym}: 校准失败 (exit={proc.returncode})')
+    if returncode != 0:
+        print(f'  {sym}: 校准失败 (exit={returncode})', flush=True)
         continue
-    json_line = ''
-    for line in reversed(proc.stdout.strip().splitlines()):
-        if line.strip().startswith('{'):
-            json_line = line.strip(); break
     try:
         row = json.loads(json_line)
         best = row.get('best_threshold', {})
         thresholds[sym] = best
-        print(f'  {sym}: entry={best.get("entry",0):.2f}  rev={best.get("rev",0):.2f}'
-              f'  sharpe={best.get("sharpe",0):.3f}  n={best.get("n_trades",0)}'
-              f'  耗时={elapsed:.0f}s')
+        print(f'  {sym}: entry={best.get("entry", 0):.2f}  rev={best.get("rev", 0):.2f}'
+              f'  sharpe={best.get("sharpe", 0):.3f}  n={best.get("n_trades", 0)}'
+              f'  耗时={elapsed:.0f}s', flush=True)
     except Exception as e:
-        print(f'  {sym}: parse err {e}')
+        print(f'  {sym}: parse err {e}', flush=True)
 
 # 将校准结果写入 thresholds_optimized.json
 thresholds_path = os.path.join(BACKEND, 'data', 'thresholds_optimized.json')
 with open(thresholds_path, 'w', encoding='utf-8') as f:
     json.dump(thresholds, f, indent=2, ensure_ascii=False)
-print(f'\n  校准阈值已保存 → {thresholds_path}')
+print(f'\n  校准阈值已保存 → {thresholds_path}', flush=True)
 
 print(f'\n总耗时: {(time.time()-t_total)/60:.1f} 分钟')
 print('优化训练完成。模型已覆盖存入 models/')
