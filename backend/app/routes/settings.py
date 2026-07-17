@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 from sqlalchemy.orm import Session
 from binance.client import Client
@@ -8,13 +8,19 @@ from ..security import encrypt, decrypt
 from ..state import app_state
 from ..binance_ws import binance_ws_client
 import asyncio
+import json
+import re
 import requests as _requests
 
 router = APIRouter()
 
 CONNECT_TIMEOUT = 30  # 秒
+WS_READY_TIMEOUT = 10  # Must fail before the frontend's 15s settings timeout.
 
 _KEEP = ("_keep_", "")
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]+(?:_[A-Z0-9]+)?$")
+_settings_lock = asyncio.Lock()
+_ws_switch_lock = asyncio.Lock()
 
 
 class SettingsIn(BaseModel):
@@ -23,10 +29,20 @@ class SettingsIn(BaseModel):
     api_secret_test: Optional[str] = None
     api_key_main:    Optional[str] = None
     api_secret_main: Optional[str] = None
-    testnet: bool = True
-    symbol:  str = "BTCUSDT"
-    interval: str = "15m"
+    testnet: Optional[bool] = None
+    symbol: Optional[str] = None
+    interval: Optional[str] = None
     proxy_url: Optional[str] = None
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        symbol = value.strip().upper()
+        if not 2 <= len(symbol) <= 20 or not _SYMBOL_RE.fullmatch(symbol):
+            raise ValueError("symbol must be 2-20 Binance symbol characters")
+        return symbol
 
 
 class SettingsOut(BaseModel):
@@ -53,45 +69,152 @@ def get_settings(db: Session = Depends(get_db)):
     )
 
 
+def _runtime_snapshot() -> dict:
+    return {
+        "client": app_state.client,
+        "app_symbol": app_state.symbol,
+        "ws_running": getattr(binance_ws_client, "_running", False),
+        "ws_symbol": binance_ws_client.symbol,
+        "ws_testnet": binance_ws_client.testnet,
+        "ws_proxy": binance_ws_client.proxy,
+    }
+
+
+def _runtime_changed(snapshot: dict) -> bool:
+    return (
+        app_state.client is not snapshot["client"]
+        or app_state.symbol != snapshot["app_symbol"]
+        or getattr(binance_ws_client, "_running", False) != snapshot["ws_running"]
+        or binance_ws_client.symbol != snapshot["ws_symbol"]
+        or binance_ws_client.testnet != snapshot["ws_testnet"]
+        or binance_ws_client.proxy != snapshot["ws_proxy"]
+    )
+
+
+def _ws_target_changed(snapshot: dict, symbol: str, testnet: bool, proxy_url: Optional[str]) -> bool:
+    return (
+        snapshot["ws_symbol"] != symbol
+        or snapshot["ws_testnet"] != testnet
+        or snapshot["ws_proxy"] != (proxy_url or None)
+    )
+
+
+async def _start_ws_and_wait(symbol: str, testnet: bool, proxy_url: Optional[str]) -> None:
+    """Restart the market stream and wait until it emits the target ticker."""
+    async with _ws_switch_lock:
+        ready = asyncio.Event()
+        original_handle = binance_ws_client._handle
+        expected_symbol = symbol.upper()
+
+        async def handle_with_ready(raw: str):
+            try:
+                payload = json.loads(raw)
+                if payload.get("e") == "24hrTicker" and payload.get("s") == expected_symbol:
+                    ready.set()
+            except (TypeError, ValueError):
+                pass
+            await original_handle(raw)
+
+        binance_ws_client._handle = handle_with_ready
+        try:
+            await binance_ws_client.start(symbol, testnet, proxy_url)
+            await asyncio.wait_for(ready.wait(), timeout=WS_READY_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            await binance_ws_client.stop()
+            raise RuntimeError(f"Binance WS did not become ready within {WS_READY_TIMEOUT}s") from exc
+        finally:
+            if binance_ws_client._handle is handle_with_ready:
+                binance_ws_client._handle = original_handle
+
+
+async def _restore_runtime(snapshot: dict) -> None:
+    try:
+        if snapshot["ws_running"]:
+            await _start_ws_and_wait(
+                snapshot["ws_symbol"], snapshot["ws_testnet"], snapshot["ws_proxy"]
+            )
+        else:
+            await binance_ws_client.stop()
+    finally:
+        binance_ws_client.symbol = snapshot["ws_symbol"]
+        binance_ws_client.testnet = snapshot["ws_testnet"]
+        binance_ws_client.proxy = snapshot["ws_proxy"]
+        app_state.client = snapshot["client"]
+        app_state.symbol = snapshot["app_symbol"]
+
+
 async def _connect_active(s) -> None:
-    """用当前激活(testnet/main)的 key 建连并启动行情流。"""
+    """用当前激活(testnet/main)的 key 建连并等待行情流就绪。"""
     key_enc, sec_enc = active_keys(s)
     if not key_enc:
         raise HTTPException(400, f"当前为{'测试网' if s.testnet else '真实网'}模式，但未配置对应 API Key")
     client = await asyncio.to_thread(
         _build_client, decrypt(key_enc), decrypt(sec_enc), s.testnet, s.proxy_url
     )
-    app_state.set_client(client, s.symbol)
-    await binance_ws_client.start(s.symbol, s.testnet, s.proxy_url)
+    snapshot = _runtime_snapshot()
+    try:
+        await _start_ws_and_wait(s.symbol, s.testnet, s.proxy_url)
+        app_state.set_client(client, s.symbol)
+    except (Exception, asyncio.CancelledError):
+        if _runtime_changed(snapshot):
+            await _restore_runtime(snapshot)
+        raise
 
 
 @router.post("")
 async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
-    s = db.query(Settings).first()
-    if body.api_key_test and body.api_key_test not in _KEEP:
-        s.api_key_test_enc = encrypt(body.api_key_test.strip())
-    if body.api_secret_test and body.api_secret_test not in _KEEP:
-        s.api_secret_test_enc = encrypt(body.api_secret_test.strip())
-    if body.api_key_main and body.api_key_main not in _KEEP:
-        s.api_key_main_enc = encrypt(body.api_key_main.strip())
-    if body.api_secret_main and body.api_secret_main not in _KEEP:
-        s.api_secret_main_enc = encrypt(body.api_secret_main.strip())
-    s.testnet = body.testnet
-    s.symbol = body.symbol
-    s.interval = body.interval
-    s.proxy_url = body.proxy_url or None
-    db.commit()
+    async with _settings_lock:
+        s = db.query(Settings).first()
+        runtime = _runtime_snapshot()
+        if body.api_key_test and body.api_key_test not in _KEEP:
+            s.api_key_test_enc = encrypt(body.api_key_test.strip())
+        if body.api_secret_test and body.api_secret_test not in _KEEP:
+            s.api_secret_test_enc = encrypt(body.api_secret_test.strip())
+        if body.api_key_main and body.api_key_main not in _KEEP:
+            s.api_key_main_enc = encrypt(body.api_key_main.strip())
+        if body.api_secret_main and body.api_secret_main not in _KEEP:
+            s.api_secret_main_enc = encrypt(body.api_secret_main.strip())
+        if body.testnet is not None:
+            s.testnet = body.testnet
+        if body.symbol is not None:
+            s.symbol = body.symbol
+        if body.interval is not None:
+            s.interval = body.interval
+        if "proxy_url" in body.model_fields_set:
+            s.proxy_url = body.proxy_url or None
 
-    key_enc, _ = active_keys(s)
-    if not key_enc:
-        return {"ok": True, "message": "配置已保存（当前模式未配置 API Key，暂未连接）"}
-    try:
-        await _connect_active(s)
-        return {"ok": True, "message": f"保存成功，已连接 Binance（{'测试网' if s.testnet else '真实网'}）！"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"API 连接失败: {e}")
+        try:
+            key_enc, _ = active_keys(s)
+            if key_enc:
+                await _connect_active(s)
+            elif runtime["ws_running"] and _ws_target_changed(
+                runtime, s.symbol, s.testnet, s.proxy_url
+            ):
+                await _start_ws_and_wait(s.symbol, s.testnet, s.proxy_url)
+            db.commit()
+            if not key_enc:
+                app_state.symbol = s.symbol
+            message = (
+                f"保存成功，已连接 Binance（{'测试网' if s.testnet else '真实网'}）！"
+                if key_enc
+                else "配置已保存（当前模式未配置 API Key，暂未连接）"
+            )
+            return {"ok": True, "message": message, "symbol": s.symbol}
+        except (Exception, asyncio.CancelledError) as exc:
+            db.rollback()
+            try:
+                if _runtime_changed(runtime):
+                    await _restore_runtime(runtime)
+            except Exception as restore_exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"设置保存失败且运行状态恢复失败: {restore_exc}",
+                ) from exc
+            if isinstance(exc, HTTPException):
+                raise exc
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(status_code=400, detail=f"API 连接失败: {exc}") from exc
 
 
 @router.post("/connect")

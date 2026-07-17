@@ -1,10 +1,11 @@
 import json
-import os
-from pathlib import Path
 from sqlalchemy import create_engine, Column, String, Boolean, Float, Integer, Text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-data_dir = Path(os.getenv("DATA_DIR", "./data"))
+from .runtime_paths import RUNTIME_DATA_DIR
+
+
+data_dir = RUNTIME_DATA_DIR
 data_dir.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite:///{data_dir}/trader.db"

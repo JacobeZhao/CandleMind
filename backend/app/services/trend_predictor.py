@@ -24,7 +24,7 @@ Phase 4 — 趋势预测模型（深度版）
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-import json, pickle, warnings
+import json, os, pickle, sys, warnings
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Any
@@ -435,6 +435,89 @@ class FoldResult:
     y_true:   np.ndarray = field(repr=False)
 
 
+@dataclass(frozen=True)
+class IndexWindow:
+    """Half-open positional window used by temporal model splits."""
+
+    start: int
+    stop: int
+
+    @property
+    def size(self) -> int:
+        return self.stop - self.start
+
+    def as_slice(self) -> slice:
+        return slice(self.start, self.stop)
+
+
+@dataclass(frozen=True)
+class TemporalModelSplit:
+    """Chronological, mutually exclusive model-development windows."""
+
+    train: IndexWindow
+    early_stop: IndexWindow
+    calibration: IndexWindow
+    gate: Optional[IndexWindow] = None
+    purged: Tuple[IndexWindow, ...] = ()
+
+
+def split_train_early_stop_calibration(
+    n_samples: int,
+    purge_bars: int,
+    *,
+    early_stop_fraction: float = 0.10,
+    calibration_fraction: float = 0.20,
+    min_train: int = 3000,
+    min_early_stop: int = 500,
+    min_calibration: int = 500,
+) -> TemporalModelSplit:
+    """Split ordered rows into train, early-stop, and calibration windows.
+
+    Purged rows separate every adjacent model-use window. The function only
+    performs integer arithmetic, making the leakage boundary independently
+    testable without loading market data or model libraries.
+    """
+    if n_samples < 0:
+        raise ValueError("n_samples must be non-negative")
+    if purge_bars < 0:
+        raise ValueError("purge_bars must be non-negative")
+    if not 0 < early_stop_fraction < 1:
+        raise ValueError("early_stop_fraction must be between 0 and 1")
+    if not 0 < calibration_fraction < 1:
+        raise ValueError("calibration_fraction must be between 0 and 1")
+
+    early_stop_size = max(int(n_samples * early_stop_fraction), min_early_stop)
+    calibration_size = max(
+        int(n_samples * calibration_fraction), min_calibration
+    )
+    calibration_start = n_samples - calibration_size
+    second_purge_start = calibration_start - purge_bars
+    early_stop_start = second_purge_start - early_stop_size
+    first_purge_start = early_stop_start - purge_bars
+
+    if first_purge_start < min_train:
+        required = (
+            min_train
+            + early_stop_size
+            + calibration_size
+            + 2 * purge_bars
+        )
+        raise ValueError(
+            f"insufficient samples for temporal split: "
+            f"have={n_samples}, require_at_least={required}"
+        )
+
+    return TemporalModelSplit(
+        train=IndexWindow(0, first_purge_start),
+        early_stop=IndexWindow(early_stop_start, second_purge_start),
+        calibration=IndexWindow(calibration_start, n_samples),
+        purged=(
+            IndexWindow(first_purge_start, early_stop_start),
+            IndexWindow(second_purge_start, calibration_start),
+        ),
+    )
+
+
 def run_cpcv(
     X:             pd.DataFrame,
     y:             pd.Series,
@@ -518,7 +601,7 @@ def run_cpcv(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 最终模型（全量数据训练）
+# 最终模型（独立训练与 early-stop 窗口）
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -552,12 +635,23 @@ def train_final_model(
     feature_cols: List[str],
     lgb_params:   Optional[dict] = None,
     use_catboost: bool  = True,
+    X_early_stop: Optional[pd.DataFrame] = None,
+    y_early_stop: Optional[pd.Series] = None,
 ) -> Tuple[Any, Any]:
-    """用全量数据训练最终模型（留最后 10% 做 early-stopping）"""
+    """Train the production ensemble with a distinct early-stop window."""
     X_f   = X[feature_cols]
-    n_val = max(int(len(X_f) * 0.1), 500)
-    X_tr, y_tr = X_f.iloc[:-n_val], y.iloc[:-n_val]
-    X_va, y_va = X_f.iloc[-n_val:], y.iloc[-n_val:]
+    if (X_early_stop is None) != (y_early_stop is None):
+        raise ValueError("X_early_stop and y_early_stop must be provided together")
+    if X_early_stop is None:
+        n_val = max(int(len(X_f) * 0.1), 500)
+        if len(X_f) <= n_val:
+            raise ValueError("insufficient samples for final-model early stopping")
+        X_tr, y_tr = X_f.iloc[:-n_val], y.iloc[:-n_val]
+        X_va, y_va = X_f.iloc[-n_val:], y.iloc[-n_val:]
+    else:
+        X_tr, y_tr = X_f, y
+        X_va = X_early_stop[feature_cols]
+        y_va = y_early_stop
 
     lgb = train_lgbm(X_tr, y_tr, X_va, y_va, lgb_params)
     cb  = None
@@ -571,14 +665,21 @@ def train_final_model(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _model_dir() -> Path:
-    from ..datastore import MARKET_ROOT
-    d = MARKET_ROOT / 'models'
-    d.mkdir(exist_ok=True)
-    return d
+    from ..datastore import (
+        resolve_current_model_release,
+        validate_supervised_candidate_dir,
+    )
+
+    research_override = os.environ.get('CANDLEMIND_RESEARCH_MODEL_DIR')
+    if research_override:
+        return validate_supervised_candidate_dir(research_override)
+    return resolve_current_model_release()
 
 
-def save_model(bundle: BundleModel) -> Path:
-    d    = _model_dir()
+def save_model(bundle: BundleModel, *, output_dir: str | Path) -> Path:
+    from ..datastore import validate_supervised_candidate_dir
+
+    d = validate_supervised_candidate_dir(output_dir, create=True)
     path = d / f'{bundle.symbol}_{bundle.target}.pkl'
     with open(path, 'wb') as f:
         pickle.dump(bundle, f)
@@ -599,8 +700,22 @@ def load_model(symbol: str, target: str) -> BundleModel:
     path = _model_dir() / f'{symbol}_{target}.pkl'
     if not path.exists():
         raise FileNotFoundError(f'模型未找到: {path}')
+    _install_pickle_module_aliases()
     with open(path, 'rb') as f:
         return pickle.load(f)
+
+
+def _install_pickle_module_aliases() -> None:
+    """Allow old model pickles saved under the top-level ``app`` package."""
+    try:
+        import backend.app as backend_app
+        import backend.app.services as backend_services
+        import backend.app.services.trend_predictor as this_module
+    except Exception:
+        return
+    sys.modules.setdefault('app', backend_app)
+    sys.modules.setdefault('app.services', backend_services)
+    sys.modules.setdefault('app.services.trend_predictor', this_module)
 
 
 def predict_proba(bundle: BundleModel, feat_row: pd.Series) -> float:
@@ -618,6 +733,7 @@ def predict_proba(bundle: BundleModel, feat_row: pd.Series) -> float:
 def train_symbol(
     symbol:         str,
     target:         str   = 'long_label',
+    output_dir:     str | Path | None = None,
     n_folds:        int   = 6,
     n_test_folds:   int   = 2,
     embargo_bars:   int   = 50,
@@ -629,9 +745,12 @@ def train_symbol(
     train_start:    str   = None,   # 起始日期，如 '2023-01-01'；None = 全量
 ) -> dict:
     """
-    加载 symbol 特征+标签 → CPCV 评估 → SHAP 剪枝 → 全量训练 → 保存模型
+    加载 symbol 特征+标签 → CPCV 评估 → SHAP 剪枝 → 时序隔离训练 → 保存模型
     train_end/train_start: 时间窗口切割，支持滚动窗口训练
     """
+    if output_dir is None:
+        raise ValueError("output_dir must identify a supervised candidate release")
+
     from .feature_builder import merge_features_labels
 
     print(f'\n{"="*60}')
@@ -639,6 +758,7 @@ def train_symbol(
     print(f'{"="*60}')
 
     df = merge_features_labels(symbol)
+    df = df.sort_values('open_time', kind='stable').reset_index(drop=True)
     ot = df['open_time']
     ts = ot if ot.dtype.kind == 'M' else pd.to_datetime(ot, unit='ms')
     if hasattr(ts.dt, 'tz') and ts.dt.tz is not None:
@@ -679,14 +799,50 @@ def train_symbol(
     if pos_rate < 0.01 or pos_rate > 0.99:
         print(f'  WARN: 正例率极端 ({pos_rate:.3f})，可能标注有问题')
 
-    # Step 0: CPCV 前快速预筛特征（降内存占用）
-    feat_cols = _pre_filter_features(X, feat_cols, max_features=200)
+    try:
+        model_split = split_train_early_stop_calibration(
+            len(X), embargo_bars
+        )
+    except ValueError as exc:
+        print(f'  ERR: {exc}; abort without saving', flush=True)
+        return {}
+
+    split_frames = {
+        'train': (X.iloc[model_split.train.as_slice()],
+                  y.iloc[model_split.train.as_slice()]),
+        'early_stop': (X.iloc[model_split.early_stop.as_slice()],
+                       y.iloc[model_split.early_stop.as_slice()]),
+        'calibration': (X.iloc[model_split.calibration.as_slice()],
+                        y.iloc[model_split.calibration.as_slice()]),
+    }
+    for split_name, (_, split_y) in split_frames.items():
+        if split_y.nunique() < 2:
+            print(f'  ERR: {split_name} has fewer than two target classes; '
+                  'abort without saving', flush=True)
+            return {}
+
+    X_train, y_train = split_frames['train']
+    X_early_stop, y_early_stop = split_frames['early_stop']
+    X_calibration, y_calibration = split_frames['calibration']
+    print(
+        '  temporal split '
+        f'train={len(X_train):,} early_stop={len(X_early_stop):,} '
+        f'calibration={len(X_calibration):,} '
+        f'purged={sum(window.size for window in model_split.purged):,}',
+        flush=True,
+    )
+
+    # Step 0: pre-filter using the training window only.
+    feat_cols = _pre_filter_features(X_train, feat_cols, max_features=200)
     X = X[feat_cols]
+    X_train = X_train[feat_cols]
+    X_early_stop = X_early_stop[feat_cols]
+    X_calibration = X_calibration[feat_cols]
     print(f'  预筛后特征数={len(feat_cols)}', flush=True)
 
-    # Step 1: CPCV 评估
+    # Step 1: CPCV evaluation is confined to the training window.
     fold_results, oos_summary = run_cpcv(
-        X, y,
+        X_train, y_train,
         target=target,
         n_folds=n_folds,
         n_test_folds=n_test_folds,
@@ -700,42 +856,62 @@ def train_symbol(
     shap_top20    = None
     selected_feats = feat_cols
     if fold_results:
-        first_tr_idx = CPCVSplitter(n_folds, n_test_folds, embargo_bars).split(X)[0][0]
-        X_sub = X.iloc[first_tr_idx]
-        y_sub = y.iloc[first_tr_idx]
+        first_tr_idx = CPCVSplitter(n_folds, n_test_folds, embargo_bars).split(X_train)[0][0]
+        X_sub = X_train.iloc[first_tr_idx]
+        y_sub = y_train.iloc[first_tr_idx]
         lgb_probe = train_lgbm(X_sub, y_sub)
         selected_feats = shap_feature_selection(lgb_probe, X_sub,
                                                 threshold=shap_threshold)
         shap_top20 = selected_feats[:20]
         print(f'  SHAP TOP-20 样本: {shap_top20[:5]}...')
 
-    # Step 3: 全量训练
-    print('\n  训练最终模型（全量数据）...')
+    # Step 3: train only on the designated training window.
+    print('\n  训练最终模型（独立训练/early-stop 窗口）...')
     lgb_best_params = None
     if run_optuna and fold_results:
-        lgb_best_params = optimize_lgbm(X[selected_feats], y,
+        lgb_best_params = optimize_lgbm(X_train[selected_feats], y_train,
                                         n_trials=max(optuna_trials // 2, 10))
 
     lgb_final, cb_final = train_final_model(
-        X, y, selected_feats, lgb_best_params, use_catboost
+        X_train,
+        y_train,
+        selected_feats,
+        lgb_best_params,
+        use_catboost,
+        X_early_stop=X_early_stop,
+        y_early_stop=y_early_stop,
     )
 
-    # Step 3b: Isotonic 概率校准（在最后 20% 时序片段上拟合）
-    calibrator = None
+    # Step 3b: calibration rows are unseen by the production ensemble.
     try:
         from sklearn.isotonic import IsotonicRegression
-        cal_n = max(int(len(X) * 0.2), 500)
-        X_cal = X[selected_feats].iloc[-cal_n:]
-        y_cal = y.iloc[-cal_n:]
+        X_cal = X_calibration[selected_feats]
         cal_p = lgb_final.predict_proba(X_cal)[:, 1]
         if cb_final is not None:
             cal_p = (cal_p + cb_final.predict_proba(X_cal)[:, 1]) / 2
         iso = IsotonicRegression(out_of_bounds='clip')
-        iso.fit(cal_p, y_cal.values)
+        iso.fit(cal_p, y_calibration.values)
         calibrator = iso
-        print(f'  Isotonic 校准完成 n_cal={cal_n}', flush=True)
-    except Exception as _e:
-        print(f'  WARN: Isotonic 校准失败: {_e}', flush=True)
+        print(f'  Isotonic 校准完成 n_cal={len(X_calibration)}', flush=True)
+    except Exception as exc:
+        print(f'  ERR: Isotonic calibration failed: {exc}; '
+              'abort without saving', flush=True)
+        return {}
+
+    def _split_meta(window: IndexWindow) -> dict:
+        rows = df.iloc[window.as_slice()]
+        return {
+            'start': str(rows['open_time'].iloc[0]),
+            'end': str(rows['open_time'].iloc[-1]),
+            'n_samples': int(window.size),
+        }
+
+    oos_summary['model_windows'] = {
+        'train': _split_meta(model_split.train),
+        'early_stop': _split_meta(model_split.early_stop),
+        'calibration': _split_meta(model_split.calibration),
+        'purge_bars': int(embargo_bars),
+    }
 
     # Step 4: 保存
     bundle = BundleModel(
@@ -748,7 +924,7 @@ def train_symbol(
         shap_top20   = shap_top20,
         calibrator   = calibrator,
     )
-    save_model(bundle)
+    model_path = save_model(bundle, output_dir=output_dir)
 
     return {
         'symbol':      symbol,
@@ -756,6 +932,7 @@ def train_symbol(
         'oos_summary': oos_summary,
         'n_features':  len(selected_feats),
         'shap_top20':  shap_top20,
+        'model_path':  str(model_path),
     }
 
 

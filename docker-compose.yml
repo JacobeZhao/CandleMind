@@ -3,11 +3,17 @@ services:
     build: ./backend
     container_name: binance_backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./data:/app/data
+      - type: bind
+        source: ${CANDLEMIND_DATA_ROOT:-G:/CandleMind/CandleMind_data}
+        target: /app/market-data
+      - type: bind
+        source: ${CANDLEMIND_RUNTIME_ROOT:-G:/CandleMind/CandleMind_data/runtime/app}
+        target: /app/runtime
     environment:
-      - DATA_DIR=/app/data
+      - MARKET_DATA_DIR=/app/market-data
+      - DATA_DIR=/app/runtime
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
 
@@ -15,7 +21,7 @@ services:
     build: ./frontend
     container_name: binance_frontend
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:80"
     depends_on:
       - backend
     restart: unless-stopped

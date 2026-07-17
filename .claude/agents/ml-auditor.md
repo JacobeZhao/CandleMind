@@ -4,7 +4,7 @@
 
 ## 扫描范围
 
-`app/services/trend_predictor.py`、`app/services/feature_builder.py`、`app/services/ml_strategy.py`、`app/services/ml_signal.py`、`retrain_optimized.py`
+`app/services/trend_predictor.py`、`app/services/feature_builder.py`、`app/services/ml_strategy.py`、`app/services/ml_signal.py`、`scripts/training/retrain_multi_horizon.py`
 
 ## 检查项
 
@@ -32,7 +32,7 @@
 - 如果 calibrator 存在但 load 后为 None，则校准失效
 
 ### 5. 训练窗口配置化
-- `retrain_optimized.py` 的 `TRAIN_START`、`TRAIN_END`、`VAL_START`、`VAL_END` 是否有文档说明为何选这个窗口？
+- 训练、early-stop、calibration 和 gate 窗口必须记录在候选 manifest 中。
 - 是否有机制检测特征 parquet 覆盖时间是否超过 `TRAIN_END`？
 
 ### 6. PSI 监控缺失

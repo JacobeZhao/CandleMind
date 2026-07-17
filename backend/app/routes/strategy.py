@@ -1,4 +1,5 @@
 import json
+import os
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -9,6 +10,10 @@ from ..state import app_state
 from ..services.bot_engine import bot_engine
 
 router = APIRouter()
+
+
+def _live_trading_enabled() -> bool:
+    return os.environ.get("CANDLEMIND_ENABLE_LIVE_TRADING", "").lower() == "true"
 
 
 class StrategyIn(BaseModel):
@@ -59,7 +64,16 @@ def engine_status():
 
 
 @router.post("/engine/start")
-async def start_engine(paper: bool = False, db: Session = Depends(get_db)):
+async def start_engine(
+    paper: bool = True,
+    confirm_live: bool = False,
+    db: Session = Depends(get_db),
+):
+    if not paper:
+        if not _live_trading_enabled():
+            raise HTTPException(403, "Live trading is disabled by server policy")
+        if not confirm_live:
+            raise HTTPException(400, "Live trading requires confirm_live=true")
     if not app_state.client:
         raise HTTPException(503, "未连接 Binance")
     active = db.query(Strategy).filter(Strategy.is_active == True).first()
@@ -78,6 +92,7 @@ async def start_engine(paper: bool = False, db: Session = Depends(get_db)):
         "strategy_params": json.loads(active.strategy_params_json or "{}"),
         "ai_strategy_json":active.ai_strategy_json,
         "paper":           paper,
+        "live_authorized": not paper,
         "initial_capital": 10000,
     }
     await bot_engine.start(app_state.client, cfg)

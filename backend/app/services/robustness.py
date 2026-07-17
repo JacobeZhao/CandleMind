@@ -13,11 +13,11 @@ import numpy as np
 
 from .ml_strategy import MLTrendParams, backtest_ml_trend, calc_metrics
 from . import experiments
-from ..datastore import MARKET_ROOT
+from ..datastore import REPORTS_DIR
 
-REPORTS_DIR = MARKET_ROOT / "reports"
+# REPORTS_DIR is provided by datastore
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-INTERMEDIATE_DIR = MARKET_ROOT / "reports" / "intermediate"
+INTERMEDIATE_DIR = REPORTS_DIR / "intermediate"
 INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
 
 

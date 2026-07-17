@@ -137,7 +137,9 @@ export default function StrategyPage() {
         setMsg({ ok: true, text: "策略已停止" });
       } else {
         if (!form?.is_active) await activateStrategy(strat.id);
-        const { data } = await startEngine(paper);
+        const confirmLive = !paper && window.confirm("确认启动实盘交易？订单将发送到真实账户。");
+        if (!paper && !confirmLive) return;
+        const { data } = await startEngine(paper, confirmLive);
         setMsg({ ok: true, text: data.message || "已启动" });
       }
       const { data } = await getEngineStatus(); setEngine(data);

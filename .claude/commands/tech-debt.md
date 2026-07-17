@@ -117,7 +117,7 @@ Sprint P2: 修复 Z 个 P2 问题 → git commit "fix(p2): ..."
 
 - 更新 `latest.json` 为本次结果
 - 输出总结：修复了 N 个，跳过 M 个，剩余 K 个
-- 提示可运行 `python retrain_optimized.py` 验证模型层修复
+- 提示运行 `python -m backend.scripts.training.retrain_multi_horizon --help` 验证训练入口
 
 ---
 
@@ -136,19 +136,20 @@ backend/
 │   ├── routes/            # FastAPI 路由
 │   └── datastore.py       # MARKET_ROOT 定义
 ├── scripts/               # 分析/诊断脚本（非生产）
-└── retrain_optimized.py   # 主训练脚本（可在根目录）
+└── scripts/{data,training,evaluation,artifacts}/
 ```
 
 ### 关键不变量
 1. **回测/实盘对等**：`simulate_ml_trend` 中的所有门控逻辑必须同步到 `_ml_trend_cycle` 和 `_ml_trend_paper_step`
-2. **路径规范**：所有脚本用 `from app.datastore import MARKET_ROOT`，禁止硬编码 `G:\` 路径
+2. **路径规范**：所有脚本从 `app.datastore` 导入用途对应的目录常量；训练仅写 supervised candidate，推理通过 active release 解析器读取；禁止硬编码盘符路径
 3. **特征排除**：`train_symbol()` 的 `exclude` set 必须包含 `'index'`（PSI=12.43 时序泄漏）
 4. **阈值来源**：入场阈值从 `thresholds.json` 读取，不在代码中硬编码数值
-5. **脚本归位**：分析/诊断脚本放 `backend/scripts/`，根目录只保留 `retrain_optimized.py`
+5. **脚本归位**：命令必须归入 `backend/scripts/{data,training,evaluation,artifacts}/`，`backend/` 根目录不保留 Python 命令
 
 ### 数据路径
-- `MARKET_ROOT` = `G:\5、金融交易`（`app/datastore.py` 定义，支持环境变量覆盖）
-- 模型：`MARKET_ROOT/models/{symbol}_{target}.pkl`
-- 阈值：`MARKET_ROOT/models/thresholds.json`
-- 特征：`MARKET_ROOT/features_ml/{symbol}_features.parquet`
-- 标注：`MARKET_ROOT/labels/{symbol}_5m_labels.parquet`
+- `MARKET_ROOT` 默认是 `G:\CandleMind\CandleMind_data`（由 `app/datastore.py` 定义，可用 `MARKET_DATA_DIR` 覆盖）
+- 当前监督模型 release：由 `<data-root>/models/current/ACTIVE` 指向 `models/releases/<release_id>`
+- 候选模型与阈值：写入 `models/candidates/supervised/<release_id>`，封存并验证后整体晋升
+- ML 特征：`FEATURES_ML_DIR / f'{symbol}_features.parquet'`，实际目录为 `processed/features_ml`
+- 标注：`LABELS_DIR / ...`，实际目录为 `processed/labels`
+- 回测与报告：分别使用 `BACKTEST_DIR`、`REPORTS_DIR`，实际目录位于 `experiments/`

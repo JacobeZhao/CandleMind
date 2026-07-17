@@ -20,6 +20,14 @@ from pathlib import Path
 from typing import Optional, List, Dict
 import warnings; warnings.filterwarnings('ignore')
 
+from .trend_decision import (
+    TrendDecisionParams,
+    TrendFeatureSnapshot,
+    TrendPositionSnapshot,
+    decide_entry,
+    decide_ml_exit,
+)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 策略参数
@@ -60,6 +68,7 @@ class MLTrendParams:
     # #4  时间加权出场阈值：入场早期阈值收严，临近超时回落到基础值
     time_weighted_exit:    bool  = True
     time_exit_bars:        int   = 12     # 假趋势12bar(1h)内解决，之后回落到基础阈值
+    time_exit_delta:       float = 0.05   # 入场早期 exit/reversal 阈值的对称偏移
     # #6  Regime 条件 Kelly：高波动/低 Hurst 时 Kelly 折半，理想 regime 略加
     regime_kelly:          bool  = True
     # #7  Hurst 硬门：hurst < hurst_entry_min 时禁止入场（均值回归市场）
@@ -111,11 +120,63 @@ class MLTrendParams:
             _coin_defaults = dict(risk_pct=0.0105)
         # kwargs 优先级高于 per-coin defaults
         merged = {**_coin_defaults, **kwargs}
+        entry_long_threshold = merged.pop('entry_long_threshold', lt)
+        entry_short_threshold = merged.pop('entry_short_threshold', st)
+        add_threshold = merged.pop(
+            'add_threshold', min(entry_long_threshold, entry_short_threshold)
+        )
         return cls(
-            entry_long_threshold  = lt,
-            entry_short_threshold = st,
-            add_threshold         = min(lt, st),
+            entry_long_threshold  = entry_long_threshold,
+            entry_short_threshold = entry_short_threshold,
+            add_threshold         = add_threshold,
             **merged,
+        )
+
+    @classmethod
+    def from_runtime_config(
+        cls,
+        symbol: str,
+        config: Optional[dict] = None,
+        *,
+        risk_pct: Optional[float] = None,
+    ) -> 'MLTrendParams':
+        """Build live/backtest parameters without introducing runtime defaults."""
+        config = config or {}
+        valid_fields = cls.__dataclass_fields__
+        overrides = {key: value for key, value in config.items() if key in valid_fields}
+        aliases = {
+            'ml_exit_threshold': ('exit_threshold', float),
+            'ml_reversal_threshold': ('reversal_threshold', float),
+            'add_min_atr': ('add_atr_dist', float),
+        }
+        for source, (target, converter) in aliases.items():
+            if source in config and target not in overrides:
+                overrides[target] = converter(config[source])
+        if risk_pct is not None:
+            overrides['risk_pct'] = float(risk_pct)
+        return cls.from_thresholds(symbol, **overrides)
+
+    def to_decision_params(self) -> TrendDecisionParams:
+        """Export the fields owned by the versioned pure decision contract."""
+        return TrendDecisionParams(
+            entry_long_threshold=self.entry_long_threshold,
+            entry_short_threshold=self.entry_short_threshold,
+            min_prob_gap=self.min_prob_gap,
+            min_prob_gap_large_cap=self.min_prob_gap_large_cap,
+            allowed_direction=self.allowed_direction,
+            short_extra_delta=self.short_extra_delta,
+            vol_gate=self.vol_gate,
+            ema_align_gate=self.ema_align_gate,
+            hurst_gate=self.hurst_gate,
+            hurst_entry_min=self.hurst_entry_min,
+            monthly_trend_filter=self.monthly_trend_filter,
+            trend_bias_delta=self.trend_bias_delta,
+            exit_threshold=self.exit_threshold,
+            reversal_threshold=self.reversal_threshold,
+            time_weighted_exit=self.time_weighted_exit,
+            time_exit_bars=self.time_exit_bars,
+            time_exit_delta=self.time_exit_delta,
+            min_hold_bars=self.min_hold_bars,
         )
 
 
@@ -166,13 +227,34 @@ def _kelly_mult(prob: float, win_mult: float = 2.0,
     return float(np.clip(f * kelly_frac / norm, 0.3, 1.5))
 
 
+def _initial_stop_price(
+    entry_price: float,
+    atr: float,
+    direction: int,
+    initial_stop_mult: float,
+) -> float:
+    """Return the initial risk stop shared by all execution modes."""
+    return float(entry_price) - float(initial_stop_mult) * float(atr) * int(direction)
+
+
+def _add_tranche_qty(
+    initial_qty: float,
+    add_size_frac: float,
+    completed_adds: int,
+) -> float:
+    """Size the next add from the initial tranche; adds excludes the entry."""
+    return float(initial_qty) * float(add_size_frac) ** (int(completed_adds) + 1)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 数据加载 + 模型打分
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_scored_bars(symbol: str,
                      start: Optional[str] = None,
-                     end:   Optional[str] = None) -> pd.DataFrame:
+                     end:   Optional[str] = None,
+                     include_multi_horizon: bool = False,
+                     multi_horizon_variant: Optional[str] = None) -> pd.DataFrame:
     """
     加载 labels parquet（含 OHLCV + ATR + 标注）并用已训练模型打分，
     返回每根 5m bar 的 long_prob / short_prob。
@@ -180,15 +262,18 @@ def load_scored_bars(symbol: str,
     注意：使用全量训练模型打分，回测存在一定 in-sample 偏差，
     但 CPCV AUC=0.86 证明信号有效，偏差可接受。
     """
-    from ..datastore import MARKET_ROOT
+    from ..datastore import FEATURES_ML_DIR, LABELS_DIR
     from .trend_predictor import load_model
 
+    if include_multi_horizon and not multi_horizon_variant:
+        raise ValueError('multi_horizon_variant is required when multi-horizon scoring is enabled')
+
     # 1. 加载 label parquet（有 OHLCV + ATR + 标注）
-    label_path = MARKET_ROOT / 'labels' / f'{symbol}_5m_labels.parquet'
+    label_path = LABELS_DIR / f'{symbol}_5m_labels.parquet'
     bars = pd.read_parquet(label_path)
 
     # 2. 加载 feature parquet，merge 到 bars
-    feat_path = MARKET_ROOT / 'features_ml' / f'{symbol}_features.parquet'
+    feat_path = FEATURES_ML_DIR / f'{symbol}_features.parquet'
     feats = pd.read_parquet(feat_path)
     bars = bars.merge(feats, on='open_time', how='inner', suffixes=('', '_feat'))
 
@@ -220,6 +305,29 @@ def load_scored_bars(symbol: str,
             print(f'  WARN: 模型 {symbol}_{target} 未找到，prob 填 0.33')
             bars[col] = 0.33
 
+    if include_multi_horizon:
+        # Research-only V2 models expose independent horizon probabilities.
+        for side in ('long', 'short'):
+            for horizon in ('30m', '1h', '4h'):
+                target = f'{side}_label_{horizon}_{multi_horizon_variant}'
+                col = f'{side}_prob_{horizon}'
+                try:
+                    bundle = load_model(symbol, target)
+                    X = bars.reindex(columns=bundle.feature_cols, fill_value=0.0)
+                    X = X.fillna(0).astype(np.float32)
+                    bars[col] = bundle.predict_proba(X)
+                except FileNotFoundError as exc:
+                    raise FileNotFoundError(
+                        f'multi-horizon model missing: {symbol}_{target}'
+                    ) from exc
+
+        long_horizons = [f'long_prob_{h}' for h in ('30m', '1h', '4h')]
+        short_horizons = [f'short_prob_{h}' for h in ('30m', '1h', '4h')]
+        bars['long_prob_agg'] = bars[long_horizons].mean(axis=1)
+        bars['short_prob_agg'] = bars[short_horizons].mean(axis=1)
+        bars['long_agreement'] = bars[long_horizons].gt(0.55).mean(axis=1)
+        bars['short_agreement'] = bars[short_horizons].gt(0.55).mean(axis=1)
+
     return bars.reset_index(drop=True)
 
 
@@ -227,18 +335,17 @@ def load_scored_bars(symbol: str,
 # 核心模拟引擎
 # ══════════════════════════════════════════════════════════════════════════════
 
-_LARGE_CAP = {'BTCUSDT', 'ETHUSDT', 'BNBUSDT'}
-
-
 def simulate_ml_trend(bars: pd.DataFrame,
                       params: MLTrendParams,
                       symbol: str = '') -> List[TradeRecord]:
     """
     逐 bar 模拟 ML 趋势策略，返回交易列表。
-    bars 必须包含：open_time, close, atr, long_prob, short_prob
+    bars 必须包含：open_time, open, high, low, close, atr, long_prob, short_prob。
+    收盘特征只生成指令；信号指令在下一根 bar 的 open 执行。
     改进 #1/#3/#4/#6：vol_gate / ema_align_gate / time_weighted_exit / regime_kelly
     """
     p = params
+    decision_params = p.to_decision_params()
     trades: List[TradeRecord] = []
 
     # 仓位状态
@@ -255,7 +362,20 @@ def simulate_ml_trend(bars: pd.DataFrame,
     adds          = 0
     last_add_ref  = 0.0
     entry_prob    = 0.0
+    entry_bar_idx = -1
+    last_same_prob = 0.0
 
+    # 上一根 bar 收盘后生成、等待当前 bar 开盘执行的指令。
+    pending_kind      = None
+    pending_direction = 0
+    pending_prob      = 0.0
+    pending_atr       = 0.0
+    pending_vol_r     = 1.0
+    pending_hurst     = 0.99
+
+    open_arr  = bars['open'].values
+    high_arr  = bars['high'].values
+    low_arr   = bars['low'].values
     close_arr = bars['close'].values
     atr_arr   = bars['atr'].values
     lp_arr    = bars['long_prob'].values
@@ -274,7 +394,42 @@ def simulate_ml_trend(bars: pd.DataFrame,
     else:
         monthly_sma = np.full(len(close_arr), np.nan)
 
+    def append_trade(exit_time_value, exit_price_value, reason, exit_prob_value):
+        # 保持原有手续费、滑点和资金费计算，仅改成交时点与成交价格。
+        init_risk = abs(entry_price - initial_stop) * max(initial_qty, 1e-8)
+        if init_risk > 0:
+            raw_pnl      = (exit_price_value - avg_price) * direction * qty
+            entry_fee    = avg_price * qty * p.fee
+            exit_fee     = exit_price_value * qty * p.fee
+            slip_cost    = (avg_price + exit_price_value) * p.slippage * qty
+            bars_held_n  = int((int(exit_time_value) - int(entry_time)) / (5 * 60_000))
+            funding_cost = (p.funding_rate_8h * (bars_held_n / 96.0)
+                            * avg_price * qty) if direction == 1 else 0.0
+            total_cost   = entry_fee + exit_fee + slip_cost + funding_cost
+            pnl_r        = (raw_pnl - total_cost) / init_risk
+        else:
+            pnl_r = 0.0
+
+        trades.append(TradeRecord(
+            entry_time   = int(entry_time),
+            exit_time    = int(exit_time_value),
+            direction    = direction,
+            entry_price  = float(entry_price),
+            exit_price   = float(exit_price_value),
+            initial_stop = float(initial_stop),
+            avg_price    = float(avg_price),
+            final_qty    = float(qty),
+            pnl_r        = round(float(pnl_r), 4),
+            reason       = reason,
+            adds         = adds,
+            entry_prob   = round(float(entry_prob), 4),
+            exit_prob    = round(float(exit_prob_value), 4),
+        ))
+
     for i in range(len(bars)):
+        o   = float(open_arr[i])
+        h   = float(high_arr[i])
+        l   = float(low_arr[i])
         c   = close_arr[i]
         atr = max(atr_arr[i], 1e-8)
         lp  = lp_arr[i]
@@ -284,187 +439,147 @@ def simulate_ml_trend(bars: pd.DataFrame,
         vol_r     = float(vol_regime_arr[i]) if vol_regime_arr is not None else 1.0
         ema_align = float(ema_align_arr[i])  if ema_align_arr  is not None else 0.0
         hurst     = float(hurst_arr[i])      if hurst_arr      is not None else 0.99
+        sma_now = monthly_sma[i]
+        snapshot = TrendFeatureSnapshot(
+            long_prob=float(lp),
+            short_prob=float(sp),
+            close=float(c),
+            vol_regime=vol_r,
+            ema_align=ema_align,
+            hurst=hurst,
+            monthly_sma=None if np.isnan(sma_now) else float(sma_now),
+        )
 
-        if not in_pos:
-            # ── 入场判断 ──────────────────────────────────────────────────
-            gap_req = p.min_prob_gap_large_cap if symbol in _LARGE_CAP else p.min_prob_gap
+        exited_this_bar = False
+        action = pending_kind
+        pending_kind = None
 
-            # #8 月度趋势偏差：反趋势方向阈值抬高
-            sma_now = monthly_sma[i]
-            if p.monthly_trend_filter and not np.isnan(sma_now):
-                above_sma    = c > sma_now
-                eff_long_thr  = p.entry_long_threshold + (p.trend_bias_delta if not above_sma else 0.0)
-                eff_short_thr = (p.entry_short_threshold + p.short_extra_delta
-                                 + (p.trend_bias_delta if above_sma else 0.0))
-            else:
-                eff_long_thr  = p.entry_long_threshold
-                eff_short_thr = p.entry_short_threshold + p.short_extra_delta
+        # ── 开盘阶段：先处理已存在仓位的跳空止损，再执行上一收盘指令 ──
+        if in_pos:
+            gap_stop_hit = ((direction == 1 and o <= stop) or
+                            (direction == -1 and o >= stop))
+            if gap_stop_hit:
+                append_trade(ts, o, 'stop', last_same_prob)
+                in_pos = False
+                direction = 0
+                exited_this_bar = True
+            elif action in ('ml_exit', 'ml_reversal', 'max_adverse'):
+                append_trade(ts, o, action, pending_prob)
+                in_pos = False
+                direction = 0
+                exited_this_bar = True
+            elif action == 'add':
+                add_qty   = _add_tranche_qty(initial_qty, p.add_size_frac, adds)
+                avg_price = (avg_price * qty + o * add_qty) / (qty + add_qty)
+                qty      += add_qty
+                last_add_ref = o
+                adds     += 1
+        elif action == 'entry':
+            direction    = pending_direction
+            in_pos       = True
+            entry_time   = int(ts)
+            entry_bar_idx = i
+            entry_price  = o
+            stop         = _initial_stop_price(
+                o, pending_atr, direction, p.initial_stop_mult
+            )
+            initial_stop = stop
+            peak         = o
+            avg_price    = o
+            adds         = 0
+            last_add_ref = o
+            entry_prob   = pending_prob
+            last_same_prob = pending_prob
 
-            can_long  = (p.allowed_direction >= 0 and
-                         lp >= eff_long_thr and
-                         lp - sp >= gap_req)
-            can_short = (p.allowed_direction <= 0 and
-                         sp >= eff_short_thr and
-                         sp - lp >= gap_req)
-
-            # 改进 #1：高波动 regime 门（vol_regime == 2 = 高波动三分位）
-            if p.vol_gate and vol_r >= 2.0:
-                can_long = False
-                can_short = False
-
-            # 改进 #3：EMA 对齐门（要求价格结构与信号一致）
-            if p.ema_align_gate:
-                if can_long  and ema_align < 1.0:
-                    can_long = False
-                if can_short and ema_align > -1.0:
-                    can_short = False
-
-            # #7 Hurst 硬门：确认均值回归时禁止趋势入场
-            if p.hurst_gate and hurst < p.hurst_entry_min:
-                can_long = False
-                can_short = False
-
-            if can_long or can_short:
-                direction    = 1 if can_long else -1
-                prob_now     = lp if direction == 1 else sp
-                in_pos       = True
-                entry_time   = ts
-                entry_price  = c
-                stop         = c - p.initial_stop_mult * atr * direction
-                initial_stop = stop
-                peak         = c
-                avg_price    = c
-                adds         = 0
-                last_add_ref = c
-                entry_prob   = prob_now
-                # initial_qty 在 regime_kelly 分支后赋值（见下方）
-
-                # 改进 #6：Regime 条件 Kelly
-                base_kelly = _kelly_mult(prob_now, p.win_mult, p.kelly_frac)
-                if p.regime_kelly:
-                    if vol_r >= 2.0:
-                        regime_mult = 0.6   # 高波动减仓（虽已被 vol_gate 拦，保留作加仓折扣）
-                    elif hurst < 0.70:
-                        regime_mult = 0.7   # 低 Hurst（均值回归迹象）减仓
-                    elif vol_r == 0 and hurst > 0.90:
-                        regime_mult = 1.1   # 理想 regime：低波动 + 强持续
-                    else:
-                        regime_mult = 1.0
-                    qty = base_kelly * regime_mult
+            base_kelly = _kelly_mult(pending_prob, p.win_mult, p.kelly_frac)
+            if p.regime_kelly:
+                if pending_vol_r >= 2.0:
+                    regime_mult = 0.6
+                elif pending_hurst < 0.70:
+                    regime_mult = 0.7
+                elif pending_vol_r == 0 and pending_hurst > 0.90:
+                    regime_mult = 1.1
                 else:
-                    qty = base_kelly
-                initial_qty = qty   # 记录首仓 Kelly 倍率，pnl_r 归一化用
+                    regime_mult = 1.0
+                qty = base_kelly * regime_mult
+            else:
+                qty = base_kelly
+            initial_qty = qty
+
+        # ── 盘中阶段：当前 open 之后的 high/low 才能触发当前仓位止损 ──
+        if in_pos:
+            intrabar_stop_hit = ((direction == 1 and l <= stop) or
+                                 (direction == -1 and h >= stop))
+            if intrabar_stop_hit:
+                append_trade(ts, stop, 'stop', last_same_prob)
+                in_pos = False
+                direction = 0
+                exited_this_bar = True
+            else:
+                # 新 trailing stop 在本 bar 完成后可知，从下一 bar 起生效。
+                # 这避免用同一根 OHLC 同时假设有利极值先于不利极值。
+                if direction == 1:
+                    peak    = max(peak, h)
+                    new_stp = peak - p.atr_trail * atr
+                    stop    = max(stop, new_stp)
+                else:
+                    peak    = min(peak, l)
+                    new_stp = peak + p.atr_trail * atr
+                    stop    = min(stop, new_stp)
+
+        if exited_this_bar:
+            continue
+
+        # ── 收盘阶段：只生成下一根开盘可执行的指令 ────────────────────────
+        if not in_pos:
+            intent = decide_entry(symbol, snapshot, decision_params)
+            if intent.action == 'entry':
+                pending_kind      = 'entry'
+                pending_direction = intent.direction
+                pending_prob      = intent.probability
+                pending_atr       = atr
+                pending_vol_r     = vol_r
+                pending_hurst     = hurst
 
         else:
-            # ── 持仓管理 ─────────────────────────────────────────────────
             same_prob = lp if direction == 1 else sp
-            opp_prob  = sp if direction == 1 else lp
+            bars_held = i - entry_bar_idx + 1
+            ml_intent = decide_ml_exit(
+                snapshot,
+                TrendPositionSnapshot(direction=direction, bars_held=bars_held),
+                decision_params,
+            )
 
-            # 更新 peak + trailing stop（只向有利方向移动）
-            if direction == 1:
-                peak    = max(peak, c)
-                new_stp = peak - p.atr_trail * atr
-                stop    = max(stop, new_stp)
-            else:
-                peak    = min(peak, c)
-                new_stp = peak + p.atr_trail * atr
-                stop    = min(stop, new_stp)
-
-            # 改进 #4：时间加权出场阈值（入场初期更容易出场抓假趋势，后期回落）
-            # 设计：early → exit_threshold+0.05（更低=更容易触发），late → baseline
-            # 即 same_prob < (0.35+0.05=0.40) 在入场初期就可以退出
-            if p.time_weighted_exit:
-                bars_held = int((int(ts) - int(entry_time)) / (5 * 60_000))
-                age_frac  = min(1.0, bars_held / max(1, p.time_exit_bars))
-                # 早期阈值升高（更容易出场抓假趋势），随持仓时间衰减回基础值
-                dyn_exit_thr = p.exit_threshold    + 0.05 * (1.0 - age_frac)
-                # 早期反转阈值降低（更容易触发反转出场）
-                dyn_rev_thr  = p.reversal_threshold - 0.05 * (1.0 - age_frac)
-            else:
-                dyn_exit_thr = p.exit_threshold
-                dyn_rev_thr  = p.reversal_threshold
-
-            # 出场检查（优先级：止损 > 反向ML > ML早退）
-            stop_hit    = (direction == 1 and c <= stop) or \
-                          (direction == -1 and c >= stop)
-            ml_reversal = opp_prob  >= dyn_rev_thr
-            ml_exit     = same_prob <  dyn_exit_thr
-            # min_hold_bars：前N bar禁止ML早退（止损仍有效），避免极短持仓被成本吃掉
-            if p.min_hold_bars > 0 and not stop_hit:
-                bh_chk = int((int(ts) - int(entry_time)) / (5 * 60_000))
-                if bh_chk < p.min_hold_bars:
-                    ml_reversal = False
-                    ml_exit     = False
-
-            # #9 最大逆境 R 保护：浮亏过深时强制平仓（优先于 ML 信号，低于止损）
             max_adverse_hit = False
-            if p.max_adverse_r > 0 and not stop_hit:
+            if p.max_adverse_r > 0:
                 init_r = abs(entry_price - initial_stop) * max(initial_qty, 1e-8)
                 if init_r > 0:
                     raw_float = (c - avg_price) * direction * qty
                     if raw_float / init_r < -p.max_adverse_r:
                         max_adverse_hit = True
 
-            reason     = None
-            exit_price = c
-            if stop_hit:
-                reason     = 'stop'
-                exit_price = stop
-            elif max_adverse_hit:
-                reason = 'max_adverse'
-            elif ml_reversal:
-                reason = 'ml_reversal'
-            elif ml_exit:
-                reason = 'ml_exit'
+            if max_adverse_hit:
+                pending_kind = 'max_adverse'
+            elif ml_intent.action == 'ml_reversal':
+                pending_kind = 'ml_reversal'
+            elif ml_intent.action == 'ml_exit':
+                pending_kind = 'ml_exit'
+            elif (adds < p.max_adds and
+                  same_prob >= p.add_threshold and
+                  abs(c - last_add_ref) >= p.add_atr_dist * atr):
+                pending_kind = 'add'
 
-            if reason:
-                # init_risk_dollars = 首仓价格距离 × 首仓 Kelly 倍率
-                # 用 initial_qty 作分母，避免加仓后 pnl_r 随 qty 膨胀失真
-                init_risk = abs(entry_price - initial_stop) * max(initial_qty, 1e-8)
-                if init_risk > 0:
-                    raw_pnl      = (exit_price - avg_price) * direction * qty
-                    # 双边手续费（入场+出场各一次）
-                    entry_fee    = avg_price  * qty * p.fee
-                    exit_fee     = exit_price * qty * p.fee
-                    # 双边滑点（入场买贵/卖便宜，出场卖便宜/买贵）
-                    slip_cost    = (avg_price + exit_price) * p.slippage * qty
-                    # 资金费率：多头付，空头0（保守，适合多头偏多的牛市）
-                    bars_held_n  = int((int(ts) - int(entry_time)) / (5 * 60_000))
-                    funding_cost = (p.funding_rate_8h * (bars_held_n / 96.0)
-                                    * avg_price * qty) if direction == 1 else 0.0
-                    total_cost   = entry_fee + exit_fee + slip_cost + funding_cost
-                    pnl_r        = (raw_pnl - total_cost) / init_risk
-                else:
-                    pnl_r = 0.0
+            if pending_kind is not None:
+                pending_prob = same_prob
+            last_same_prob = same_prob
 
-                trades.append(TradeRecord(
-                    entry_time   = entry_time,
-                    exit_time    = ts,
-                    direction    = direction,
-                    entry_price  = entry_price,
-                    exit_price   = exit_price,
-                    initial_stop = initial_stop,
-                    avg_price    = avg_price,
-                    final_qty    = qty,
-                    pnl_r        = round(pnl_r, 4),
-                    reason       = reason,
-                    adds         = adds,
-                    entry_prob   = round(entry_prob, 4),
-                    exit_prob    = round(same_prob, 4),
-                ))
-                in_pos    = False
-                direction = 0
-                continue
-
-            # 加仓检查
-            if (adds < p.max_adds and
-                    same_prob >= p.add_threshold and
-                    abs(c - last_add_ref) >= p.add_atr_dist * atr):
-                add_qty   = qty * p.add_size_frac ** adds
-                avg_price = (avg_price * qty + c * add_qty) / (qty + add_qty)
-                qty      += add_qty
-                last_add_ref = c
-                adds     += 1
+    if in_pos and len(bars) > 0:
+        append_trade(
+            ts_arr[-1],
+            float(close_arr[-1]),
+            'end',
+            last_same_prob,
+        )
 
     return trades
 

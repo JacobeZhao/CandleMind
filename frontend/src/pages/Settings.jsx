@@ -19,7 +19,7 @@ export default function Settings() {
 
   const [form, setForm] = useState({
     api_key_test: "", api_secret_test: "", api_key_main: "", api_secret_main: "",
-    testnet: true, symbol: "BTCUSDT", interval: "15m", proxy_url: "",
+    proxy_url: "",
   });
   const [showKey,    setShowKey]    = useState(false);
   const [saving,     setSaving]     = useState(false);
@@ -49,8 +49,7 @@ export default function Settings() {
     getSettings().then(({ data }) => {
       setTestKeySet(data.test_key_set); setMainKeySet(data.main_key_set);
       setForm(f => ({
-        ...f, testnet: data.testnet, symbol: data.symbol,
-        interval: data.interval, proxy_url: data.proxy_url || "",
+        ...f, proxy_url: data.proxy_url || "",
       }));
     }).catch(() => {});
     listAIProviders().then(({ data }) => setProviders(data)).catch(() => {});

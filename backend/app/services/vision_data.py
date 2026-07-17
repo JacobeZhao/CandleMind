@@ -81,8 +81,8 @@ def fetch_vision(symbol: str, interval: str, start: str, end: str,
                     d += timedelta(days=1)
             cur = date(y + (m // 12), (m % 12) + 1, 1)
         # 规整 + 过滤区间 + 排序，写成 12 列数组（与 fetch_historical 缓存一致）
-        s_ms = int(datetime.strptime(start, "%Y-%m-%d").timestamp() * 1000)
-        e_ms = int(datetime.strptime(end, "%Y-%m-%d").timestamp() * 1000)
+        s_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
+        e_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000)
         out = []
         for r in rows:
             ot = _norm_ms(r[0])

@@ -27,15 +27,81 @@ _THRESHOLDS_CACHE: Optional[Dict] = None
 # Cache is valid for the duration of one 5-minute bar; rebuilt only when bar timestamp advances.
 _FEAT_CACHE: Dict[str, tuple] = {}
 
+BAR_INTERVAL_SECONDS = 5 * 60
+MAX_FEATURE_AGE_SECONDS = 15 * 60
+
+
+def _utc_now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz='UTC')
+
+
+def _normalize_open_times(values: pd.Series) -> pd.Series:
+    """Normalize datetime-like or epoch-valued open times to UTC."""
+    series = pd.Series(values, index=values.index)
+    if pd.api.types.is_datetime64_any_dtype(series.dtype):
+        return pd.to_datetime(series, utc=True, errors='coerce')
+
+    numeric = pd.to_numeric(series, errors='coerce')
+    normalized = pd.Series(pd.NaT, index=series.index, dtype='datetime64[ns, UTC]')
+    magnitude = numeric.abs()
+    units = (
+        ('ns', magnitude >= 1e17),
+        ('us', (magnitude >= 1e14) & (magnitude < 1e17)),
+        ('ms', (magnitude >= 1e11) & (magnitude < 1e14)),
+        ('s', magnitude < 1e11),
+    )
+    for unit, mask in units:
+        if mask.any():
+            normalized.loc[mask] = pd.to_datetime(
+                numeric.loc[mask], unit=unit, utc=True, errors='coerce'
+            )
+
+    datetime_mask = series.notna() & numeric.isna()
+    if datetime_mask.any():
+        normalized.loc[datetime_mask] = pd.to_datetime(
+            series.loc[datetime_mask], utc=True, errors='coerce'
+        )
+    return normalized
+
+
+def _normalize_timestamp(value) -> Optional[pd.Timestamp]:
+    normalized = _normalize_open_times(pd.Series([value]))
+    timestamp = normalized.iloc[0]
+    return None if pd.isna(timestamp) else timestamp
+
+
+def _completed_5m_open(now: Optional[pd.Timestamp] = None) -> pd.Timestamp:
+    current = _normalize_timestamp(_utc_now() if now is None else now)
+    if current is None:
+        raise ValueError('Current UTC time is invalid')
+    return current.floor('5min') - pd.Timedelta(seconds=BAR_INTERVAL_SECONDS)
+
+
+def _completed_feature_rows(
+    frame: pd.DataFrame,
+    completed_boundary: pd.Timestamp,
+) -> pd.DataFrame:
+    if 'open_time' not in frame.columns:
+        raise ValueError('Feature frame has no open_time column')
+    completed = frame.copy()
+    completed['open_time'] = _normalize_open_times(completed['open_time'])
+    completed = completed.dropna(subset=['open_time'])
+    completed = completed[completed['open_time'] <= completed_boundary]
+    return (
+        completed.drop_duplicates(subset=['open_time'], keep='last')
+        .sort_values('open_time')
+        .reset_index(drop=True)
+    )
+
 def _load_thresholds() -> Dict:
     """读取 Phase 5 生成的 thresholds.json，缓存到模块级变量。"""
     global _THRESHOLDS_CACHE
     if _THRESHOLDS_CACHE is not None:
         return _THRESHOLDS_CACHE
     try:
-        from ..datastore import MARKET_ROOT
+        from ..datastore import resolve_current_model_release
         import json
-        p = MARKET_ROOT / 'models' / 'thresholds.json'
+        p = resolve_current_model_release() / 'thresholds.json'
         if p.exists():
             with open(p, encoding='utf-8') as f:
                 _THRESHOLDS_CACHE = json.load(f)
@@ -74,11 +140,14 @@ class SignalResult:
     short_prob:      float = 0.0
     action:          str   = 'observe'    # 'long' | 'short' | 'observe'
     confidence:      float = 0.0
-    pos_size_mult:   float = 1.0
+    pos_size_mult:   float = 0.0
     threshold_used:  float = 0.55
     model_available: bool  = False
     drift_warning:   bool  = False        # PSI 超阈值时置 True
     proxy_model:     bool  = False        # BTC-proxy model; treat signal as exploratory
+    feature_timestamp: Optional[str] = None
+    data_age_seconds: Optional[float] = None
+    feature_fresh:   bool  = False
     note:            str   = ''
 
     @property
@@ -192,8 +261,10 @@ def check_drift(
 
 def _current_5m_ts() -> int:
     """Return current UTC time floored to 5-minute boundary, in seconds."""
-    import time
-    return (int(time.time()) // 300) * 300
+    now = _normalize_timestamp(_utc_now())
+    if now is None:
+        raise ValueError('Current UTC time is invalid')
+    return int(now.floor('5min').timestamp())
 
 
 def _latest_features(symbol: str, lookback_days: int = 30) -> Optional[pd.DataFrame]:
@@ -208,14 +279,19 @@ def _latest_features(symbol: str, lookback_days: int = 30) -> Optional[pd.DataFr
 
     try:
         from .feature_builder import build_features
-        import datetime
 
-        end   = datetime.datetime.utcnow().strftime('%Y-%m-%d')
-        start = (datetime.datetime.utcnow() -
-                 datetime.timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        now = _normalize_timestamp(_utc_now())
+        if now is None:
+            return None
+        completed_boundary = _completed_5m_open(now)
+        start = (now - pd.Timedelta(days=lookback_days)).date().isoformat()
+        end = (now + pd.Timedelta(days=1)).date().isoformat()
 
         df = build_features(symbol, start=start, end=end)
-        if df is None or len(df) < 50:
+        if df is None:
+            return None
+        df = _completed_feature_rows(df, completed_boundary)
+        if len(df) < 50:
             return None
         _FEAT_CACHE[symbol] = (bar_ts, df)
         return df
@@ -236,6 +312,7 @@ def get_ml_signal(
     lookback_days:      int   = 30,
     check_drift_flag:   bool  = True,
     threshold_mode:     str   = 'recommended',
+    max_data_age_seconds: float = MAX_FEATURE_AGE_SECONDS,
 ) -> SignalResult:
     """
     计算当前 ML 信号。若模型未加载返回 observe。
@@ -243,7 +320,7 @@ def get_ml_signal(
     threshold_mode: 'recommended' | 'thresh_f1' | 'thresh_p65'
     """
     from .trend_predictor import load_model, predict_proba as _predict
-    from ..datastore import MARKET_ROOT
+    from ..datastore import FEATURES_ML_DIR
 
     if long_threshold is None:
         long_threshold  = get_threshold(symbol, 'long_label',  threshold_mode)
@@ -273,6 +350,28 @@ def get_ml_signal(
         return result
 
     feat_row = feat_df.iloc[-1]
+    feature_ts = _normalize_timestamp(feat_row.get('open_time'))
+    now = _normalize_timestamp(_utc_now())
+    if feature_ts is None or now is None:
+        result.note = 'Feature timestamp is invalid'
+        return result
+
+    result.feature_timestamp = feature_ts.isoformat().replace('+00:00', 'Z')
+    result.data_age_seconds = round(float((now - feature_ts).total_seconds()), 3)
+    completed_boundary = _completed_5m_open(now)
+    if feature_ts > completed_boundary:
+        result.note = (
+            'Feature bar is incomplete: '
+            f'{result.feature_timestamp} > {completed_boundary.isoformat()}'
+        )
+        return result
+    if result.data_age_seconds > float(max_data_age_seconds):
+        result.note = (
+            f'Feature data is stale: age={result.data_age_seconds:.0f}s '
+            f'> max={float(max_data_age_seconds):.0f}s'
+        )
+        return result
+    result.feature_fresh = True
 
     try:
         lp = _predict(long_bundle,  feat_row)
@@ -287,7 +386,7 @@ def get_ml_signal(
 
     # 概念漂移检测（PSI）
     if check_drift_flag:
-        ref_path = MARKET_ROOT / 'features_ml' / f'{symbol}_ref_stats.parquet'
+        ref_path = FEATURES_ML_DIR / f'{symbol}_ref_stats.parquet'
         psi_dict = check_drift(long_bundle, feat_df.tail(500), ref_path)
         if psi_dict:
             max_psi = max(psi_dict.values())
@@ -357,7 +456,7 @@ def build_reference_stats(symbol: str, start: str = '2022-01-01',
     应在训练完成后调用一次。
     """
     from .feature_builder import build_features
-    from ..datastore import MARKET_ROOT
+    from ..datastore import FEATURES_ML_DIR
 
     print(f'  [{symbol}] 构建参考特征统计...')
     df = build_features(symbol, start=start, end=end)
@@ -365,7 +464,7 @@ def build_reference_stats(symbol: str, start: str = '2022-01-01',
         print(f'  ERR: 无法构建参考统计')
         return
 
-    out = MARKET_ROOT / 'features_ml'
+    out = FEATURES_ML_DIR
     out.mkdir(exist_ok=True)
     df.to_parquet(out / f'{symbol}_ref_stats.parquet', index=False)
     print(f'  参考统计保存 → {out / (symbol + "_ref_stats.parquet")}')

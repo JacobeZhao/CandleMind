@@ -9,23 +9,44 @@ import pandas as pd
 from .ml_strategy import MLTrendParams, backtest_ml_trend
 from .datafeed import load_klines
 
+_INVOL_LOOKBACK_DAYS = 90
 
-def _realized_vol(symbol, start, end) -> float:
+
+def _realized_vol(symbol, start, end) -> float | None:
     """日线收益率波动率（vol 比收益持久，可作前向配仓依据）。"""
     try:
         df = load_klines(symbol, "1d", start, end)
         v = float(df["close"].pct_change().dropna().std())
-        return v if np.isfinite(v) and v > 0 else 1e-9   # nan/0 → 兜底
+        return v if np.isfinite(v) and v > 0 else None
     except Exception:
-        return 1e-9
+        return None
+
+
+def _equal_weights(symbols) -> dict:
+    if not symbols:
+        return {}
+    weight = 1.0 / len(symbols)
+    return {symbol: weight for symbol in symbols}
 
 
 def _alloc_weights(symbols, start, end, mode) -> dict:
-    if mode == "invvol":
-        inv = {s: 1.0 / _realized_vol(s, start, end) for s in symbols}
-        tot = sum(inv.values())
-        return {s: inv[s] / tot for s in symbols}
-    return {s: 1.0 / len(symbols) for s in symbols}
+    if not symbols or mode != "invvol":
+        return _equal_weights(symbols)
+
+    backtest_start = pd.Timestamp(start).normalize()
+    history_start = (
+        backtest_start - pd.Timedelta(days=_INVOL_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d")
+    history_end = (backtest_start - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    vols = {symbol: _realized_vol(symbol, history_start, history_end) for symbol in symbols}
+    if any(vol is None or not np.isfinite(vol) or vol <= 0 for vol in vols.values()):
+        return _equal_weights(symbols)
+
+    inverse = {symbol: 1.0 / vol for symbol, vol in vols.items()}
+    total = sum(inverse.values())
+    if not np.isfinite(total) or total <= 0:
+        return _equal_weights(symbols)
+    return {symbol: value / total for symbol, value in inverse.items()}
 
 
 def run_portfolio_backtest(symbols, start, end, capital=10000,

@@ -1,10 +1,13 @@
+import asyncio
+
 from fastapi import WebSocket
 from loguru import logger
 
 
 class ConnectionManager:
-    def __init__(self):
+    def __init__(self, send_timeout: float = 5.0):
         self.active: list[WebSocket] = []
+        self.send_timeout = send_timeout
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
@@ -12,21 +15,35 @@ class ConnectionManager:
         logger.info(f"WS connected, total={len(self.active)}")
 
     def disconnect(self, ws: WebSocket):
-        self.active.discard(ws) if hasattr(self.active, "discard") else None
-        if ws in self.active:
+        try:
             self.active.remove(ws)
+        except ValueError:
+            pass
         logger.info(f"WS disconnected, total={len(self.active)}")
 
     async def broadcast(self, payload: dict):
-        dead = []
-        for ws in self.active:
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            if ws in self.active:
-                self.active.remove(ws)
+        connections = tuple(self.active)
+        if not connections:
+            return
+
+        results = await asyncio.gather(
+            *(self._send(ws, payload) for ws in connections)
+        )
+        failed_ids = {
+            id(ws) for ws, succeeded in zip(connections, results) if not succeeded
+        }
+        if failed_ids:
+            self.active[:] = [ws for ws in self.active if id(ws) not in failed_ids]
+
+    async def _send(self, ws: WebSocket, payload: dict) -> bool:
+        try:
+            await asyncio.wait_for(ws.send_json(payload), timeout=self.send_timeout)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(f"WS send failed ({type(exc).__name__}: {exc})")
+            return False
 
 
 manager = ConnectionManager()

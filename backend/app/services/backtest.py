@@ -197,7 +197,62 @@ def run_backtest(df: pd.DataFrame,
                  leverage: int = 1,
                  risk_pct: float = 0.01,
                  sl_pct: float = 0.015,
-                 tp_pct: float = 0.03) -> dict:
+                 tp_pct: float = 0.03,
+                 fee_rate: float = 0.0004,
+                 slippage_rate: float = 0.0005,
+                 *,
+                 taker_fee: float | None = None,
+                 maker_fee: float = 0.0002,
+                 fee_mult: float = 1.0,
+                 use_funding: bool = False,
+                 funding_rate: float = 0.0,
+                 exec_mode: str = "market",
+                 model_liq: bool = False) -> dict:
+    """Run a bar backtest with signals executed at the next bar's open.
+
+    Position quantity is risk-sized and capped by available notional
+    (``capital * leverage``). Leverage never multiplies PnL or costs.
+
+    ``fee_rate`` is the legacy taker-fee argument. ``taker_fee`` takes
+    precedence when supplied. This OHLC engine cannot prove maker fills, so it
+    applies taker fees for every execution and discloses that assumption.
+    """
+
+    effective_taker_fee = fee_rate if taker_fee is None else taker_fee
+    non_negative_values = {
+        "fee_rate": effective_taker_fee,
+        "maker_fee": maker_fee,
+        "slippage_rate": slippage_rate,
+        "fee_mult": fee_mult,
+    }
+    if any(not np.isfinite(value) or value < 0
+           for value in non_negative_values.values()):
+        raise ValueError("fees, slippage_rate, and fee_mult must be non-negative")
+    if not np.isfinite(funding_rate):
+        raise ValueError("funding_rate must be finite")
+    if not np.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValueError("initial_capital must be positive")
+    if not np.isfinite(leverage) or leverage <= 0:
+        raise ValueError("leverage must be positive")
+
+    applied_fee_rate = effective_taker_fee * fee_mult
+    requested_exec_mode = str(exec_mode).lower()
+    execution = {
+        "signal_timing": "next_open",
+        "requested_mode": requested_exec_mode,
+        "fee_liquidity": "taker",
+        "taker_fee_rate": effective_taker_fee,
+        "maker_fee_rate": maker_fee,
+        "applied_fee_rate": applied_fee_rate,
+        "fee_mult": fee_mult,
+        "maker_fee_applied": False,
+        "maker_fallback_reason": (
+            "OHLC bars do not identify maker fills; taker fees are applied."
+        ),
+        "leverage_role": "margin_and_max_quantity_only",
+        "model_liquidation_requested": bool(model_liq),
+        "model_liquidation_applied": False,
+    }
 
     entry = _SIGNAL_FNS.get(strategy_type)
     if not entry:
@@ -213,13 +268,36 @@ def run_backtest(df: pd.DataFrame,
         df = compute_many(df, strategy_params["indicators_needed"])
 
     df = df.dropna().reset_index(drop=True)
-    signals  = sig_fn(df, strategy_params)
+    signals = pd.Series(sig_fn(df, strategy_params), index=df.index).fillna(0)
+
+    if df.empty:
+        return {
+            "trades": [],
+            "equity_curve": [],
+            "metrics": {
+                "total_return": 0,
+                "total_return_pct": 0,
+                "num_trades": 0,
+                "win_rate": 0,
+                "max_drawdown": 0,
+                "sharpe": 0,
+                "avg_pnl": 0,
+                "gross_return": 0,
+                "gross_return_pct": 0,
+                "total_fees": 0,
+                "slippage_cost": 0,
+                "total_funding": 0,
+                "total_cost": 0,
+            },
+            "execution": execution,
+        }
 
     # 行情自适应止损止盈（ATR + 结构位）预计算
     atr_n   = int(strategy_params.get("atr_period_sl", 14))
     sl_mult = float(strategy_params.get("atr_sl_mult", 2.0))
     swing   = int(strategy_params.get("swing_lookback", 10))
-    rr      = float(strategy_params.get("rr_ratio", 2.0))
+    default_rr = tp_pct / sl_pct if sl_pct > 0 else 2.0
+    rr      = float(strategy_params.get("rr_ratio", default_rr))
     atr_arr   = _atr(df, atr_n).to_numpy()
     slow_arr  = df["low"].rolling(swing).min().to_numpy()
     shigh_arr = df["high"].rolling(swing).max().to_numpy()
@@ -227,96 +305,243 @@ def run_backtest(df: pd.DataFrame,
     capital  = initial_capital
     trades   = []
     equity   = []
+    equity_values = []
     position = None
+    total_fees = 0.0
+    total_slippage = 0.0
+    total_funding = 0.0
+    gross_return = 0.0
 
-    for i in range(1, len(df)):
-        row   = df.iloc[i]
-        t     = row["open_time"].isoformat()
-        close = float(row["close"])
-        high  = float(row["high"])
-        low   = float(row["low"])
+    def _time_at(index):
+        return pd.Timestamp(df.iloc[index]["open_time"]).isoformat()
 
-        if position:
-            ep, er = None, None
-            if position["side"] == "LONG":
-                if low  <= position["sl"]: ep, er = position["sl"], "止损"
-                elif high >= position["tp"]: ep, er = position["tp"], "止盈"
-            else:
-                if high >= position["sl"]: ep, er = position["sl"], "止损"
-                elif low  <= position["tp"]: ep, er = position["tp"], "止盈"
+    def _fill_price(reference_price, action):
+        direction = 1.0 if action == "BUY" else -1.0
+        return reference_price * (1.0 + direction * slippage_rate)
 
-            new_sig = int(signals.iloc[i])
-            if ep is None and (
-                (position["side"] == "LONG"  and new_sig == -1) or
-                (position["side"] == "SHORT" and new_sig ==  1)
-            ):
-                ep, er = close, "反转"
+    def _funding_cost(current, time_value):
+        if not use_funding or funding_rate == 0:
+            return 0.0
+        elapsed = pd.Timestamp(time_value) - current["entry_timestamp"]
+        holding_hours = max(elapsed.total_seconds() / 3600.0, 0.0)
+        direction = 1.0 if current["side"] == "LONG" else -1.0
+        entry_notional = current["entry_reference_price"] * current["qty"]
+        return direction * entry_notional * funding_rate * holding_hours / 8.0
 
-            if ep:
-                qty = position["qty"]
-                if position["side"] == "LONG":
-                    pnl = (ep - position["entry_price"]) * qty * leverage
-                else:
-                    pnl = (position["entry_price"] - ep) * qty * leverage
-                capital += pnl
-                trades.append({
-                    "entry_time":  position["entry_time"],
-                    "exit_time":   t,
-                    "side":        position["side"],
-                    "entry_price": round(position["entry_price"], 4),
-                    "exit_price":  round(ep, 4),
-                    "pnl":         round(pnl, 4),
-                    "pnl_pct":     round(pnl / initial_capital * 100, 4),
-                    "exit_reason": er,
-                })
-                position = None
+    def _open_position(side, execution_index, signal_index):
+        nonlocal capital, position, total_fees, total_slippage
 
-        sig = int(signals.iloc[i])
-        if not position and sig != 0:
-            side  = "LONG" if sig == 1 else "SHORT"
-            atr_i = atr_arr[i] if atr_arr[i] > 0 else close * 0.005
-            if side == "LONG":
-                struct = slow_arr[i]
-                sl = min(struct, close - sl_mult * atr_i) if struct == struct else close - sl_mult * atr_i
-                tp = close + rr * (close - sl)
-            else:
-                struct = shigh_arr[i]
-                sl = max(struct, close + sl_mult * atr_i) if struct == struct else close + sl_mult * atr_i
-                tp = close - rr * (sl - close)
-            stop_dist = abs(close - sl)
-            qty = (capital * risk_pct) / stop_dist if stop_dist > 0 else 1
-            position = {"side": side, "entry_time": t, "entry_price": close,
-                        "qty": qty, "sl": sl, "tp": tp}
+        reference_price = float(df.iloc[execution_index]["open"])
+        action = "BUY" if side == "LONG" else "SELL"
+        fill_price = _fill_price(reference_price, action)
 
-        equity.append({"time": t, "equity": round(capital, 2)})
+        atr_value = float(atr_arr[signal_index])
+        if np.isfinite(atr_value) and atr_value > 0:
+            stop_offset = sl_mult * atr_value
+        else:
+            stop_offset = reference_price * sl_pct
 
-    if len(equity) > 1000:
-        step   = len(equity) // 1000
-        equity = equity[::step]
+        if side == "LONG":
+            structural_stop = float(slow_arr[signal_index])
+            atr_stop = reference_price - stop_offset
+            stop_price = (min(structural_stop, atr_stop)
+                          if np.isfinite(structural_stop) else atr_stop)
+            take_profit = reference_price + rr * (reference_price - stop_price)
+        else:
+            structural_stop = float(shigh_arr[signal_index])
+            atr_stop = reference_price + stop_offset
+            stop_price = (max(structural_stop, atr_stop)
+                          if np.isfinite(structural_stop) else atr_stop)
+            take_profit = reference_price - rr * (stop_price - reference_price)
 
-    n = len(trades)
-    if n == 0:
-        metrics = dict(total_return=0, total_return_pct=0, num_trades=0,
-                       win_rate=0, max_drawdown=0, sharpe=0, avg_pnl=0)
-    else:
-        wins    = sum(1 for t in trades if t["pnl"] > 0)
-        total_r = capital - initial_capital
-        eqs     = [e["equity"] for e in equity]
-        peak, max_dd = initial_capital, 0.0
-        for eq in eqs:
-            peak   = max(peak, eq)
-            max_dd = max(max_dd, (peak - eq) / peak * 100)
-        pcts   = [t["pnl_pct"] for t in trades]
-        sharpe = (float(np.mean(pcts) / np.std(pcts)) * np.sqrt(252)
-                  if np.std(pcts) > 0 else 0)
-        metrics = {
-            "total_return":     round(total_r, 2),
-            "total_return_pct": round(total_r / initial_capital * 100, 2),
-            "num_trades":       n,
-            "win_rate":         round(wins / n * 100, 2),
-            "max_drawdown":     round(max_dd, 2),
-            "sharpe":           round(sharpe, 2),
-            "avg_pnl":          round(sum(t["pnl"] for t in trades) / n, 4),
+        stop_distance = abs(reference_price - stop_price)
+        risk_qty = ((capital * risk_pct) / stop_distance
+                    if stop_distance > 0 else 1.0)
+        max_qty = (capital * leverage) / reference_price
+        qty = min(risk_qty, max_qty)
+        entry_fee = fill_price * qty * applied_fee_rate
+        entry_slippage = abs(fill_price - reference_price) * qty
+        capital -= entry_fee
+        total_fees += entry_fee
+        total_slippage += entry_slippage
+        position = {
+            "side": side,
+            "entry_time": _time_at(execution_index),
+            "entry_timestamp": pd.Timestamp(df.iloc[execution_index]["open_time"]),
+            "entry_reference_price": reference_price,
+            "entry_price": fill_price,
+            "entry_fee": entry_fee,
+            "entry_slippage": entry_slippage,
+            "qty": qty,
+            "sl": stop_price,
+            "tp": take_profit,
         }
 
-    return {"trades": trades, "equity_curve": equity, "metrics": metrics}
+    def _close_position(reference_price, reason, time_value):
+        nonlocal capital, position, total_fees, total_slippage
+        nonlocal total_funding, gross_return
+
+        current = position
+        action = "SELL" if current["side"] == "LONG" else "BUY"
+        fill_price = _fill_price(reference_price, action)
+        qty = current["qty"]
+        direction = 1.0 if current["side"] == "LONG" else -1.0
+        gross_pnl = (
+            direction
+            * (reference_price - current["entry_reference_price"])
+            * qty
+        )
+        price_pnl = (
+            direction
+            * (fill_price - current["entry_price"])
+            * qty
+        )
+        exit_fee = fill_price * qty * applied_fee_rate
+        exit_slippage = abs(fill_price - reference_price) * qty
+        funding_cost = _funding_cost(current, time_value)
+        fees = current["entry_fee"] + exit_fee
+        slippage_cost = current["entry_slippage"] + exit_slippage
+        pnl = price_pnl - fees - funding_cost
+
+        # Entry fee was deducted when the position opened.
+        capital += price_pnl - exit_fee - funding_cost
+        total_fees += exit_fee
+        total_slippage += exit_slippage
+        total_funding += funding_cost
+        gross_return += gross_pnl
+        holding_hours = max(
+            (pd.Timestamp(time_value) - current["entry_timestamp"])
+            .total_seconds() / 3600.0,
+            0.0,
+        )
+        trades.append({
+            "entry_time": current["entry_time"],
+            "exit_time": time_value,
+            "side": current["side"],
+            "entry_price": round(current["entry_price"], 4),
+            "exit_price": round(fill_price, 4),
+            "qty": round(qty, 8),
+            "pnl": round(pnl, 4),
+            "pnl_pct": round(pnl / initial_capital * 100, 4),
+            "exit_reason": reason,
+            "gross_pnl": round(gross_pnl, 4),
+            "entry_fee": round(current["entry_fee"], 4),
+            "exit_fee": round(exit_fee, 4),
+            "fees": round(fees, 4),
+            "slippage_cost": round(slippage_cost, 4),
+            "funding_cost": round(funding_cost, 4),
+            "holding_hours": round(holding_hours, 4),
+            "total_cost": round(fees + slippage_cost + funding_cost, 4),
+        })
+        position = None
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+        time_value = _time_at(i)
+        open_price = float(row["open"])
+        close_price = float(row["close"])
+        high_price = float(row["high"])
+        low_price = float(row["low"])
+
+        if i > 0:
+            raw_signal = float(signals.iloc[i - 1])
+            pending_signal = 1 if raw_signal > 0 else -1 if raw_signal < 0 else 0
+
+            # A standing stop triggered by a gap fills at the open, never at the
+            # more favorable stop level.
+            if position:
+                gap_stop = (
+                    position["side"] == "LONG" and open_price <= position["sl"]
+                ) or (
+                    position["side"] == "SHORT" and open_price >= position["sl"]
+                )
+                if gap_stop:
+                    _close_position(open_price, "止损", time_value)
+
+            if position and (
+                (position["side"] == "LONG" and pending_signal == -1)
+                or (position["side"] == "SHORT" and pending_signal == 1)
+            ):
+                _close_position(open_price, "反转", time_value)
+
+            if position is None and pending_signal != 0:
+                side = "LONG" if pending_signal == 1 else "SHORT"
+                _open_position(side, i, i - 1)
+
+            # Stop-first ordering is conservative when both levels trade in one bar.
+            if position:
+                if position["side"] == "LONG":
+                    if low_price <= position["sl"]:
+                        _close_position(position["sl"], "止损", time_value)
+                    elif high_price >= position["tp"]:
+                        _close_position(position["tp"], "止盈", time_value)
+                else:
+                    if high_price >= position["sl"]:
+                        _close_position(position["sl"], "止损", time_value)
+                    elif low_price <= position["tp"]:
+                        _close_position(position["tp"], "止盈", time_value)
+
+        marked_equity = capital
+        if position:
+            direction = 1.0 if position["side"] == "LONG" else -1.0
+            marked_equity += (
+                direction
+                * (close_price - position["entry_price"])
+                * position["qty"]
+            )
+            marked_equity -= _funding_cost(position, time_value)
+        equity_values.append(marked_equity)
+        equity.append({"time": time_value, "equity": round(marked_equity, 2)})
+
+    if position:
+        last_index = len(df) - 1
+        _close_position(
+            float(df.iloc[last_index]["close"]),
+            "期末强平",
+            _time_at(last_index),
+        )
+        equity_values[-1] = capital
+        equity[-1]["equity"] = round(capital, 2)
+
+    peak = initial_capital
+    max_dd = 0.0
+    for marked_equity in equity_values:
+        peak = max(peak, marked_equity)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - marked_equity) / peak * 100)
+
+    if len(equity) > 1000:
+        sample_indices = np.linspace(0, len(equity) - 1, num=1000, dtype=int)
+        equity = [equity[index] for index in sample_indices]
+
+    n = len(trades)
+    wins = sum(1 for trade in trades if trade["pnl"] > 0)
+    total_return = capital - initial_capital
+    pnl_pcts = [trade["pnl_pct"] for trade in trades]
+    pnl_std = float(np.std(pnl_pcts)) if pnl_pcts else 0.0
+    sharpe = (
+        float(np.mean(pnl_pcts) / pnl_std) * np.sqrt(252)
+        if pnl_std > 0 else 0.0
+    )
+    metrics = {
+        "total_return": round(total_return, 2),
+        "total_return_pct": round(total_return / initial_capital * 100, 2),
+        "num_trades": n,
+        "win_rate": round(wins / n * 100, 2) if n else 0,
+        "max_drawdown": round(max_dd, 2),
+        "sharpe": round(sharpe, 2),
+        "avg_pnl": round(sum(trade["pnl"] for trade in trades) / n, 4) if n else 0,
+        "gross_return": round(gross_return, 2),
+        "gross_return_pct": round(gross_return / initial_capital * 100, 2),
+        "total_fees": round(total_fees, 4),
+        "slippage_cost": round(total_slippage, 4),
+        "total_funding": round(total_funding, 4),
+        "total_cost": round(total_fees + total_slippage + total_funding, 4),
+    }
+
+    return {
+        "trades": trades,
+        "equity_curve": equity,
+        "metrics": metrics,
+        "execution": execution,
+    }

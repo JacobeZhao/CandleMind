@@ -1,10 +1,7 @@
 import json
 import asyncio
-from fastapi import APIRouter, HTTPException, Query, Depends
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Query
 from ..state import app_state
-from ..database import get_db, AIConfig, Settings
-from ..security import decrypt
 from ..services.indicators import REGISTRY, compute_many
 
 router = APIRouter()
@@ -99,41 +96,6 @@ def indicator_registry():
         }
         for iid, meta in REGISTRY.items()
     }
-
-
-@router.get("/regime/{symbol}")
-async def regime(symbol: str, params: str = Query("{}")):
-    """多周期市场状态：日线/小时线分类 + 决策 + 精简 K 线（供行情页小图）。"""
-    from ..services.regime import evaluate
-    client = _require_client()
-    try:
-        p = json.loads(params)
-    except Exception:
-        p = {}
-    return await asyncio.to_thread(evaluate, client, symbol, p, True, 150)
-
-
-@router.get("/regime_ai/{symbol}")
-async def regime_ai(symbol: str, params: str = Query("{}"), db: Session = Depends(get_db)):
-    """规则 + AI 共同研判市场周期（含分歧时的二次仲裁）。"""
-    from ..services.regime_ai import evaluate_with_ai
-    client = _require_client()
-    c = db.query(AIConfig).filter(AIConfig.is_active == True).first()
-    if not c:
-        raise HTTPException(400, "请先在「设置 → AI 模型」中激活一个模型")
-    s = db.query(Settings).first()
-    proxy = s.proxy_url if s else None
-    ai_cfg = {
-        "provider":   c.provider,
-        "api_key":    decrypt(c.api_key_enc) if c.api_key_enc else "",
-        "base_url":   c.base_url,
-        "model_name": c.model_name,
-    }
-    try:
-        p = json.loads(params)
-    except Exception:
-        p = {}
-    return await evaluate_with_ai(client, symbol, p, ai_cfg, proxy)
 
 
 @router.get("/symbols")

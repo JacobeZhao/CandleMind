@@ -1,6 +1,7 @@
 """研究/稳健性接口：一键稳健性报告 + 实验登记表查询 + HTML 回测报告。"""
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -129,10 +130,24 @@ def list_reports():
             for p in files]
 
 
+def _resolve_report_path(report_dir: Path, name: str) -> Path:
+    requested = Path(name)
+    if requested.name != name or requested.suffix.lower() != ".html":
+        raise FileNotFoundError(name)
+    root = report_dir.resolve(strict=True)
+    candidate = (root / requested.name).resolve(strict=True)
+    if candidate.parent != root or not candidate.is_file():
+        raise FileNotFoundError(name)
+    return candidate
+
+
 @router.get("/report/{name}", response_class=HTMLResponse)
 def get_report(name: str):
     from ..services.html_report import HTML_DIR
-    p = HTML_DIR / name
+    try:
+        p = _resolve_report_path(HTML_DIR, name)
+    except (FileNotFoundError, OSError, RuntimeError):
+        raise HTTPException(404, "Report not found")
     if ".." in name or not p.exists():
         raise HTTPException(404, "报告不存在")
     return HTMLResponse(p.read_text(encoding="utf-8"))
@@ -189,6 +204,9 @@ async def get_ml_signal_route(
             "threshold_used": sig.threshold_used,
             "drift_warning":  sig.drift_warning,
             "model_available":sig.model_available,
+            "feature_timestamp": sig.feature_timestamp,
+            "data_age_seconds": sig.data_age_seconds,
+            "feature_fresh":  sig.feature_fresh,
             "note":           sig.note,
         }
     except Exception as e:
@@ -211,6 +229,9 @@ async def ml_scan(symbols: str = "BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT"):
                 "confidence":     r.confidence,
                 "pos_size_mult":  r.pos_size_mult,
                 "drift_warning":  r.drift_warning,
+                "feature_timestamp": r.feature_timestamp,
+                "data_age_seconds": r.data_age_seconds,
+                "feature_fresh":  r.feature_fresh,
                 "note":           r.note,
             }
             for r in results

@@ -31,13 +31,14 @@ class AppState:
 
     async def broadcast_loop(self):
         """启动账户/仓位/订单/状态的后台推送任务。Ticker 由 WS 单独处理。"""
-        asyncio.create_task(self._account_loop())
-        asyncio.create_task(self._orders_loop())
-        # bot status 独立高频推送
-        while True:
-            await asyncio.sleep(STATUS_INTERVAL)
-            if manager.active:
-                await self._push_bot_status()
+        async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(self._account_loop(), name="account-broadcast-loop")
+            task_group.create_task(self._orders_loop(), name="orders-broadcast-loop")
+            # bot status 独立高频推送
+            while True:
+                await asyncio.sleep(STATUS_INTERVAL)
+                if manager.active:
+                    await self._push_bot_status()
 
     # ── REST 轮询（低频）────────────────────────────────────────────────────────
 

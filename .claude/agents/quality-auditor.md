@@ -4,7 +4,7 @@
 
 ## 扫描范围
 
-`backend/app/` 下所有 `.py` 文件，以及 `retrain_optimized.py`。
+`backend/app/` 下所有 `.py` 文件，以及 `backend/scripts/training/` 训练入口。
 
 ## 检查项
 
@@ -14,7 +14,7 @@
 
 关键位置：
 - `app/services/experiments.py` — `except Exception: pass`（JSON 解析失败静默）
-- `retrain_optimized.py` 的 `run_streaming()` — `except subprocess.TimeoutExpired: proc.kill()`（可接受，但检查是否记录）
+- 训练脚本的子进程超时必须终止、等待并记录失败。
 - 任何 route handler 里 `except Exception: return None/False`
 
 分级：

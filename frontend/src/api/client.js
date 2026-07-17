@@ -15,8 +15,9 @@ export const getBalance    = ()        => api.get("/account/balance");
 export const getPositions  = ()        => api.get("/account/positions");
 
 export const getTicker     = (sym)     => api.get(`/market/ticker/${sym}`);
-export const getKlines     = (sym, interval, limit, inds = "supertrend", indParams = {}) =>
+export const getKlines     = (sym, interval, limit, inds = "supertrend", indParams = {}, signal) =>
   api.get(`/market/klines/${sym}`, {
+    signal,
     params: {
       interval, limit,
       inds: Array.isArray(inds) ? inds.join(",") : inds,
@@ -37,7 +38,8 @@ export const updateStrategy    = (id, d)  => api.put(`/strategy/${id}`, d);
 export const activateStrategy  = (id)     => api.post(`/strategy/${id}/activate`);
 
 // Engine control
-export const startEngine  = (paper = false) => api.post("/strategy/engine/start", null, { params: { paper } });
+export const startEngine  = (paper = true, confirmLive = false) =>
+  api.post("/strategy/engine/start", null, { params: { paper, confirm_live: confirmLive } });
 export const stopEngine   = ()   => api.post("/strategy/engine/stop");
 export const getEngineStatus = () => api.get("/strategy/engine/status");
 

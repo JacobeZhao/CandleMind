@@ -60,7 +60,7 @@ Sprint 工作量估算：
   SC-retrain_2024cutoff-wrong-project-path  [new]
     引用 binance 项目路径，运行会污染旧目录
     文件: backend/retrain_2024cutoff.py:11
-    修复: 删除此文件（已被 retrain_optimized.py 取代）
+    修复: 删除此文件（已被 scripts/training/retrain_multi_horizon.py 取代）
     工作量: 5min
 
 [P1] 本 Sprint 处理 ──────────────────

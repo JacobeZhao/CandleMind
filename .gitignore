@@ -10,6 +10,12 @@ build/
 .venv/
 venv/
 env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Env / secrets
 .env
@@ -20,8 +26,31 @@ env/
 *.log
 logs/
 
-# Data & models (large binary files on G drive)
+# Data, models, and experiment artifacts (external G-drive ownership)
 data/
+datas/
+backend/datas/
+!backend/scripts/data/
+!backend/scripts/data/*.py
+models/
+runs/
+checkpoints/
+artifacts/
+!backend/scripts/artifacts/
+!backend/scripts/artifacts/*.py
+playwright-report/
+test-results/
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.jsonl
+*.npy
+*.npz
+*.pt
+*.pth
+*.onnx
+*.cbm
 *.pkl
 *.parquet
 *.h5
@@ -49,9 +78,17 @@ Thumbs.db
 
 # Project tooling
 .gstack/
-# .claude/ contains the tech-debt skill system — keep tracked in git
+.tmp/
+.harness/
+backups/
+scripts_tmp_*.py
+# .claude/ contains the tracked tech-debt skill system.
+.claude/settings.local.json
+.claude/reports/
+.claude/worktrees/
+.claude/cache/
+.codex/
+.cursor/
 *.output
-retrain_optimized.log
-retrain_optimized_err.log
 _retrain_worker.py
 _calib_worker.py

@@ -33,22 +33,20 @@
 
 ```python
 # 旧（硬编码）
-sys.path.insert(0, r'E:\File\Projects\CandleMind\backend')
-os.chdir(r'E:\File\Projects\CandleMind\backend')
+sys.path.insert(0, r'<absolute-project-path>\backend')
 
 # 新（相对路径）
-BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, BACKEND)
-os.chdir(BACKEND)
+BACKEND = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND))
 ```
 
 ```python
-# 旧（硬编码 G 盘）
-label_path = rf'G:\5、金融交易\labels\{sym}_5m_labels.parquet'
+# 旧（硬编码外部数据目录）
+label_path = Path(r'X:\market-data\labels') / f'{sym}_5m_labels.parquet'
 
-# 新（MARKET_ROOT）
-from app.datastore import MARKET_ROOT
-label_path = MARKET_ROOT / 'labels' / f'{sym}_5m_labels.parquet'
+# 新（clean layout 目录常量）
+from app.datastore import LABELS_DIR
+label_path = LABELS_DIR / f'{sym}_5m_labels.parquet'
 ```
 
 ### .gitignore 追加模板
@@ -78,7 +76,7 @@ P3 Auto-Fixer 结果：
 ✅ 已修复 (N 条):
   - SC-gitignore-missing-catboost: 追加 catboost_info/ 到 .gitignore
   - SC-gitignore-claude-ignored: 注释掉 .gitignore 中的 .claude/ 行
-  - SC-scripts-hardcoded-path: 修复 scripts/oos_backtest.py 的 sys.path
+  - SC-scripts-hardcoded-path: 修复 scripts/evaluation/oos_backtest.py 的路径解析
 
 ⏭️ 跳过 (M 条):
   - QA-experiments-silent-exception: 涉及逻辑判断，非机械性修复

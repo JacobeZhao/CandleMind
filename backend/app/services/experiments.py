@@ -8,9 +8,9 @@ import hashlib
 import subprocess
 from datetime import datetime
 
-from ..datastore import MARKET_ROOT
+from ..datastore import EXPERIMENTS_DB
 
-DB_PATH = MARKET_ROOT / "experiments.db"
+DB_PATH = EXPERIMENTS_DB
 
 
 def _conn():

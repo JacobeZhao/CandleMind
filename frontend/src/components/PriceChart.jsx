@@ -101,8 +101,19 @@ function setVisible(series, v) {
 }
 
 function safeSet(series, data) {
-  if (!series || !data?.length) return;
+  if (!series || !Array.isArray(data)) return;
   try { series.setData(data); } catch (_) {}
+}
+
+function clearData(series) {
+  if (!series) return;
+  if (Array.isArray(series)) {
+    series.forEach(clearData);
+  } else if (typeof series === "object" && !series.setData) {
+    Object.values(series).forEach(clearData);
+  } else {
+    safeSet(series, []);
+  }
 }
 
 // ── Column name helpers ───────────────────────────────────────────────────────
@@ -234,9 +245,19 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
     if (!symbol || !chartRef.current) return;
     const chart = chartRef.current;
     const sr    = seriesRef.current;
+    const controller = new AbortController();
 
+    Object.values(sr).forEach(clearData);
+    lastBarRef.current = null;
     setLoading(true);
-    getKlines(symbol, interval, 200, indRequest.ids.length ? indRequest.ids : ["supertrend"], indRequest.params)
+    getKlines(
+      symbol,
+      interval,
+      200,
+      indRequest.ids.length ? indRequest.ids : ["supertrend"],
+      indRequest.params,
+      controller.signal,
+    )
       .then(({ data }) => {
         const ts = (d) => toTs(d);
 
@@ -264,8 +285,13 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
         const total = data.length;
         chart.timeScale().setVisibleLogicalRange({ from: total - VISIBLE_BARS, to: total - 1 });
       })
-      .catch(console.error)
-      .finally(() => setLoading(false));
+      .catch((error) => {
+        if (error?.code !== "ERR_CANCELED") console.error(error);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [symbol, interval, indRequest]);
 
   // ── 实时价格更新（来自 Binance WS ticker）───────────────────────────────────

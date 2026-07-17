@@ -6,9 +6,9 @@ import json
 import html
 from datetime import datetime
 
-from ..datastore import MARKET_ROOT
+from ..datastore import REPORTS_DIR
 
-HTML_DIR = MARKET_ROOT / "reports" / "html"
+HTML_DIR = REPORTS_DIR / "html"
 HTML_DIR.mkdir(parents=True, exist_ok=True)
 
 

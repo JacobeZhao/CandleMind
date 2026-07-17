@@ -12,3 +12,6 @@ pyarrow>=15.0
 lightgbm>=4.3
 catboost>=1.2
 scikit-learn>=1.4
+gymnasium>=0.29
+stable-baselines3>=2.3
+sb3-contrib>=2.3

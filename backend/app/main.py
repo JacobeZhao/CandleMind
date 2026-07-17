@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -21,7 +22,11 @@ async def _reconnect_loop():
         await asyncio.sleep(60)
         if app_state.client is None:
             try:
-                db = next(get_db()); s = db.query(Settings).first(); db.close()
+                db = next(get_db())
+                try:
+                    s = db.query(Settings).first()
+                finally:
+                    db.close()
                 if s and active_keys(s)[0]:
                     await _connect_active(s)
                     logger.info("Auto-reconnect succeeded")
@@ -33,33 +38,57 @@ async def _reconnect_loop():
 async def lifespan(app: FastAPI):
     init_db()
     db = next(get_db())
-    s = db.query(Settings).first()
-    key_enc, sec_enc = active_keys(s) if s else (None, None)
-    if key_enc:
-        try:
-            api_key    = decrypt(key_enc)
-            api_secret = decrypt(sec_enc)
-            client     = await asyncio.to_thread(_build_client, api_key, api_secret, s.testnet, s.proxy_url)
-            app_state.set_client(client, s.symbol)
-            # 启动 Binance WebSocket 行情流（替代 REST 轮询）
-            await binance_ws_client.start(s.symbol, s.testnet, s.proxy_url)
-            logger.info("Auto-reconnected to Binance on startup")
-        except Exception as e:
-            logger.warning(f"Auto-connect failed: {e}")
-    db.close()
+    try:
+        s = db.query(Settings).first()
+        key_enc, sec_enc = active_keys(s) if s else (None, None)
+        if key_enc:
+            try:
+                api_key = decrypt(key_enc)
+                api_secret = decrypt(sec_enc)
+                client = await asyncio.to_thread(
+                    _build_client, api_key, api_secret, s.testnet, s.proxy_url
+                )
+                app_state.set_client(client, s.symbol)
+                await binance_ws_client.start(s.symbol, s.testnet, s.proxy_url)
+                logger.info("Auto-reconnected to Binance on startup")
+            except Exception as e:
+                logger.warning(f"Auto-connect failed: {e}")
+    finally:
+        db.close()
 
-    asyncio.create_task(app_state.broadcast_loop())
-    asyncio.create_task(_reconnect_loop())
-    yield
-    await binance_ws_client.stop()
-    await strategy_route.bot_engine.stop()
+    background_tasks = (
+        asyncio.create_task(
+            app_state.broadcast_loop(), name="app-state-broadcast-loop"
+        ),
+        asyncio.create_task(_reconnect_loop(), name="binance-reconnect-loop"),
+    )
+    app.state.background_tasks = background_tasks
+
+    try:
+        yield
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+        await binance_ws_client.stop()
+        await strategy_route.bot_engine.stop()
 
 
 app = FastAPI(title="Livermore Trading API", lifespan=lifespan)
 
+_allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CANDLEMIND_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=_allowed_origins, allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -87,4 +116,6 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket)

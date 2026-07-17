@@ -12,9 +12,9 @@ import pandas as pd
 
 from .datafeed import load_klines
 from .indicators import compute_many
-from ..datastore import MARKET_ROOT
+from ..datastore import FEATURES_DIR
 
-FEAT_DIR = MARKET_ROOT / "features"
+FEAT_DIR = FEATURES_DIR
 FEAT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 跨期稳定（可放心用于自适应）的特征

@@ -3,10 +3,11 @@
 """
 import json
 from datetime import datetime
+from loguru import logger
 
-from ..datastore import MARKET_ROOT
+from ..datastore import JOURNAL_DIR
 
-JOURNAL_DIR = MARKET_ROOT / "journal"
+# JOURNAL_DIR is provided by datastore
 JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -16,8 +17,8 @@ def append(entry: dict) -> None:
         fn = JOURNAL_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
         with open(fn, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError):
+        logger.exception("Failed to append trading journal entry")
 
 
 def read_recent(n: int = 200) -> list:
@@ -31,6 +32,6 @@ def read_recent(n: int = 200) -> list:
                     rows.append(json.loads(ln))
                     if len(rows) >= n:
                         return rows
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Failed to read trading journal file {}", fn)
     return rows

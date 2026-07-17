@@ -302,22 +302,35 @@ def volume_features(df: pd.DataFrame, prefix: str,
         time_col = 'funding_time' if 'funding_time' in fd_cols else 'open_time'
         rate_col = 'rate' if 'rate' in fd_cols else 'funding_rate'
         fd = funding_df[[time_col, rate_col]].copy()
-        fd = fd.rename(columns={time_col: 'open_time', rate_col: f'{prefix}_funding_rate'})
-        fd['open_time'] = pd.to_numeric(fd['open_time'])
-        f = f.reset_index()
-        f['open_time'] = pd.to_numeric(f['open_time'])
-        f = pd.merge_asof(f.sort_values('open_time'),
-                          fd.sort_values('open_time'),
-                          on='open_time', direction='backward')
-        f = f.set_index('open_time')
-        # 派生资金费率特征（无需 close，纯费率序列）
-        fr = f[f'{prefix}_funding_rate'].fillna(0)
+        funding_col = f'{prefix}_funding_rate'
+        fd = fd.rename(columns={time_col: 'open_time', rate_col: funding_col})
+        if pd.api.types.is_numeric_dtype(fd['open_time']):
+            fd['open_time'] = pd.to_datetime(fd['open_time'], unit='ms')
+        else:
+            fd['open_time'] = pd.to_datetime(fd['open_time'])
+        fd[funding_col] = pd.to_numeric(fd[funding_col], errors='coerce')
+        fd = fd.dropna().drop_duplicates('open_time', keep='last').sort_values('open_time')
+
+        # Funding is an 8-hour event series. Compute event windows before
+        # forward-aligning to 5-minute bars; 9 events = 3 days, 90 = 30 days.
+        fr = fd[funding_col]
         fr_30d_mean = fr.rolling(90, min_periods=30).mean()
-        fr_30d_std  = fr.rolling(90, min_periods=30).std().replace(0, np.nan)
-        fr_3d_mean  = fr.rolling(9,  min_periods=3).mean()
-        f[f'{prefix}_funding_z3d']           = (fr_3d_mean - fr_30d_mean) / fr_30d_std
-        f[f'{prefix}_funding_crowded_long']  = (fr > fr_30d_mean + fr_30d_std).astype(float)
-        f[f'{prefix}_funding_crowded_short'] = (fr < fr_30d_mean - fr_30d_std).astype(float)
+        fr_30d_std = fr.rolling(90, min_periods=30).std().replace(0, np.nan)
+        fr_3d_mean = fr.rolling(9, min_periods=3).mean()
+        valid = fr_30d_std.notna()
+        fd[f'{prefix}_funding_z3d'] = (fr_3d_mean - fr_30d_mean) / fr_30d_std
+        fd[f'{prefix}_funding_crowded_long'] = (
+            (fr > fr_30d_mean + fr_30d_std).astype(float).where(valid)
+        )
+        fd[f'{prefix}_funding_crowded_short'] = (
+            (fr < fr_30d_mean - fr_30d_std).astype(float).where(valid)
+        )
+
+        f = f.reset_index(drop=True)
+        f['open_time'] = pd.to_datetime(f['open_time'])
+        f = pd.merge_asof(
+            f.sort_values('open_time'), fd, on='open_time', direction='backward'
+        ).set_index('open_time')
 
     return f.set_index('open_time') if 'open_time' in f.columns else f
 
@@ -716,6 +729,26 @@ def feature_stability(df: pd.DataFrame, year_col: str = 'year') -> pd.DataFrame:
 HIGHER_TFS = ('30m', '1h', '4h', '6h', '1d')
 
 
+def align_completed_features(
+    feat_df: pd.DataFrame,
+    base_open_time,
+    shift_bars: int = 1,
+) -> pd.DataFrame:
+    """Align source features to base bars after the source bar has closed."""
+    df = feat_df.reset_index() if feat_df.index.name == 'open_time' else feat_df.copy()
+    df['open_time'] = pd.to_datetime(df['open_time'])
+    if shift_bars > 0:
+        feat_cols = [c for c in df.columns if c != 'open_time']
+        df[feat_cols] = df[feat_cols].shift(shift_bars)
+    merged = pd.merge_asof(
+        pd.DataFrame({'open_time': pd.to_datetime(base_open_time)}),
+        df.sort_values('open_time'),
+        on='open_time', direction='backward',
+    ).drop(columns=['open_time'])
+    merged.index = range(len(merged))
+    return merged
+
+
 def build_features(
     symbol:     str,
     start:      str  = '2022-01-01',
@@ -735,7 +768,6 @@ def build_features(
     # 去重 + 排序，确保整数索引连续
     base = base.drop_duplicates(subset=['open_time']).sort_values('open_time').reset_index(drop=True)
     open_time_col = base['open_time'].values.copy()   # 保存时间轴，后面用于对齐
-    n = len(base)
 
     # ── 资金费率（合约永续特有）──
     funding_df = None
@@ -746,24 +778,6 @@ def build_features(
             print(f'  [{symbol}] 资金费率 {len(funding_df)} 条')
     except Exception as _fe:
         print(f'  [{symbol}] funding 跳过: {_fe}')
-
-    def _align_to_base(feat_df: pd.DataFrame, shift_bars: int = 1) -> pd.DataFrame:
-        """
-        把任意特征 DataFrame 对齐到 base 的整数行索引（merge_asof → reset_index）。
-        shift_bars=1：对所有非时间戳列执行 shift(1)，确保当前 5m bar 只能读取
-        上一根已完全收盘的高周期 bar 的特征，消除 bar 内前视泄漏。
-        """
-        df = feat_df.reset_index() if feat_df.index.name == 'open_time' else feat_df.copy()
-        if shift_bars > 0:
-            feat_cols = [c for c in df.columns if c != 'open_time']
-            df[feat_cols] = df[feat_cols].shift(shift_bars)
-        merged = pd.merge_asof(
-            pd.DataFrame({'open_time': open_time_col}),
-            df,
-            on='open_time', direction='backward'
-        ).drop(columns=['open_time'])
-        merged.index = range(n)
-        return merged
 
     # ── 5m 自身特征（所有类别，直接用整数索引）──
     print(f'  [{symbol}] 计算 5m 特征...')
@@ -796,11 +810,11 @@ def build_features(
             tf_combined = pd.concat([ps, mo, vl, vu], axis=1)
             # 去掉重复 open_time 列
             tf_combined = tf_combined.loc[:, ~tf_combined.columns.duplicated()]
-            parts.append(_align_to_base(tf_combined))
+            parts.append(align_completed_features(tf_combined, open_time_col))
 
             if with_stats and tf in ('1h', '4h', '1d'):
                 stat_f = statistical_features(df_tf, tf, hurst_window=100).reset_index()
-                parts.append(_align_to_base(stat_f))
+                parts.append(align_completed_features(stat_f, open_time_col))
         except Exception as e:
             print(f'  WARN {symbol} {tf}: {e}')
 
@@ -811,7 +825,7 @@ def build_features(
             btc_1h = load_klines('BTCUSDT', '1h', start, end)
             sym_1h = load_klines(symbol, '1h', start, end)
             ca_f   = cross_asset_features(sym_1h, btc_1h, prefix='1h').reset_index()
-            parts.append(_align_to_base(ca_f))
+            parts.append(align_completed_features(ca_f, open_time_col))
         except Exception as e:
             print(f'  WARN cross-asset {symbol}: {e}')
 
@@ -831,9 +845,9 @@ def build_features(
 
 
 def build_and_save(symbol: str, start: str = '2022-01-01', end: str = '2026-06-08') -> pd.DataFrame:
-    from ..datastore import MARKET_ROOT
+    from ..datastore import MARKET_ROOT, FEATURES_ML_DIR, LABELS_DIR
     feats   = build_features(symbol, start, end)
-    out_dir = MARKET_ROOT / 'features_ml'
+    out_dir = FEATURES_ML_DIR
     out_dir.mkdir(exist_ok=True)
     path    = out_dir / f'{symbol}_features.parquet'
     feats.to_parquet(path, index=False)
@@ -860,9 +874,9 @@ def _read_parquet_f32(path) -> pd.DataFrame:
 
 def merge_features_labels(symbol: str) -> pd.DataFrame:
     """加载特征 + 标注，合并、去 NaN、去预热期，返回建模用 DataFrame"""
-    from ..datastore import MARKET_ROOT
-    feat_path  = MARKET_ROOT / 'features_ml' / f'{symbol}_features.parquet'
-    label_path = MARKET_ROOT / 'labels'      / f'{symbol}_5m_labels.parquet'
+    from ..datastore import MARKET_ROOT, FEATURES_ML_DIR, LABELS_DIR
+    feat_path  = FEATURES_ML_DIR / f'{symbol}_features.parquet'
+    label_path = LABELS_DIR      / f'{symbol}_5m_labels.parquet'
 
     feats  = _read_parquet_f32(feat_path)
     labels = pd.read_parquet(label_path)[[

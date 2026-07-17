@@ -9,9 +9,9 @@ from datetime import datetime
 
 from .ml_strategy import MLTrendParams, backtest_ml_trend
 from . import experiments
-from ..datastore import MARKET_ROOT
+from ..datastore import REPORTS_DIR
 
-ATTR_DIR = MARKET_ROOT / "reports" / "attribution"
+ATTR_DIR = REPORTS_DIR / "attribution"
 ATTR_DIR.mkdir(parents=True, exist_ok=True)
 
 

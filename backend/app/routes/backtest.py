@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 def _save_backtest(req, symbol: str, s_type: str, result: dict) -> None:
-    """把每次回测（请求参数 + 完整结果）存到 G:\\5、金融交易\\backtests。"""
+    """把每次回测（请求参数 + 完整结果）存到 clean layout 的 BACKTEST_DIR。"""
     try:
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -198,6 +198,7 @@ class RunRequest(BaseModel):
     # —— 成本模型 ——
     taker_fee:       float          = 0.0004  # taker 手续费率
     slippage_bps:    float          = 5.0     # 逆向滑点（基点）
+    slippage:        Optional[float]= None    # one-way rate; overrides bps
     funding_rate:    float          = 0.0001  # 资金费率 / 8h
     use_funding:     bool           = True
     fee_mult:        float          = 1.0     # 手续费压力测试倍数
@@ -223,6 +224,9 @@ async def backtest_run(req: RunRequest, db: Session = Depends(get_db)):
     risk_pct = req.risk_pct or 0.01
     sl_pct   = req.sl_pct   or 0.015
     tp_pct   = req.tp_pct   or 0.03
+    slippage_rate = (
+        req.slippage if req.slippage is not None else req.slippage_bps / 10_000
+    )
 
     # Load from saved strategy if id provided
     if req.strategy_id:
@@ -254,6 +258,11 @@ async def backtest_run(req: RunRequest, db: Session = Depends(get_db)):
             filtered = {k: v for k, v in s_params.items() if k in valid_fields}
             # Always override risk_pct from request so Kelly sizing uses correct capital fraction
             filtered["risk_pct"] = risk_pct
+            filtered["fee"] = req.taker_fee * req.fee_mult
+            filtered["slippage"] = slippage_rate
+            filtered["funding_rate_8h"] = (
+                req.funding_rate if req.use_funding else 0.0
+            )
             ml_params = MLTrendParams.from_thresholds(symbol, **filtered)
 
             ml_result = await asyncio.to_thread(
@@ -267,6 +276,20 @@ async def backtest_run(req: RunRequest, db: Session = Depends(get_db)):
                 raise HTTPException(400, ml_result["error"])
 
             result = _ml_result_to_frontend(ml_result, req.initial_capital, risk_pct)
+            result["execution"] = {
+                "signal_timing": "next_open",
+                "requested_mode": req.exec_mode.lower(),
+                "fee_liquidity": "taker",
+                "taker_fee_rate": req.taker_fee,
+                "maker_fee_rate": req.maker_fee,
+                "applied_fee_rate": req.taker_fee * req.fee_mult,
+                "fee_mult": req.fee_mult,
+                "maker_fee_applied": False,
+                "maker_fallback_reason": (
+                    "ML bar executions do not identify maker fills; "
+                    "taker fees are applied."
+                ),
+            }
 
             if req.walk_forward:
                 split_date = req.split_date or _midpoint(req.start_date, req.end_date)
@@ -288,7 +311,19 @@ async def backtest_run(req: RunRequest, db: Session = Depends(get_db)):
             raise HTTPException(400, "数据量不足，请扩大时间范围")
         result = await asyncio.to_thread(
             run_backtest, df, s_type, s_params,
-            req.initial_capital, leverage, risk_pct, sl_pct, tp_pct,
+            initial_capital=req.initial_capital,
+            leverage=leverage,
+            risk_pct=risk_pct,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            taker_fee=req.taker_fee,
+            maker_fee=req.maker_fee,
+            slippage_rate=slippage_rate,
+            fee_mult=req.fee_mult,
+            use_funding=req.use_funding,
+            funding_rate=req.funding_rate,
+            exec_mode=req.exec_mode,
+            model_liq=req.model_liq,
         )
         _save_backtest(req, symbol, s_type, result)
         return result

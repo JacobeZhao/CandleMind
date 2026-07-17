@@ -1,6 +1,6 @@
-import React, { createContext, useContext, useReducer, useCallback, useEffect } from "react";
+import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { getSettings, getEngineStatus, saveSettings } from "../api/client";
+import { getSettings, saveSettings } from "../api/client";
 
 const AppContext = createContext(null);
 
@@ -26,12 +26,7 @@ function reducer(state, action) {
       if (type === "account")     return { ...state, account: data };
       if (type === "positions")   return { ...state, positions: data };
       if (type === "open_orders") return { ...state, openOrders: data };
-      if (type === "bot_status") {
-        const sym = data?.symbol;
-        if (sym && sym !== state.symbol)
-          return { ...state, botStatus: data, symbol: sym };
-        return { ...state, botStatus: data };
-      }
+      if (type === "bot_status")  return { ...state, botStatus: data };
       return state;
     }
     default: return state;
@@ -40,19 +35,16 @@ function reducer(state, action) {
 
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initial);
+  const symbolRequestId = useRef(0);
+  const symbolSaveQueue = useRef(Promise.resolve());
 
-  // 启动时从引擎/settings读取 symbol 和 networkTab
+  // 启动时从 settings 读取全局交易对和 networkTab。
   useEffect(() => {
-    getEngineStatus()
-      .then(r => {
-        const sym = r.data?.symbol;
-        if (sym) dispatch({ type: "SET_SYMBOL", payload: sym });
-      })
-      .catch(() => {});
-
     getSettings()
       .then(({ data }) => {
-        if (data.symbol) dispatch({ type: "SET_SYMBOL", payload: data.symbol });
+        if (data.symbol && symbolRequestId.current === 0) {
+          dispatch({ type: "SET_SYMBOL", payload: data.symbol });
+        }
         dispatch({ type: "SET_NETWORK_TAB", payload: data.testnet !== false ? "test" : "main" });
       })
       .catch(() => {});
@@ -61,18 +53,39 @@ export function AppProvider({ children }) {
   const handleMessage = useCallback((msg) => {
     dispatch({ type: "WS_MSG", payload: msg });
   }, []);
+  const handleConnectionChange = useCallback((connected) => {
+    dispatch({ type: "SET_CONNECTED", payload: connected });
+  }, []);
 
-  useWebSocket(handleMessage);
+  useWebSocket(handleMessage, handleConnectionChange);
 
-  const setSymbol    = (sym) => dispatch({ type: "SET_SYMBOL",    payload: sym });
+  const setSymbol = useCallback((sym) => {
+    const requestId = ++symbolRequestId.current;
+    const save = symbolSaveQueue.current.then(async () => {
+      try {
+        const { data } = await saveSettings({ symbol: sym });
+        if (requestId === symbolRequestId.current) {
+          dispatch({ type: "SET_SYMBOL", payload: data.symbol || sym.trim().toUpperCase() });
+        }
+      } catch (error) {
+        if (requestId === symbolRequestId.current) {
+          console.error("Failed to switch symbol", error);
+        }
+      }
+    });
+    symbolSaveQueue.current = save;
+    return save;
+  }, []);
   const setConnected = (v)   => dispatch({ type: "SET_CONNECTED", payload: v   });
 
   // 切换测试网 / 真实网，同步写入后端设置
   const switchNetwork = async (tab) => {
-    dispatch({ type: "SET_NETWORK_TAB", payload: tab });
     try {
       await saveSettings({ testnet: tab === "test" });
-    } catch (_) {}
+      dispatch({ type: "SET_NETWORK_TAB", payload: tab });
+    } catch (error) {
+      console.error("Failed to switch network", error);
+    }
   };
 
   return (
