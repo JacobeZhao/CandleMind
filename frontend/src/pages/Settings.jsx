@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import {
   getSettings, saveSettings, getMyIp, testConnection,
   listAIProviders, listAIConfigs, createAIConfig, updateAIConfig,
-  deleteAIConfig, activateAIConfig, testAIConfig,
+  deleteAIConfig, activateAIConfig, testAIConfig, testAIConfigDraft,
 } from "../api/client";
 import { useApp } from "../context/AppContext";
 import {
@@ -43,6 +43,7 @@ export default function Settings() {
   });
   const [aiSaving,     setAiSaving]     = useState(false);
   const [aiTesting,    setAiTesting]    = useState(false);
+  const [aiDraftTesting, setAiDraftTesting] = useState(false);
   const [aiTestResult, setAiTestResult] = useState(null);
 
   useEffect(() => {
@@ -116,25 +117,62 @@ export default function Settings() {
   const onProviderChange = (pid) => {
     const def = providers.find(p => p.id === pid) || {};
     setAiForm(f => ({ ...f, provider: pid, base_url: def.base_url || "", model_name: def.model || "" }));
+    setAiTestResult(null);
   };
+
+  const aiErrorMessage = (error, fallback) => {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    return detail?.message || error.response?.data?.message || fallback;
+  };
+
+  const persistAiForm = async () => {
+    if (editingAi) await updateAIConfig(editingAi.id, aiForm);
+    else           await createAIConfig(aiForm);
+    const { data } = await listAIConfigs();
+    setAiConfigs(data);
+    setAiView("list");
+  };
+
   const saveAiForm = async () => {
-    if (!aiForm.name.trim()) return;
-    setAiSaving(true);
+    if (!aiForm.name.trim() || aiSaving || aiTesting || aiDraftTesting) return;
+    setAiSaving(true); setAiTestResult(null);
     try {
-      if (editingAi) await updateAIConfig(editingAi.id, aiForm);
-      else           await createAIConfig(aiForm);
-      const { data } = await listAIConfigs();
-      setAiConfigs(data); setAiView("list");
-    } catch (e) { alert(e.response?.data?.detail || "保存失败"); }
+      await persistAiForm();
+    } catch (e) {
+      setAiTestResult({ ok: false, msg: aiErrorMessage(e, "保存失败") });
+    }
     finally { setAiSaving(false); }
   };
+
+  const saveAndTestAiForm = async () => {
+    if (!aiForm.name.trim() || aiSaving || aiTesting || aiDraftTesting) return;
+    setAiDraftTesting(true); setAiTestResult(null);
+    try {
+      const draft = editingAi ? { ...aiForm, config_id: editingAi.id } : aiForm;
+      await testAIConfigDraft(draft);
+    } catch (e) {
+      setAiTestResult({ ok: false, msg: aiErrorMessage(e, "连接测试失败，配置未保存") });
+      setAiDraftTesting(false);
+      return;
+    }
+    try {
+      await persistAiForm();
+    } catch (e) {
+      setAiTestResult({ ok: false, msg: aiErrorMessage(e, "连接成功，但保存失败") });
+    } finally {
+      setAiDraftTesting(false);
+    }
+  };
+
   const testAi = async (id) => {
+    if (aiSaving || aiTesting || aiDraftTesting) return;
     setAiTesting(true); setAiTestResult(null);
     try {
       const { data } = await testAIConfig(id);
       setAiTestResult({ ok: true, msg: `连接成功：${data.response}` });
     } catch (e) {
-      setAiTestResult({ ok: false, msg: e.response?.data?.detail || "连接失败" });
+      setAiTestResult({ ok: false, msg: aiErrorMessage(e, "连接失败") });
     } finally { setAiTesting(false); }
   };
   const handleActivateAi = async (id) => {
@@ -228,7 +266,7 @@ export default function Settings() {
             <p className="text-xs text-muted mt-0.5">
               {activeAi
                 ? `已激活：${activeAi.name}（${activeAi.provider}）`
-                : "未配置 AI 模型，策略页将无法使用 AI 解析功能"}
+                : "未配置 AI 模型，AI 辅助功能将不可用"}
             </p>
           </div>
           <button onClick={openAiModal}
@@ -360,7 +398,7 @@ export default function Settings() {
                 <div>
                   <label className={lbl}>模型名称</label>
                   <input value={aiForm.model_name} onChange={e => setAiForm(f=>({...f,model_name:e.target.value}))}
-                    placeholder="例：deepseek-chat" className={inp} />
+                    placeholder="例：deepseek-v4-pro" className={inp} />
                 </div>
               </div>
               <div>
@@ -382,19 +420,25 @@ export default function Settings() {
                   {aiTestResult.msg}
                 </div>
               )}
-              <div className="flex gap-3 pt-2">
-                <button onClick={saveAiForm} disabled={aiSaving || !aiForm.name.trim()}
+              <div className="flex flex-wrap gap-3 pt-2">
+                <button onClick={saveAiForm} disabled={aiSaving || aiTesting || aiDraftTesting || !aiForm.name.trim()}
                   className="flex items-center gap-2 bg-accent text-black px-5 py-2 rounded-lg text-sm font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors">
-                  <Save size={13}/> {aiSaving ? "保存中..." : "保存"}
+                  {aiSaving ? <Loader size={13} className="animate-spin"/> : <Save size={13}/>}
+                  {aiSaving ? "保存中..." : "保存"}
+                </button>
+                <button onClick={saveAndTestAiForm} disabled={aiSaving || aiTesting || aiDraftTesting || !aiForm.name.trim()}
+                  className="flex items-center gap-2 bg-surface border border-accent/40 px-4 py-2 rounded-lg text-sm text-accent hover:bg-accent/10 disabled:opacity-60 transition-colors">
+                  {aiDraftTesting ? <Loader size={13} className="animate-spin"/> : <Zap size={13}/>}
+                  {aiDraftTesting ? "测试并保存中..." : "保存并测试"}
                 </button>
                 {editingAi && (
-                  <button onClick={() => testAi(editingAi.id)} disabled={aiTesting}
+                  <button onClick={() => testAi(editingAi.id)} disabled={aiSaving || aiTesting || aiDraftTesting}
                     className="flex items-center gap-2 bg-surface border border-border px-4 py-2 rounded-lg text-sm text-muted hover:text-white disabled:opacity-60 transition-colors">
                     {aiTesting ? <Loader size={13} className="animate-spin"/> : <Zap size={13}/>}
-                    测试连接
+                    {aiTesting ? "测试中..." : "测试已保存配置"}
                   </button>
                 )}
-                <button onClick={() => setAiView("list")}
+                <button onClick={() => setAiView("list")} disabled={aiSaving || aiTesting || aiDraftTesting}
                   className="px-4 py-2 rounded-lg text-sm text-muted border border-border hover:text-white transition-colors">
                   取消
                 </button>

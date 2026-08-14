@@ -1,86 +1,28 @@
-# CandleMind G-Drive Data Store
+# CandleMind G-Drive Store
 
-This directory is the external data and artifact store for CandleMind. The
-application data root is:
+The authoritative data root is:
 
 ```text
 G:\CandleMind\CandleMind_data
 ```
 
-Set `MARKET_DATA_DIR` only when an intentional override is required. The
-directory constants in `backend/app/datastore.py` define the authoritative
-application paths.
-
-## Directory Map
+Keep backups as a sibling of live data, never inside it:
 
 ```text
 G:\CandleMind\
 |-- CandleMind_data\
-|   |-- raw\
-|   |   |-- klines_json\
-|   |   `-- funding\
-|   |-- normalized\
-|   |   `-- ohlcv_parquet\
-|   |-- processed\
-|   |   |-- features_app\
-|   |   |-- features_ml\
-|   |   `-- labels\
-|   |-- models\
-|   |   |-- current\
-|   |   |   `-- ACTIVE
-|   |   |-- releases\
-|   |   |-- candidates\
-|   |   |   `-- supervised\
-|   |   |-- archive\
-|   |   `-- rl\
-|   |       `-- candidates\
-|   |-- experiments\
-|   |   |-- backtests\
-|   |   |-- reports\
-|   |   `-- experiments.db
-|   |-- runtime\
-|   |   |-- app\
-|   |   |-- journal\
-|   |   `-- regime_cache\
-|   `-- manifests\
 `-- CandleMind_backups\
 ```
 
-`CandleMind_backups` is a sibling of `CandleMind_data`, not a child of it.
-Timestamped snapshots belong under `CandleMind_backups`; do not mix backups
-with live data or model directories.
+Required live-data groups are `raw`, `normalized`, `processed`,
+`experiments`, `runtime`, and `manifests`. Current application reads use
+`normalized/ohlcv_parquet`, `normalized/ema/releases`, and
+`normalized/derivatives/releases`. Paper runtime database, encryption key, and
+`strategies/sar_adx_paper_<symbol>.json` restart state belong together under
+`runtime/app`; SAR+ADX backtest outputs belong under `experiments/backtests` or
+`experiments/reports`.
 
-`runtime/app` contains `trader.db` and its matching `secret.key`. Never replace
-one without the other. Host execution defaults to this directory on Windows;
-Docker mounts it at `/app/runtime` and uses `DATA_DIR=/app/runtime`.
-
-## Current Supervised Release
-
-The current supervised release is the immutable directory under
-`models/releases` named by `models/current/ACTIVE`. An older layout may omit
-that pointer only while `models/current` contains exactly one release directory.
-
-Treat this release as immutable. Do not add, overwrite, or retrain files in
-place. Build a complete candidate in a new directory, verify its data lineage,
-metrics, metadata, and SHA-256 hashes, seal `release_manifest.json`, then use
-`python -m backend.scripts.artifacts.promote_supervised_release` to move and
-activate the whole release.
-
-## RL Candidates
-
-RL artifacts remain under `models/rl/candidates`. They are research candidates,
-not production models. Each run directory keeps its own `manifest.json` and
-related training/evaluation metadata. A candidate stays here until it passes
-the required walk-forward, cost, and cross-symbol stress gates; failed or
-rejected candidates must not be copied into `models/current`.
-
-## Manifests
-
-`manifests/inventory_current.json` is the current machine-readable inventory of
-the data root. Regenerate it after an intentional data or release change.
-`manifests/INVENTORY.md` is a migration-time record retained for history; it is
-not authoritative for current paths or model selection. RL run manifests stay
-beside their artifacts under `models/rl/candidates/.../manifest.json`.
-
-Before moving or deleting data, create or refresh an inventory with hashes and
-verify that a recoverable snapshot exists under the sibling backup directory.
+Use the supported commands in `backend/scripts/README.md`. Do not hand-edit
+immutable release files, mix generated data into the Git repository, or delete
+raw data based only on matching filenames. Historical artifacts may remain
+archived on G drive but are not part of the current application.

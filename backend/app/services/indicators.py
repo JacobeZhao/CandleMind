@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any
 
+from ..strategies.sar_pyramid import parabolic_sar
+
 
 # ── Primitive helpers ─────────────────────────────────────────────────────────
 
@@ -47,57 +49,16 @@ def _calc_dema(df, p):
     e1 = _ema(df["close"], n)
     return {f"dema{n}": 2 * e1 - _ema(e1, n)}
 
-def _calc_supertrend(df, p):
-    atr_period = p.get("atr_period", 10)
-    mult       = p.get("multiplier", 3.0)
-    atr  = _atr(df, atr_period)
-    hl2  = (df["high"] + df["low"]) / 2
-    ub   = (hl2 + mult * atr).values
-    lb   = (hl2 - mult * atr).values
-    c    = df["close"].values
-    n    = len(df)
-    upper, lower = ub.copy(), lb.copy()
-    direction = np.ones(n, dtype=np.int8)
-    st = np.full(n, np.nan)
-    for i in range(1, n):
-        upper[i] = ub[i] if ub[i] < upper[i-1] or c[i-1] > upper[i-1] else upper[i-1]
-        lower[i] = lb[i] if lb[i] > lower[i-1] or c[i-1] < lower[i-1] else lower[i-1]
-        direction[i] = 1 if c[i] > upper[i] else (-1 if c[i] < lower[i] else direction[i-1])
-        st[i] = lower[i] if direction[i] == 1 else upper[i]
-    return {
-        "supertrend":     pd.Series(st, index=df.index),
-        "supertrend_dir": pd.Series(direction.astype(int), index=df.index),
-    }
-
 def _calc_psar(df, p):
-    step    = p.get("step", 0.02)
-    max_af  = p.get("max", 0.2)
-    high, low = df["high"].values, df["low"].values
-    n = len(df)
-    psar = np.full(n, np.nan)
-    psar[0] = low[0]
-    bull = True
-    af   = step
-    ep   = high[0]
-    for i in range(1, n):
-        prev = psar[i - 1]
-        if bull:
-            psar[i] = prev + af * (ep - prev)
-            psar[i] = min(psar[i], low[i - 1], low[i - 2] if i > 1 else low[i - 1])
-            if low[i] < psar[i]:
-                bull, psar[i], ep, af = False, ep, low[i], step
-            elif high[i] > ep:
-                ep = high[i]
-                af = min(af + step, max_af)
-        else:
-            psar[i] = prev + af * (ep - prev)
-            psar[i] = max(psar[i], high[i - 1], high[i - 2] if i > 1 else high[i - 1])
-            if high[i] > psar[i]:
-                bull, psar[i], ep, af = True, ep, high[i], step
-            elif low[i] < ep:
-                ep = low[i]
-                af = min(af + step, max_af)
-    return {"psar": pd.Series(psar, index=df.index)}
+    result = parabolic_sar(
+        df,
+        step=p.get("step", 0.02),
+        maximum=p.get("max", 0.2),
+    )
+    return {
+        "psar": result["psar"],
+        "psar_direction": result["sar_direction"],
+    }
 
 def _calc_ichimoku(df, p):
     tk = p.get("tenkan", 9)
@@ -274,12 +235,9 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "dema":       {"name": "DEMA",            "category": "trend",      "panel": "main",
                    "params": {"period": 20},
                    "outputs": ["dema{period}"],             "fn": _calc_dema},
-    "supertrend": {"name": "SuperTrend",      "category": "trend",      "panel": "main",
-                   "params": {"atr_period": 10, "multiplier": 3.0},
-                   "outputs": ["supertrend", "supertrend_dir"], "fn": _calc_supertrend},
     "psar":       {"name": "Parabolic SAR",   "category": "trend",      "panel": "main",
                    "params": {"step": 0.02, "max": 0.2},
-                   "outputs": ["psar"],                     "fn": _calc_psar},
+                   "outputs": ["psar", "psar_direction"],   "fn": _calc_psar},
     "ichimoku":   {"name": "Ichimoku Cloud",  "category": "trend",      "panel": "main",
                    "params": {"tenkan": 9, "kijun": 26, "senkou_b": 52},
                    "outputs": ["ichi_tenkan","ichi_kijun","ichi_senkou_a","ichi_senkou_b","ichi_chikou"],

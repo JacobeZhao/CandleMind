@@ -8,8 +8,6 @@ const Dashboard = React.lazy(() => import("./pages/Dashboard"));
 const Markets = React.lazy(() => import("./pages/Markets"));
 const Orders = React.lazy(() => import("./pages/Orders"));
 const Backtest = React.lazy(() => import("./pages/Backtest"));
-const Research = React.lazy(() => import("./pages/Research"));
-const Strategy = React.lazy(() => import("./pages/Strategy"));
 const Settings = React.lazy(() => import("./pages/Settings"));
 
 function PageFallback() {
@@ -28,17 +26,15 @@ export default function App() {
   return (
     <div className="flex h-screen bg-bg text-gray-100 overflow-hidden">
       <Sidebar />
-      <div className="flex flex-col flex-1 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-y-auto p-4">
+        <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2 sm:p-4">
           <Suspense fallback={<PageFallback />}>
             <Routes>
               <Route path="/"         element={<Dashboard />} />
               <Route path="/markets"  element={<Markets />} />
               <Route path="/orders"   element={<Orders />} />
               <Route path="/backtest" element={<Backtest />} />
-              <Route path="/research" element={<Research />} />
-              <Route path="/strategy" element={<Strategy />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*"         element={<Navigate to="/" replace />} />
             </Routes>

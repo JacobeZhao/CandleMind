@@ -30,11 +30,30 @@ def _build_df(client, symbol: str, interval: str, limit: int):
 @router.get("/ticker/{symbol}")
 async def ticker(symbol: str):
     client = _require_client()
-    t = await asyncio.to_thread(client.futures_symbol_ticker, symbol=symbol)
-    s = await asyncio.to_thread(client.futures_ticker, symbol=symbol)
-    return {**t, "priceChangePercent": s["priceChangePercent"],
-            "highPrice": s["highPrice"], "lowPrice": s["lowPrice"],
-            "quoteVolume": s["quoteVolume"]}
+    symbol = symbol.upper()
+    latest, stats, mark = await asyncio.gather(
+        asyncio.to_thread(client.futures_symbol_ticker, symbol=symbol),
+        asyncio.to_thread(client.futures_ticker, symbol=symbol),
+        asyncio.to_thread(client.futures_mark_price, symbol=symbol),
+    )
+
+    result = {
+        **latest,
+        "priceChangePercent": stats.get("priceChangePercent"),
+        "highPrice": stats.get("highPrice"),
+        "lowPrice": stats.get("lowPrice"),
+        "quoteVolume": stats.get("quoteVolume"),
+        "markPrice": mark.get("markPrice"),
+    }
+    optional_mark_fields = {
+        "indexPrice": "indexPrice",
+        "lastFundingRate": "lastFundingRate",
+        "nextFundingTime": "nextFundingTime",
+    }
+    for output_name, source_name in optional_mark_fields.items():
+        if source_name in mark:
+            result[output_name] = mark[source_name]
+    return result
 
 
 @router.get("/klines/{symbol}")
@@ -42,7 +61,7 @@ async def klines(
     symbol:   str,
     interval: str = Query("15m"),
     limit:    int = Query(200),
-    inds:     str = Query("supertrend"),    # comma-separated indicator IDs
+    inds:     str = Query("psar"),          # comma-separated indicator IDs
     params:   str = Query("{}"),            # JSON: {indicatorId: {param: value}}
 ):
     client = _require_client()
@@ -83,19 +102,6 @@ async def klines(
                 rec[k] = None
 
     return records
-
-
-@router.get("/indicators")
-def indicator_registry():
-    return {
-        iid: {
-            "name":     meta["name"],
-            "category": meta["category"],
-            "panel":    meta["panel"],
-            "params":   meta["params"],
-        }
-        for iid, meta in REGISTRY.items()
-    }
 
 
 @router.get("/symbols")

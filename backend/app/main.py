@@ -10,7 +10,7 @@ from .security import decrypt
 from .state import app_state
 from .binance_ws import binance_ws_client
 from .ws_manager import manager
-from .routes import settings, account, market, orders, backtest, ai_config, research, health
+from .routes import settings, account, market, orders, backtest, ai_config, health
 from .routes import strategy as strategy_route
 from .routes.settings import _build_client
 
@@ -105,7 +105,6 @@ app.include_router(orders.router,          prefix="/api/orders",    tags=["order
 app.include_router(strategy_route.router,  prefix="/api/strategy",  tags=["strategy"])
 app.include_router(backtest.router,        prefix="/api/backtest",  tags=["backtest"])
 app.include_router(ai_config.router,       prefix="/api/ai",        tags=["ai"])
-app.include_router(research.router,        prefix="/api/research",  tags=["research"])
 app.include_router(health.router,          prefix="/api/health",    tags=["health"])
 
 

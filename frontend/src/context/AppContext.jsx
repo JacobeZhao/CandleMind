@@ -17,12 +17,18 @@ const initial = {
 
 function reducer(state, action) {
   switch (action.type) {
-    case "SET_SYMBOL":      return { ...state, symbol: action.payload };
+    case "SET_SYMBOL":      return { ...state, symbol: action.payload, ticker: null };
     case "SET_CONNECTED":   return { ...state, connected: action.payload };
     case "SET_NETWORK_TAB": return { ...state, networkTab: action.payload };
     case "WS_MSG": {
       const { type, data } = action.payload;
-      if (type === "ticker")      return { ...state, ticker: data, connected: true };
+      if (type === "ticker") {
+        if (!data?.symbol || data.symbol !== state.symbol) return state;
+        const ticker = state.ticker?.symbol === data.symbol
+          ? { ...state.ticker, ...data }
+          : data;
+        return { ...state, ticker, connected: true };
+      }
       if (type === "account")     return { ...state, account: data };
       if (type === "positions")   return { ...state, positions: data };
       if (type === "open_orders") return { ...state, openOrders: data };

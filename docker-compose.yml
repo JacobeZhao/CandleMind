@@ -15,6 +15,7 @@ services:
       - MARKET_DATA_DIR=/app/market-data
       - DATA_DIR=/app/runtime
       - PYTHONUNBUFFERED=1
+      - CANDLEMIND_AI_BASE_URL_HOSTS=${CANDLEMIND_AI_BASE_URL_HOSTS:-}
     restart: unless-stopped
 
   frontend:

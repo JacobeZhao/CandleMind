@@ -1,41 +1,17 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useApp } from "../context/AppContext";
 import {
-  getOpenOrders, getOrderHistory, getRecentTrades, cancelOrder,
-  listStrategies, updateStrategy, activateStrategy,
-  startEngine, stopEngine, getEngineStatus, getSymbols,
+  getOrderHistory, getRecentTrades, cancelOrder,
+  startEngine, stopEngine, getEngineStatus,
 } from "../api/client";
 import {
-  RefreshCw, X, Play, Square, Save, Loader,
-  ChevronDown, ChevronUp, AlertTriangle, CheckCircle, AlertCircle,
+  RefreshCw, X, Play, Square, Loader,
+  AlertTriangle, CheckCircle, AlertCircle,
   Zap,
 } from "lucide-react";
 import clsx from "clsx";
 
 const TABS = ["挂单", "成交记录", "历史订单"];
-
-const inp = "w-full bg-surface border border-border rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-accent transition-colors";
-const lbl = "text-xs text-muted mb-1 block";
-
-const PARAM_DEFAULTS = {
-  exit_threshold:     0.35,
-  reversal_threshold: 0.58,
-  atr_trail:          3.0,
-  max_adds:           3,
-  add_min_atr:        0.8,
-  add_size_frac:      0.5,
-  kelly_frac:         0.25,
-};
-
-const PARAM_FIELDS = [
-  ["exit_threshold",     "出场阈值",    0.01],
-  ["reversal_threshold", "反转阈值",    0.01],
-  ["atr_trail",          "跟踪止损ATR", 0.1],
-  ["max_adds",           "最多加仓档",  1],
-  ["add_min_atr",        "加仓间隔ATR", 0.1],
-  ["add_size_frac",      "加仓仓位占比",0.05],
-  ["kelly_frac",         "Kelly系数",   0.05],
-];
 
 // ── 订单表格辅助 ──────────────────────────────────────────────────────────────
 
@@ -64,83 +40,20 @@ function StatusBadge({ status }) {
 // ── 引擎控制面板 ──────────────────────────────────────────────────────────────
 
 function EnginePanel() {
-  const { networkTab } = useApp();
+  const { networkTab, symbol } = useApp();
+  const [engine, setEngine] = useState({ running: false, circuit_open: false });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
 
-  const [strat, setStrat]       = useState(null);
-  const [form, setForm]         = useState(null);
-  const [params, setParams]     = useState({});
-  const [symbols, setSymbols]   = useState([]);
-  const [engine, setEngine]     = useState({ running: false, circuit_open: false });
-  const [paper, setPaper]       = useState(true);
-  const [expanded, setExpanded] = useState(false);
-  const [saving, setSaving]     = useState(false);
-  const [busy, setBusy]         = useState(false);
-  const [msg, setMsg]           = useState(null);
-  const [thresholds, setThresholds] = useState({});
-
-  const loadStrategy = useCallback(async () => {
-    try {
-      const [{ data: list }, { data: eng }] = await Promise.all([
-        listStrategies(), getEngineStatus(),
-      ]);
-      const s = list.find(x => x.strategy_type === "ml_trend") || list[0];
-      setStrat(s);
-      if (s) {
-        setForm({
-          name:           s.name,
-          symbol:         s.symbol,
-          leverage:       s.leverage,
-          risk_pct:       s.risk_pct,
-          interval:       s.interval || "5m",
-          stop_loss_pct:  s.stop_loss_pct,
-          take_profit_pct:s.take_profit_pct,
-          is_active:      s.is_active,
-        });
-        setParams({ ...PARAM_DEFAULTS, ...(s.strategy_params || {}) });
-      }
-      setEngine(eng);
-    } catch (_) {}
+  const loadStatus = useCallback(() => {
+    getEngineStatus().then(({ data }) => setEngine(data)).catch(() => {});
   }, []);
 
   useEffect(() => {
-    loadStrategy();
-    getSymbols().then(({ data }) => setSymbols(data)).catch(() => {});
-    fetch("/api/research/ml/thresholds")
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setThresholds(d); })
-      .catch(() => {});
-    const id = setInterval(() =>
-      getEngineStatus().then(({ data }) => setEngine(data)).catch(() => {}), 5000);
+    loadStatus();
+    const id = setInterval(loadStatus, 5000);
     return () => clearInterval(id);
-  }, []);
-
-  const setF = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const setP = (k, v) => setParams(p => ({ ...p, [k]: Number(v) }));
-
-  const handleSave = async () => {
-    if (!strat) return;
-    setSaving(true); setMsg(null);
-    try {
-      await updateStrategy(strat.id, {
-        name:                 form.name,
-        symbol:               form.symbol,
-        interval:             form.interval,
-        leverage:             Number(form.leverage),
-        risk_pct:             Number(form.risk_pct),
-        stop_loss_pct:        form.stop_loss_pct,
-        take_profit_pct:      form.take_profit_pct,
-        strategy_type:        "ml_trend",
-        strategy_params_json: JSON.stringify(params),
-        ai_strategy_json:     null,
-      });
-      setMsg({ ok: true, text: "配置已保存" });
-      loadStrategy();
-    } catch (e) {
-      setMsg({ ok: false, text: e.response?.data?.detail || "保存失败" });
-    } finally {
-      setSaving(false);
-    }
-  };
+  }, [loadStatus]);
 
   const toggleEngine = async () => {
     setBusy(true); setMsg(null);
@@ -149,15 +62,17 @@ function EnginePanel() {
         await stopEngine();
         setMsg({ ok: true, text: "策略已停止" });
       } else {
-        if (!form?.is_active && strat) await activateStrategy(strat.id);
-        const confirmLive = !paper && window.confirm("确认启动实盘交易？订单将发送到真实账户。");
-        if (!paper && !confirmLive) return;
-        const { data } = await startEngine(paper, confirmLive);
+        const { data } = await startEngine({
+          strategy_type: "sar_adx_pyramid",
+          config_version: "sar_adx_v3",
+          symbol,
+          paper: true,
+          initial_capital: 10000,
+        });
         setMsg({ ok: true, text: data.message || "已启动" });
       }
       const { data } = await getEngineStatus();
       setEngine(data);
-      loadStrategy();
     } catch (e) {
       setMsg({ ok: false, text: e.response?.data?.detail || "操作失败" });
     } finally {
@@ -166,7 +81,7 @@ function EnginePanel() {
   };
 
   const isTestnet = networkTab === "test";
-  const thresholdCoins = Object.keys(thresholds);
+  const boundSymbol = engine.symbol || engine.strategy_symbol || symbol;
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden mb-4">
@@ -189,11 +104,7 @@ function EnginePanel() {
                 : "border-red/40 text-red bg-red/5")}>
               {isTestnet ? "测试网" : "真实网"}
             </span>
-            {form && (
-              <span className="text-xs text-muted font-mono">
-                {form.symbol} · {form.leverage}x · {(form.risk_pct * 100).toFixed(1)}%风险
-              </span>
-            )}
+            <span className="text-xs text-muted font-mono">{engine.running ? `绑定 ${boundSymbol}` : `待启动 ${symbol}`}</span>
             {engine.running && engine.paper && (
               <span className="text-xs text-accent">纸面 · ${engine.paper_equity}</span>
             )}
@@ -206,20 +117,8 @@ function EnginePanel() {
               {msg.ok ? <CheckCircle size={11} /> : <AlertCircle size={11} />} {msg.text}
             </span>
           )}
-          {!engine.running && (
-            <button onClick={() => setPaper(v => !v)}
-              className={clsx("flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs border transition-colors",
-                paper
-                  ? "border-accent/50 bg-accent/10 text-accent"
-                  : "border-red/40 bg-red/5 text-red")}>
-              <span className={clsx("w-3 h-3 rounded border flex items-center justify-center shrink-0",
-                paper ? "bg-accent border-accent" : "border-red")}>
-                {paper && <span className="text-[8px] text-black font-bold">✓</span>}
-              </span>
-              {paper ? "纸面" : "实盘"}
-            </button>
-          )}
-          <button onClick={toggleEngine} disabled={busy || !strat}
+          <span className="border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-accent">仅纸面</span>
+          <button onClick={toggleEngine} disabled={busy || !symbol}
             className={clsx("flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors disabled:opacity-50",
               engine.running
                 ? "bg-red/10 border border-red/30 text-red hover:bg-red/20"
@@ -228,12 +127,14 @@ function EnginePanel() {
               : engine.running ? <Square size={12} /> : <Play size={12} />}
             {engine.running ? "停止" : "启动策略"}
           </button>
-          <button onClick={() => setExpanded(v => !v)}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-muted hover:text-white border border-border hover:border-border/80 transition-colors">
-            {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            配置
-          </button>
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 px-4 py-2 text-xs text-muted">
+        <span>策略 <strong className="font-mono font-medium text-white">SAR + ADX 分批加仓 V3</strong></span>
+        <span>执行周期 <strong className="font-mono font-medium text-white">5m</strong></span>
+        <span>趋势过滤 <strong className="font-mono font-medium text-white">1h ADX</strong></span>
+        <span>目标仓位 <strong className="font-mono font-medium text-white">5 x 20%</strong></span>
       </div>
 
       {/* ── 运行状态条 ───────────────────────────────────────── */}
@@ -252,106 +153,6 @@ function EnginePanel() {
         </div>
       )}
 
-      {/* ── 展开配置区 ──────────────────────────────────────── */}
-      {expanded && form && (
-        <div className="p-4 space-y-4 border-t border-border/60">
-
-          {/* 基础参数 */}
-          <div>
-            <p className="text-xs text-muted font-medium mb-2 uppercase tracking-wide">基础参数</p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="col-span-2 md:col-span-1">
-                <label className={lbl}>交易品种</label>
-                <input list="eng-symlist" value={form.symbol}
-                  onChange={e => setF("symbol", e.target.value.toUpperCase())}
-                  className={inp} />
-                <datalist id="eng-symlist">
-                  {symbols.slice(0, 80).map(s => <option key={s} value={s} />)}
-                </datalist>
-              </div>
-              <div>
-                <label className={lbl}>杠杆</label>
-                <input type="number" value={form.leverage} min={1} max={50}
-                  onChange={e => setF("leverage", Number(e.target.value))} className={inp} />
-              </div>
-              <div>
-                <label className={lbl}>每笔风险 %</label>
-                <input type="number" step={0.5}
-                  value={(form.risk_pct * 100).toFixed(1)}
-                  onChange={e => setF("risk_pct", Number(e.target.value) / 100)}
-                  className={clsx(inp, form.risk_pct >= 0.05 && "border-red/50")} />
-                {form.risk_pct >= 0.05 && (
-                  <p className="text-[10px] text-red mt-0.5">⚠ ≥5% 偏激进</p>
-                )}
-              </div>
-              <div>
-                <label className={lbl}>K线周期</label>
-                <select value={form.interval} onChange={e => setF("interval", e.target.value)}
-                  className={inp}>
-                  {["1m","3m","5m","15m","30m","1h"].map(v =>
-                    <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* ML 策略参数 */}
-          <div>
-            <p className="text-xs text-muted font-medium mb-2 uppercase tracking-wide">ML 策略参数</p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {PARAM_FIELDS.map(([k, label, step]) => (
-                <div key={k}>
-                  <label className={lbl}>{label}</label>
-                  <input type="number" step={step}
-                    value={params[k] ?? PARAM_DEFAULTS[k] ?? 0}
-                    onChange={e => setP(k, e.target.value)}
-                    className={inp} />
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 入场阈值（只读） */}
-          {thresholdCoins.length > 0 && (
-            <div>
-              <p className="text-xs text-muted font-medium mb-2 uppercase tracking-wide">
-                入场阈值（模型自动校准，只读）
-              </p>
-              <div className="grid grid-cols-3 md:grid-cols-5 gap-x-6 gap-y-1">
-                {thresholdCoins.map(coin => {
-                  const row = thresholds[coin];
-                  const lv = typeof row === "object" ? (row.long ?? row.long_threshold ?? "—") : row;
-                  const sv = typeof row === "object" ? (row.short ?? row.short_threshold ?? "—") : "—";
-                  return (
-                    <div key={coin} className="text-xs flex justify-between font-mono py-0.5">
-                      <span className="text-muted">{coin.replace("USDT", "")}</span>
-                      <span className="text-cyan-400">
-                        {typeof lv === "number" ? lv.toFixed(3) : lv}
-                        {" / "}
-                        {typeof sv === "number" ? sv.toFixed(3) : sv}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* 保存 */}
-          <div className="flex items-center justify-end gap-3 pt-1">
-            {msg && (
-              <span className={clsx("text-xs flex items-center gap-1", msg.ok ? "text-green" : "text-red")}>
-                {msg.ok ? <CheckCircle size={11} /> : <AlertCircle size={11} />} {msg.text}
-              </span>
-            )}
-            <button onClick={handleSave} disabled={saving}
-              className="flex items-center gap-1.5 bg-accent/10 border border-accent/40 text-accent px-4 py-1.5 rounded-lg text-xs font-bold hover:bg-accent/20 disabled:opacity-60 transition-colors">
-              {saving ? <Loader size={12} className="animate-spin" /> : <Save size={12} />}
-              保存配置
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -2,31 +2,41 @@
 
 ## Project Structure & Module Organization
 
-CandleMind is split into a FastAPI backend and a Vite/React frontend. Backend application code lives in `backend/app/`: `routes/` contains API routers, `services/` contains trading, backtesting, ML, and reporting logic, and shared runtime pieces such as `database.py`, `state.py`, and `ws_manager.py` sit at the app root. Backend commands are grouped by responsibility under `backend/scripts/{data,training,evaluation,artifacts}/`; the supervised retraining entry point is `backend.scripts.training.retrain_multi_horizon`.
+CandleMind has a FastAPI backend in `backend/app/` and a Vite/React frontend
+in `frontend/src/`. API routers live in `backend/app/routes/`; reusable
+market-data, AI, backtest, and paper-runtime logic lives in
+`backend/app/services/`; SAR+ADX strategy code lives in
+`backend/app/strategies/`. Supported commands are limited to
+`backend/scripts/data/` and `backend/scripts/evaluation/`.
 
-Frontend code lives in `frontend/src/`: `pages/` contains route-level screens, `components/` reusable UI, `context/` app state, `hooks/` React hooks, and `api/client.js` HTTP access. Generated data, models, reports, and runtime state live under `G:/CandleMind/CandleMind_data`; do not recreate a repository `data/` tree. Docker assets are in each service directory plus the root `docker-compose.yml`.
+Frontend route screens are in `frontend/src/pages/`, shared UI in
+`components/`, state in `context/`, and HTTP calls in `api/client.js`.
+Generated data, reports, runtime state, and historical artifacts belong under
+`G:/CandleMind/CandleMind_data`, never in a repository `data/` tree.
 
 ## Build, Test, and Development Commands
 
-- `python -m venv .venv` then `pip install -r backend/requirements-dev.txt`: create a backend environment with test dependencies.
-- `uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000`: run the API locally.
-- `cd frontend && npm install`: install frontend dependencies.
-- `cd frontend && npm run dev`: start the Vite dev server.
-- `cd frontend && npm run build`: produce a production frontend build.
-- `docker compose up --build`: build and run backend on `8000` and frontend on `3000`.
+- `pip install -r backend/requirements-dev.txt`: install backend and test dependencies.
+- `python -m uvicorn backend.app.main:app --reload --port 8000`: run the API.
+- `cd frontend && npm ci && npm run dev`: install and start Vite.
+- `cd frontend && npm run build`: verify the production frontend bundle.
+- `python -m pytest backend/tests -q`: run backend tests.
+- `powershell -File ops/verify.ps1`: run the complete isolated verification gate.
 
-## Coding Style & Naming Conventions
+## Coding Style & Testing
 
-Use Python 3 style with 4-space indentation, snake_case functions/modules, and PascalCase classes. Keep FastAPI route handlers thin and place reusable domain logic in `backend/app/services/`. Use React function components, PascalCase component files, camelCase variables, and colocate page-specific UI in `frontend/src/pages/`. Prefer existing Tailwind utility patterns and lucide-react icons already used by the frontend.
+Use 4-space Python indentation, snake_case functions/modules, PascalCase
+classes, and thin FastAPI handlers. Use React function components, PascalCase
+component files, camelCase variables, existing Tailwind patterns, and
+`lucide-react` icons. Name tests `test_*.py`; use mocks for Binance and
+network calls. Every backend change must pass pytest and compilation; every
+frontend change must pass `npm run build`.
 
-## Testing Guidelines
+## Commits, Security, And Trading Safety
 
-Backend tests live under `backend/tests/` and use `pytest`; run them with `python -m pytest backend/tests -q`. Name new tests `test_*.py` and use FastAPI `TestClient` for route coverage. The frontend does not yet have a test runner, so verify `cd frontend && npm run build` for every frontend change. Add colocated `*.test.jsx` files when introducing a runner. Before submitting, run the backend tests, compile changed Python modules, and build the frontend.
-
-## Commit & Pull Request Guidelines
-
-Git history uses Conventional Commit prefixes such as `feat:`, `fix:`, and `chore:`. Keep subjects short and specific, for example `fix: strategy signal threshold handling`. Pull requests should include a concise summary, affected backend/frontend areas, setup or migration notes, linked issues if applicable, and screenshots for UI changes.
-
-## Security & Configuration Tips
-
-Do not commit real Binance keys, database files, model artifacts, or secrets. Use `.env.example` as the configuration template and keep local secrets in ignored environment files. Treat live trading changes as high risk: document testnet validation and default to non-destructive behavior when touching orders or strategy execution.
+Use Conventional Commit prefixes such as `feat:`, `fix:`, and `chore:`.
+Pull requests should state affected areas, verification commands, migration
+notes, and include screenshots for UI changes. Never commit secrets, databases,
+market data, or generated artifacts. Treat order code as high risk: preserve
+paper-only defaults, validate symbols and parameters, and document any future
+testnet validation before enabling exchange writes.

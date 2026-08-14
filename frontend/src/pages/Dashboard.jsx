@@ -1,7 +1,7 @@
 import React from "react";
 import { useApp } from "../context/AppContext";
 import { useNavigate } from "react-router-dom";
-import { Wallet, TrendingUp, TrendingDown, Activity, AlertCircle, BarChart3 } from "lucide-react";
+import { Wallet, TrendingUp, Activity, AlertCircle, BarChart3 } from "lucide-react";
 import clsx from "clsx";
 
 function StatCard({ icon: Icon, label, value, sub, color = "text-white" }) {

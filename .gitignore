@@ -36,8 +36,6 @@ models/
 runs/
 checkpoints/
 artifacts/
-!backend/scripts/artifacts/
-!backend/scripts/artifacts/*.py
 playwright-report/
 test-results/
 *.db
@@ -56,9 +54,6 @@ test-results/
 *.h5
 *.hdf5
 *.joblib
-
-# CatBoost training artifacts
-catboost_info/
 
 # Node
 node_modules/
@@ -79,10 +74,10 @@ Thumbs.db
 # Project tooling
 .gstack/
 .tmp/
+/test-tmp/
 .harness/
 backups/
 scripts_tmp_*.py
-# .claude/ contains the tracked tech-debt skill system.
 .claude/settings.local.json
 .claude/reports/
 .claude/worktrees/

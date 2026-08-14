@@ -1,0 +1,11 @@
+"""Stable timing contract for funding-rate observations."""
+
+FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
+FUNDING_GAP_TOLERANCE_MS = 60 * 1000
+FUNDING_MAX_GAP_MS = FUNDING_INTERVAL_MS + FUNDING_GAP_TOLERANCE_MS
+
+__all__ = [
+    "FUNDING_INTERVAL_MS",
+    "FUNDING_GAP_TOLERANCE_MS",
+    "FUNDING_MAX_GAP_MS",
+]

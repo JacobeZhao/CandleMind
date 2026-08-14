@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { createChart, LineStyle } from "lightweight-charts";
-import { SlidersHorizontal, X, ChevronDown, ChevronUp } from "lucide-react";
+import { MessageSquare, SlidersHorizontal, X, ChevronDown, ChevronUp } from "lucide-react";
 import { getKlines } from "../api/client";
 import { useApp } from "../context/AppContext";
+import MarketAiDialog from "./MarketAiDialog";
 
 const INTERVALS   = ["1m", "5m", "15m", "1h", "4h", "1d"];
 const VISIBLE_BARS = 80;
@@ -10,7 +11,6 @@ const VISIBLE_BARS = 80;
 // ── Indicator metadata ────────────────────────────────────────────────────────
 const IND_META = {
   // Main panel
-  supertrend: { name: "SuperTrend",      cat: "趋势", panel: "main", color: "#0ecb81" },
   ema:        { name: "EMA",             cat: "趋势", panel: "main", color: "#3b82f6" },
   sma:        { name: "SMA",             cat: "趋势", panel: "main", color: "#f59e0b" },
   wma:        { name: "WMA",             cat: "趋势", panel: "main", color: "#8b5cf6" },
@@ -27,7 +27,7 @@ const IND_META = {
   stoch:      { name: "Stochastic",      cat: "振荡", panel: "sub" },
   cci:        { name: "CCI",             cat: "振荡", panel: "sub" },
   williams_r: { name: "Williams %R",     cat: "振荡", panel: "sub" },
-  adx:        { name: "ADX",             cat: "动量", panel: "sub" },
+  adx:        { name: "ADX / DI",        cat: "动量", panel: "sub" },
   roc:        { name: "ROC",             cat: "动量", panel: "sub" },
   atr:        { name: "ATR",             cat: "波动", panel: "sub" },
   obv:        { name: "OBV",             cat: "成交量",panel: "sub" },
@@ -37,7 +37,6 @@ const IND_META = {
 };
 
 const DEFAULT_PARAMS = {
-  supertrend: { atr_period: 10, multiplier: 3.0 },
   ema:        { period: 20 },
   sma:        { period: 20 },
   wma:        { period: 20 },
@@ -82,6 +81,18 @@ function line(chart, scaleId, c, w = 1, ls = LineStyle.Solid) {
   return chart.addLineSeries({
     priceScaleId: scaleId, color: c, lineWidth: w, lineStyle: ls,
     lastValueVisible: false, priceLineVisible: false,
+  });
+}
+
+function points(chart, scaleId, color) {
+  return chart.addLineSeries({
+    priceScaleId: scaleId,
+    color,
+    lineVisible: false,
+    pointMarkersVisible: true,
+    pointMarkersRadius: 2,
+    lastValueVisible: false,
+    priceLineVisible: false,
   });
 }
 
@@ -140,7 +151,7 @@ function toTs(d) { return Math.floor(new Date(d.open_time).getTime() / 1000); }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function PriceChart({ symbol, defaultInterval = "15m" }) {
+export default function PriceChart({ symbol, defaultInterval = "15m", headerLeading = null }) {
   const { ticker } = useApp();
   const containerRef = useRef(null);
   const chartRef     = useRef(null);
@@ -150,11 +161,12 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
   const [interval,     setIntervalState] = useState(defaultInterval);
   const [loading,      setLoading]       = useState(false);
   const [showPanel,    setShowPanel]     = useState(false);
+  const [showAi,       setShowAi]        = useState(false);
+  const closeAi = useCallback(() => setShowAi(false), []);
   const [expandedCat,  setExpandedCat]   = useState({});
 
   // Main panel: { [id]: { enabled, params } }
   const [mainConf, setMainConf] = useState({
-    supertrend: { enabled: true,  params: { atr_period: 10, multiplier: 3.0 } },
     ema:        { enabled: false, params: { period: 20 } },
     sma:        { enabled: false, params: { period: 20 } },
     wma:        { enabled: false, params: { period: 20 } },
@@ -163,12 +175,12 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
     keltner:    { enabled: false, params: { period: 20, multiplier: 2.0 } },
     donchian:   { enabled: false, params: { period: 20 } },
     vwap:       { enabled: false, params: {} },
-    psar:       { enabled: false, params: { step: 0.02, max: 0.2 } },
+    psar:       { enabled: true,  params: { step: 0.02, max: 0.2 } },
     ichimoku:   { enabled: false, params: { tenkan: 9, kijun: 26, senkou_b: 52 } },
   });
 
   // Sub panel: one at a time
-  const [subConf, setSubConf] = useState({ id: null, params: {} });
+  const [subConf, setSubConf] = useState({ id: "adx", params: { period: 14 } });
 
   // ── Chart init ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -254,7 +266,7 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
       symbol,
       interval,
       200,
-      indRequest.ids.length ? indRequest.ids : ["supertrend"],
+      indRequest.ids,
       indRequest.params,
       controller.signal,
     )
@@ -333,24 +345,32 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
   subInds.forEach(([id, m]) => { subCatMap[m.cat] = [...(subCatMap[m.cat] || []), id]; });
 
   return (
-    <div className="bg-card border border-border rounded-xl overflow-hidden h-full flex flex-col">
+    <div
+      className="price-chart-root relative h-full min-w-0 overflow-hidden rounded-xl border border-border bg-card flex flex-col"
+      style={{ width: "min(100%, calc(100vw - 88px))", maxWidth: "calc(100vw - 88px)" }}
+    >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0 gap-3">
-        <span className="text-sm font-semibold text-white shrink-0">{symbol}</span>
+      <div className="flex flex-wrap items-center px-3 sm:px-4 py-2.5 border-b border-border shrink-0 gap-2 sm:gap-3">
+        {headerLeading && (
+          <div className="min-w-0 w-full lg:w-auto lg:flex-1">
+            {headerLeading}
+          </div>
+        )}
+        {!headerLeading && <span className="text-sm font-semibold text-white shrink-0">{symbol}</span>}
 
         {/* Active indicator chips */}
-        <div className="flex items-center gap-1 flex-wrap flex-1 min-w-0">
+        <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1 overflow-x-auto" style={{ width: 0 }}>
           {Object.entries(mainConf)
             .filter(([, c]) => c.enabled)
             .map(([id]) => (
-              <span key={id} className="text-xs px-2 py-0.5 rounded-full border"
+              <span key={id} className="shrink-0 text-xs px-2 py-0.5 rounded-full border"
                 style={{ borderColor: `${IND_META[id]?.color}55`, color: IND_META[id]?.color,
                          background: `${IND_META[id]?.color}11` }}>
                 {IND_META[id]?.name}
               </span>
             ))}
           {subConf.id && (
-            <span className="text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-accent">
+            <span className="shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-accent">
               {IND_META[subConf.id]?.name}
             </span>
           )}
@@ -358,6 +378,7 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
 
         {/* Indicator picker button */}
         <button onClick={() => setShowPanel(p => !p)}
+          aria-expanded={showPanel} aria-controls="indicator-panel"
           className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-colors shrink-0 ${
             showPanel ? "border-accent text-accent bg-accent/10" : "border-border text-muted hover:text-white"
           }`}>
@@ -365,15 +386,30 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
         </button>
 
         {/* Interval tabs */}
-        <div className="flex gap-1 shrink-0">
-          {INTERVALS.map(iv => (
-            <button key={iv} onClick={() => setIntervalState(iv)}
-              className={`text-xs px-2 py-1 rounded transition-colors ${
-                interval === iv ? "bg-accent text-black font-bold" : "text-muted hover:text-white"
-              }`}>
-              {iv}
-            </button>
-          ))}
+        <div
+          className="order-last flex min-w-0 items-center gap-1 sm:order-none sm:w-auto sm:shrink-0"
+          style={{ flex: "0 0 100%", width: "100%", maxWidth: "100%" }}
+        >
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-0.5 sm:gap-1" style={{ width: 0 }}>
+            {INTERVALS.map(iv => (
+              <React.Fragment key={iv}>
+                {iv === "4h" && (
+                  <button type="button" onClick={() => setShowAi(true)} aria-label="打开 AI 行情分析" title="AI 行情分析" className="flex h-7 w-7 shrink-0 items-center justify-center border border-border bg-card text-muted sm:hidden">
+                    <MessageSquare size={14} />
+                  </button>
+                )}
+                <button onClick={() => setIntervalState(iv)}
+                  className={`min-w-0 flex-1 text-xs px-1 py-1 rounded transition-colors ${
+                    interval === iv ? "bg-accent text-black font-bold" : "text-muted hover:text-white"
+                  }`}>
+                  {iv}
+                </button>
+              </React.Fragment>
+            ))}
+          </div>
+          <button type="button" onClick={() => setShowAi(true)} aria-label="打开 AI 行情分析" title="AI 行情分析" className="hidden h-7 w-7 shrink-0 items-center justify-center border border-border bg-card text-muted transition-colors hover:border-accent/60 hover:text-accent sm:flex">
+            <MessageSquare size={14} />
+          </button>
         </div>
       </div>
 
@@ -391,10 +427,10 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
 
         {/* Indicator panel (right drawer) */}
         {showPanel && (
-          <div className="w-56 shrink-0 border-l border-border bg-card flex flex-col overflow-y-auto">
+          <div id="indicator-panel" className="absolute inset-y-0 right-0 z-20 flex w-full max-w-56 flex-col overflow-y-auto border-l border-border bg-card shadow-xl sm:relative sm:inset-auto sm:z-auto sm:w-56 sm:shrink-0 sm:shadow-none">
             <div className="flex items-center justify-between px-3 py-2 border-b border-border">
               <span className="text-xs font-semibold text-white">指标选择</span>
-              <button onClick={() => setShowPanel(false)} className="text-muted hover:text-white">
+              <button onClick={() => setShowPanel(false)} aria-label="关闭指标选择" className="text-muted hover:text-white">
                 <X size={12} />
               </button>
             </div>
@@ -441,6 +477,7 @@ export default function PriceChart({ symbol, defaultInterval = "15m" }) {
           </div>
         )}
       </div>
+      <MarketAiDialog open={showAi} onClose={closeAi} symbol={symbol} interval={interval} />
     </div>
   );
 }
@@ -537,18 +574,6 @@ function _updateMain(chart, sr, data, mainConf) {
     const ts = d => toTs(d);
 
     switch (id) {
-      case "supertrend": {
-        const s = _getSeries(chart, sr, "supertrend", c =>
-          line(c, "right", GREEN, 2));
-        setVisible(s, visible);
-        if (visible) {
-          safeSet(s, data.filter(d => d.supertrend != null).map(d => ({
-            time: ts(d), value: d.supertrend,
-            color: d.supertrend_dir === 1 ? GREEN : RED,
-          })));
-        }
-        break;
-      }
       case "ema": case "sma": case "wma": case "dema": {
         const col = colName(id, p);
         const clr = IND_META[id].color;
@@ -594,9 +619,17 @@ function _updateMain(chart, sr, data, mainConf) {
         break;
       }
       case "psar": {
-        const s = _getSeries(chart, sr, "psar", c => line(c, "right", "#ec4899", 0));
-        s.applyOptions({ visible, pointMarkersVisible: true });
-        if (visible) safeSet(s, data.filter(d => d.psar != null).map(d => ({ time: ts(d), value: d.psar })));
+        const s = _getSeries(chart, sr, "psar", c => ({
+          bull: points(c, "right", GREEN),
+          bear: points(c, "right", RED),
+        }));
+        setVisible(s, visible);
+        if (visible) {
+          safeSet(s.bull, data.filter(d => d.psar != null && d.psar_direction === 1).map(d => ({ time: ts(d), value: d.psar })));
+          safeSet(s.bear, data.filter(d => d.psar != null && d.psar_direction === -1).map(d => ({ time: ts(d), value: d.psar })));
+        } else {
+          clearData(s);
+        }
         break;
       }
       case "ichimoku": {

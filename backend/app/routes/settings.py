@@ -217,18 +217,6 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail=f"API 连接失败: {exc}") from exc
 
 
-@router.post("/connect")
-async def connect(db: Session = Depends(get_db)):
-    s = db.query(Settings).first()
-    try:
-        await _connect_active(s)
-        return {"ok": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
 @router.post("/test-connection")
 async def test_connection(testnet: bool = True, db: Session = Depends(get_db)):
     """独立测试测试网或真实网的 API Key 是否可用（不切换当前活跃连接）。"""

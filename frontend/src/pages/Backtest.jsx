@@ -1,354 +1,501 @@
-import React, { useState, useEffect, useRef } from "react";
-import { runBacktest, downloadData, listStrategies, getSymbols } from "../api/client";
-import { Play, Download, BarChart2, Activity, AlertCircle, Layers } from "lucide-react";
-import clsx from "clsx";
+import React, { useEffect, useMemo, useState } from "react";
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  Activity,
+  AlertCircle,
+  BarChart3,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Database,
+  Play,
+  ShieldAlert,
+} from "lucide-react";
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from "recharts";
+import { getSarAdxBacktestCapabilities, runSarAdxBacktest } from "../api/client";
+import { useApp } from "../context/AppContext";
 
-function defaultDates() {
-  const end = new Date();
-  const start = new Date();
-  start.setMonth(start.getMonth() - 3);
-  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+const FALLBACK_SYMBOLS = [
+  "AAVEUSDT", "ADAUSDT", "APTUSDT", "ARBUSDT", "ATOMUSDT", "AVAXUSDT", "BCHUSDT", "BNBUSDT",
+  "BTCUSDT", "DOGEUSDT", "DOTUSDT", "ETCUSDT", "ETHUSDT", "FILUSDT", "GALAUSDT", "INJUSDT",
+  "LDOUSDT", "LINKUSDT", "LTCUSDT", "NEARUSDT", "OPUSDT", "RUNEUSDT", "SEIUSDT", "SOLUSDT",
+  "SUIUSDT", "TIAUSDT", "TRXUSDT", "UNIUSDT", "XLMUSDT", "XRPUSDT",
+];
+
+function capabilitySymbols(data) {
+  const rows = data?.symbols ?? data?.available_symbols ?? data?.eligible_symbols ?? [];
+  if (!Array.isArray(rows)) return [];
+  return [...new Set(rows.map((row) => typeof row === "string" ? row : row?.symbol).filter(Boolean))].sort();
 }
 
-const inp = "w-full bg-surface border border-border rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-accent";
-const lbl = "text-xs text-muted block mb-1";
+const INPUT_CLASS =
+  "w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-white outline-none transition-colors focus:border-accent disabled:cursor-not-allowed disabled:opacity-60";
 
-function MetricCard({ label, value, color = "text-white", sub }) {
+const FROZEN_PARAMETERS = [
+  ["执行周期", "5m"],
+  ["SAR", "0.02 / 0.20"],
+  ["趋势过滤", "1h ADX(14) >= 45"],
+  ["ADX 动量", "连续上升 2 周期"],
+  ["入场确认", "6 根 K 线"],
+  ["仓位结构", "5 层 x 20%"],
+  ["回踩再突破", "0.24%"],
+  ["Regime 开仓上限", "2 次"],
+];
+
+function money(value, digits = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return "--";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(Number(value));
+}
+
+function number(value, digits = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return "--";
+  return Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+function percent(value, digits = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return "--";
+  return `${Number(value) >= 0 ? "+" : ""}${number(Number(value) * 100, digits)}%`;
+}
+
+function dateTime(value) {
+  if (!value) return "--";
+  return String(value).replace("T", " ").replace(/\+00:00$/, " UTC").slice(0, 20);
+}
+
+function direction(value) {
+  if (Number(value) === 1 || String(value).toLowerCase() === "long") return "多";
+  if (Number(value) === -1 || String(value).toLowerCase() === "short") return "空";
+  return value ?? "--";
+}
+
+function apiError(error) {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join("；");
+  return error?.message || "回测执行失败，请稍后重试。";
+}
+
+function Metric({ label, value, tone = "text-white", note }) {
   return (
-    <div className="bg-card border border-border rounded-xl p-4">
-      <div className="text-xs text-muted mb-1">{label}</div>
-      <div className={clsx("text-lg font-bold font-mono", color)}>{value}</div>
-      {sub && <div className="text-xs text-muted mt-0.5">{sub}</div>}
+    <div className="min-w-0 rounded-md border border-border bg-card p-3">
+      <div className="mb-1 text-xs text-muted">{label}</div>
+      <div className={`truncate font-mono text-lg font-semibold ${tone}`}>{value}</div>
+      {note && <div className="mt-1 text-[11px] leading-4 text-muted">{note}</div>}
     </div>
   );
 }
 
-function ProgressBar({ running, done }) {
-  const [pct, setPct] = useState(0);
-  const timerRef = useRef(null);
-  useEffect(() => {
-    if (running) {
-      setPct(0);
-      timerRef.current = setInterval(() => setPct(p => p >= 92 ? p
-        : Math.min(92, p + (p < 30 ? 2 : p < 60 ? 1 : p < 80 ? 0.5 : 0.2))), 300);
-    } else { clearInterval(timerRef.current); setPct(done ? 100 : 0); }
-    return () => clearInterval(timerRef.current);
-  }, [running, done]);
-  if (!running && !done) return null;
+function StatusBanner({ status, message }) {
+  if (status === "idle") return null;
+  const running = status === "running";
+  const failed = status === "error";
+  const Icon = failed ? AlertCircle : running ? Activity : CheckCircle2;
   return (
-    <div className="bg-card border border-border rounded-xl p-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-muted">{running ? "回测进行中..." : "回测完成"}</span>
-        <span className="text-xs font-mono text-accent">{Math.round(pct)}%</span>
-      </div>
-      <div className="h-1.5 bg-surface rounded-full overflow-hidden">
-        <div className="h-full rounded-full transition-all duration-300"
-          style={{ width: `${pct}%`, background: pct < 100 ? "linear-gradient(90deg,#f0b90b,#f0b90b88)" : "#0ecb81" }} />
-      </div>
+    <div
+      className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${
+        failed
+          ? "border-red/30 bg-red/10 text-red"
+          : running
+            ? "border-accent/30 bg-accent/10 text-accent"
+            : "border-green/30 bg-green/10 text-green"
+      }`}
+      role={failed ? "alert" : "status"}
+    >
+      <Icon size={16} className={running ? "animate-pulse" : ""} />
+      <span>{failed ? message : running ? "正在读取受验证数据并执行 Backtrader 回测..." : "回测完成"}</span>
     </div>
   );
 }
 
-function Section({ title, color, children }) {
+function DetailTable({ type, rows }) {
+  const configs = {
+    fills: {
+      columns: [
+        ["time", "时间", dateTime],
+        ["action", "动作"],
+        ["direction", "方向", direction],
+        ["price", "成交价", (v) => number(v, 4)],
+        ["size", "数量", (v) => number(v, 5)],
+        ["commission", "手续费", money],
+      ],
+      empty: "该区间没有成交记录。",
+    },
+    funding: {
+      columns: [
+        ["time", "时间", dateTime],
+        ["notional", "名义金额", money],
+        ["rate", "资金费率", (v) => percent(v, 4)],
+        ["payment", "资金费现金流", money],
+      ],
+      empty: "该区间没有资金费记录。",
+    },
+  };
+  const config = configs[type];
+  if (!rows.length) return <div className="py-10 text-center text-sm text-muted">{config.empty}</div>;
   return (
-    <div className="bg-card border border-border rounded-xl p-4">
-      <div className="flex items-center gap-2 mb-3">
-        <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
-        <h2 className="text-sm font-semibold text-white">{title}</h2>
-      </div>
-      {children}
+    <div className="max-h-80 overflow-auto">
+      <table className="w-full min-w-[680px] text-left text-xs">
+        <thead className="sticky top-0 bg-card text-muted">
+          <tr className="border-b border-border">
+            {config.columns.map(([, label]) => <th key={label} className="px-3 py-2 font-medium">{label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={`${row.time || "row"}-${index}`} className="border-b border-border/60 hover:bg-surface/50">
+              {config.columns.map(([key, , format]) => (
+                <td key={key} className="whitespace-nowrap px-3 py-2 font-mono text-white">
+                  {format ? format(row[key]) : row[key] ?? "--"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
-  );
-}
-
-function Toggle({ label, on, onClick }) {
-  return (
-    <button onClick={onClick}
-      className={clsx("flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-colors",
-        on ? "border-accent/50 bg-accent/10 text-white" : "border-border text-muted hover:text-white")}>
-      <span className={clsx("w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0",
-        on ? "bg-accent border-accent" : "border-border")}>
-        {on && <span className="text-[9px] text-black font-bold">✓</span>}
-      </span>
-      {label}
-    </button>
   );
 }
 
 export default function Backtest() {
-  const dates = defaultDates();
-  const [strat, setStrat]   = useState(null);
-  const [symbols, setSymbols] = useState([]);
-
-  const [startDate, setStartDate] = useState(dates.start);
-  const [endDate, setEndDate]     = useState(dates.end);
-  const [capital, setCapital]     = useState(10000);
-  const [symbolOverride, setSymbolOverride] = useState("");
-  const [riskOverride, setRiskOverride]     = useState("");   // 空=用策略值
-
-  // 成本模型
-  const [takerFee, setTakerFee]       = useState(0.04);  // %
-  const [slippageBps, setSlippageBps] = useState(5);
-  const [fundingRate, setFundingRate] = useState(0.01);  // %/8h
-  const [useFunding, setUseFunding]   = useState(true);
-  const [feeStress, setFeeStress]     = useState(false); // 手续费×2
-
-  const [walkForward, setWalkForward] = useState(false);
-  const [splitDate, setSplitDate]     = useState("");
-
+  const { symbol: headerSymbol } = useApp();
+  const [form, setForm] = useState({
+    symbol: headerSymbol || "SOLUSDT",
+    start_date: "2025-01-01",
+    end_date: "2026-01-01",
+    initial_capital: 10000,
+    fee_rate: 0.001,
+    slippage_bps: 2,
+  });
   const [status, setStatus] = useState("idle");
+  const [error, setError] = useState("");
   const [result, setResult] = useState(null);
-  const [errMsg, setErrMsg] = useState("");
-  const [dlMsg, setDlMsg]   = useState("");
+  const [activeDetail, setActiveDetail] = useState("fills");
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [symbols, setSymbols] = useState(FALLBACK_SYMBOLS);
+  const [coverageBySymbol, setCoverageBySymbol] = useState({});
+  const [capabilityWarning, setCapabilityWarning] = useState("");
 
   useEffect(() => {
-    listStrategies().then(({ data }) => {
-      setStrat(data.find(s => s.strategy_type === "ml_trend") || data[0] || null);
-    }).catch(() => {});
-    getSymbols().then(({ data }) => setSymbols(data)).catch(() => {});
+    let active = true;
+    getSarAdxBacktestCapabilities()
+      .then(({ data }) => {
+        if (!active) return;
+        const available = capabilitySymbols(data);
+        if (available.length) setSymbols(available);
+        setCoverageBySymbol(Object.fromEntries(
+          (data?.coverage || []).map((row) => [row.symbol, row]),
+        ));
+        setCapabilityWarning("");
+      })
+      .catch(() => {
+        if (active) setCapabilityWarning("无法读取数据能力清单，当前显示已验证发布的 30 个品种；运行时仍以后端校验为准。");
+      });
+    return () => { active = false; };
   }, []);
 
-  const effectiveSymbol = symbolOverride.trim().toUpperCase() || strat?.symbol || "";
+  useEffect(() => {
+    if (headerSymbol && symbols.includes(headerSymbol)) update("symbol", headerSymbol);
+  }, [headerSymbol, symbols]);
 
-  const handleRun = async () => {
-    if (!strat) return;
-    setStatus("running"); setResult(null); setErrMsg("");
-    try {
-      const payload = {
-        strategy_id: strat.id, start_date: startDate, end_date: endDate,
-        initial_capital: capital,
-        taker_fee: takerFee / 100, slippage_bps: slippageBps,
-        funding_rate: fundingRate / 100, use_funding: useFunding,
-        fee_mult: feeStress ? 2 : 1,
-        walk_forward: walkForward,
-      };
-      if (symbolOverride.trim()) payload.symbol = symbolOverride.trim().toUpperCase();
-      if (riskOverride !== "") payload.risk_pct = Number(riskOverride) / 100;
-      if (walkForward && splitDate) payload.split_date = splitDate;
-      const { data } = await runBacktest(payload);
-      setResult(data); setStatus("done");
-    } catch (e) { setErrMsg(e.response?.data?.detail || e.message); setStatus("error"); }
-  };
+  const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  const selectedCoverage = coverageBySymbol[form.symbol];
+  const coverageStart = selectedCoverage?.start?.slice(0, 10);
+  const coverageEnd = selectedCoverage?.end?.slice(0, 10);
 
-  const handleDownload = async () => {
-    if (!strat) return;
-    setDlMsg("下载中...");
+  useEffect(() => {
+    if (!coverageStart || !coverageEnd) return;
+    setForm((current) => ({
+      ...current,
+      start_date: current.start_date < coverageStart ? coverageStart : current.start_date,
+      end_date: current.end_date > coverageEnd ? coverageEnd : current.end_date,
+    }));
+  }, [coverageStart, coverageEnd]);
+
+  const validationError = useMemo(() => {
+    if (!form.start_date || !form.end_date) return "请选择完整的回测日期。";
+    if (form.start_date >= form.end_date) return "结束日期必须晚于开始日期。";
+    if (!(Number(form.initial_capital) > 0)) return "初始资金必须大于 0。";
+    if (Number(form.fee_rate) < 0 || Number(form.fee_rate) > 0.01) return "手续费率必须在 0 到 1% 之间。";
+    if (Number(form.slippage_bps) < 0 || Number(form.slippage_bps) > 100) return "滑点必须在 0 到 100 bps 之间。";
+    return "";
+  }, [form]);
+
+  const run = async () => {
+    if (validationError) {
+      setError(validationError);
+      setStatus("error");
+      return;
+    }
+    setStatus("running");
+    setError("");
+    setResult(null);
     try {
-      const { data } = await downloadData({
-        symbol: effectiveSymbol, interval: strat.strategy_params?.entry_interval || "5m",
-        start_date: startDate, end_date: endDate,
+      const { data } = await runSarAdxBacktest({
+        symbol: form.symbol,
+        start_date: form.start_date,
+        end_date: form.end_date,
+        initial_capital: Number(form.initial_capital),
+        fee_rate: Number(form.fee_rate),
+        slippage_bps: Number(form.slippage_bps),
       });
-      setDlMsg(data.message);
-    } catch (e) { setDlMsg(e.response?.data?.detail || "下载失败"); }
+      setResult(data);
+      setStatus("done");
+    } catch (requestError) {
+      setError(apiError(requestError));
+      setStatus("error");
+    }
   };
 
-  const m = result?.metrics;
-  const wf = result?.walk_forward;
-  const equity = result?.equity_curve ?? [];
+  const metrics = result?.metrics;
   const trades = result?.trades ?? [];
-  const isProfit = m && m.total_return_pct >= 0;
-  const chartData = equity.map(e => ({ t: e.time.slice(5, 16).replace("T", " "), equity: e.equity }));
+  const chartData = useMemo(() => {
+    if (!result) return [];
+    const drawdowns = new Map((result.drawdown_curve ?? []).map((point) => [point.time, point.drawdown]));
+    return (result.equity_curve ?? []).map((point) => ({
+      time: point.time,
+      label: dateTime(point.time),
+      equity: point.equity,
+      drawdown: drawdowns.get(point.time),
+    }));
+  }, [result]);
+  const profitable = Number(metrics?.total_return) >= 0;
 
   return (
-    <div className="space-y-4 pb-8 max-w-6xl">
-      {/* 策略头 */}
-      <div className="bg-card border border-border rounded-xl p-4 flex items-center gap-3 flex-wrap">
-        <Layers size={18} className="text-accent" />
-        <div>
-          <h1 className="text-base font-bold">{strat?.name || "加载中..."}</h1>
-          <p className="text-xs text-muted">回测控制台 · ML 趋势策略</p>
-        </div>
-        {strat && (
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs ml-auto">
-            <span className="text-muted">入场阈值：<span className="text-white">
-              {strat.strategy_params?.entry_threshold ?? "auto"}
-            </span></span>
-            <span className="text-muted">ATR止损：<span className="text-white">
-              {strat.strategy_params?.atr_stop_mult != null ? `${strat.strategy_params.atr_stop_mult}×` : "—"}
-            </span></span>
-            <span className="text-muted">ML早退阈值：<span className="text-white">
-              {strat.strategy_params?.ml_exit_threshold ?? "—"}
-            </span></span>
-            <span className="text-muted">杠杆：<span className="text-accent font-bold">{strat.leverage}x</span></span>
-            <span className="text-muted">风险：<span className="text-white">{(strat.risk_pct * 100).toFixed(1)}%</span></span>
+    <div className="mx-auto min-w-0 max-w-[1480px] space-y-4 pb-8">
+      <header className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="mb-1 flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <h1 className="text-xl font-semibold text-white">SAR + ADX 回测</h1>
+            <span className="max-w-full whitespace-normal rounded border border-red/40 bg-red/10 px-2 py-0.5 text-xs font-medium text-red">
+              研究回测 / 未通过生产准入
+            </span>
           </div>
-        )}
-      </div>
+          <p className="break-all text-sm text-muted">{form.symbol} · 5 分钟执行 · 1 小时趋势过滤 · Backtrader 专业回测</p>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <ShieldAlert size={15} className="text-accent" />
+          结果用于诊断，不代表未来收益或实盘可用性
+        </div>
+      </header>
 
-      {/* 回测参数 */}
-      <Section title="回测参数" color="#8b94b2">
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="col-span-2 lg:col-span-2">
-            <label className={lbl}>品种（默认用策略设置）</label>
-            <select value={symbolOverride} onChange={e => setSymbolOverride(e.target.value)} className={inp + " cursor-pointer"}>
-              <option value="">— 策略默认 ({strat?.symbol || "BTCUSDT"}) —</option>
-              {symbols.map(s => <option key={s} value={s}>{s.replace("USDT", "/USDT")}</option>)}
+      <section className="rounded-md border border-border bg-card p-4">
+        <div className="mb-4 flex items-center gap-2">
+          <BarChart3 size={16} className="text-accent" />
+          <h2 className="text-sm font-semibold text-white">回测设置</h2>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <div>
+            <label className="mb-1 block text-xs text-muted">品种</label>
+            <select value={form.symbol} onChange={(e) => update("symbol", e.target.value)} disabled={status === "running"} className={INPUT_CLASS}>
+              {symbols.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
           </div>
-          <div><label className={lbl}>开始日期</label>
-            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className={inp} /></div>
-          <div><label className={lbl}>结束日期</label>
-            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className={inp} /></div>
-          <div><label className={lbl}>初始资金</label>
-            <input type="number" value={capital} min={100} onChange={e => setCapital(Number(e.target.value))} className={inp} /></div>
-          <div><label className={lbl}>风险% 覆盖（选填）</label>
-            <input type="number" step={0.5} placeholder={`默认 ${(strat?.risk_pct * 100 || 0).toFixed(1)}`}
-              value={riskOverride} onChange={e => setRiskOverride(e.target.value)} className={inp} /></div>
-        </div>
-      </Section>
-
-      {/* 成本模型 */}
-      <Section title="成本模型（真实摩擦）" color="#f59e0b">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div><label className={lbl}>Taker 手续费 %</label>
-            <input type="number" step={0.01} value={takerFee} onChange={e => setTakerFee(Number(e.target.value))} className={inp} /></div>
-          <div><label className={lbl}>滑点（基点 bps）</label>
-            <input type="number" step={1} value={slippageBps} onChange={e => setSlippageBps(Number(e.target.value))} className={inp} /></div>
-          <div><label className={lbl}>资金费率 %/8h</label>
-            <input type="number" step={0.005} value={fundingRate} onChange={e => setFundingRate(Number(e.target.value))} className={inp} disabled={!useFunding} /></div>
-          <div className="flex items-end gap-2 flex-wrap">
-            <Toggle label="计入资金费" on={useFunding} onClick={() => setUseFunding(v => !v)} />
-            <Toggle label="手续费×2 压测" on={feeStress} onClick={() => setFeeStress(v => !v)} />
+          <div>
+            <label className="mb-1 block text-xs text-muted">开始日期</label>
+            <input type="date" min={coverageStart} max={coverageEnd} value={form.start_date} onChange={(e) => update("start_date", e.target.value)} className={INPUT_CLASS} />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted">结束日期（不含）</label>
+            <input type="date" min={coverageStart} max={coverageEnd} value={form.end_date} onChange={(e) => update("end_date", e.target.value)} className={INPUT_CLASS} />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted">初始资金（USD）</label>
+            <input type="number" min="1" step="100" value={form.initial_capital} onChange={(e) => update("initial_capital", e.target.value)} className={INPUT_CLASS} />
+          </div>
+          <div className="flex items-end">
+            <button
+              type="button"
+              onClick={run}
+              disabled={status === "running"}
+              className="flex h-[38px] w-full items-center justify-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-black transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Play size={15} fill="currentColor" />
+              {status === "running" ? "运行中" : "运行回测"}
+            </button>
           </div>
         </div>
-        <p className="text-[10px] text-muted mt-2">保守原则：手续费×2 压测下仍盈利才靠谱。</p>
-      </Section>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:w-2/5">
+          <div>
+            <label className="mb-1 block text-xs text-muted">手续费率（单边）</label>
+            <input type="number" min="0" max="0.01" step="0.0001" value={form.fee_rate} onChange={(e) => update("fee_rate", e.target.value)} className={INPUT_CLASS} />
+            <div className="mt-1 text-[11px] text-muted">当前 {percent(form.fee_rate, 3)}</div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted">滑点（bps / 单边）</label>
+            <input type="number" min="0" max="100" step="1" value={form.slippage_bps} onChange={(e) => update("slippage_bps", e.target.value)} className={INPUT_CLASS} />
+            <div className="mt-1 text-[11px] text-muted">滑点已计入成交价，不单独估算成本</div>
+          </div>
+        </div>
+        <div className="mt-3 border border-accent/25 bg-accent/5 px-3 py-2 text-xs leading-5 text-muted">
+          当前 V3 参数基于 SOLUSDT 调优。其他品种使用相同参数仅用于跨币诊断，不代表参数已适配或具备生产准入条件。
+          {coverageStart && coverageEnd && <span className="ml-1">数据范围 {coverageStart} 至 {coverageEnd}，结束日期不含。</span>}
+          {capabilityWarning && <span className="ml-1 text-accent">{capabilityWarning}</span>}
+        </div>
+      </section>
 
-      {/* 样本外验证 */}
-      <Section title="样本外验证" color="#a855f7">
-        <div className="flex flex-wrap items-center gap-3">
-          <Toggle label="样本外对比（前段调参 / 后段验证）" on={walkForward} onClick={() => setWalkForward(v => !v)} />
-          {walkForward && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted">切分日期</span>
-              <input type="date" value={splitDate} onChange={e => setSplitDate(e.target.value)}
-                className={inp + " w-40"} placeholder="默认中点" />
+      <section className="border-y border-border py-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="text-xs font-semibold uppercase text-muted">冻结策略参数</h2>
+          <span className="text-[11px] text-muted">页面不可修改</span>
+        </div>
+        <dl className="grid grid-cols-2 gap-x-5 gap-y-2 text-xs md:grid-cols-4 xl:grid-cols-8">
+          {FROZEN_PARAMETERS.map(([label, value]) => (
+            <div key={label} className="min-w-0">
+              <dt className="truncate text-muted">{label}</dt>
+              <dd className="mt-0.5 break-words font-mono text-white">{value}</dd>
             </div>
-          )}
-        </div>
-      </Section>
+          ))}
+        </dl>
+      </section>
 
-      {/* 操作 */}
-      <div className="flex items-center gap-2">
-        <button onClick={handleRun} disabled={status === "running" || !strat}
-          className="flex items-center gap-2 bg-accent text-black px-5 py-2 rounded-lg text-sm font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors">
-          <Play size={14} /> {status === "running" ? "回测中..." : "开始回测"}
-        </button>
-        <button onClick={handleDownload} disabled={!strat || status === "running"}
-          className="flex items-center gap-2 bg-surface border border-border text-muted hover:text-white px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-40">
-          <Download size={14} /> 预下载数据
-        </button>
-        {dlMsg && <span className="text-xs text-muted">{dlMsg}</span>}
-      </div>
+      <StatusBanner status={status} message={error} />
 
-      <ProgressBar running={status === "running"} done={status === "done"} />
+      {metrics && (
+        <>
+          <section>
+            <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-white">账户结果</h2>
+                <p className="text-xs text-muted">最终权益和总收益已包含 observed funding；滑点已体现在成交价格中。</p>
+              </div>
+              <span className="text-xs text-muted">{result.window?.start?.slice(0, 10)} 至 {result.window?.end?.slice(0, 10)} · {result.window?.semantics}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+              <Metric label="总收益" value={percent(metrics.total_return)} tone={profitable ? "text-green" : "text-red"} />
+              <Metric label="最终权益" value={money(metrics.final_equity)} />
+              <Metric label="最大回撤" value={percent(metrics.max_drawdown)} tone="text-red" />
+              <Metric label="手续费" value={money(metrics.commission)} tone="text-red" />
+              <Metric label="资金费现金流" value={money(metrics.funding_pnl)} tone={Number(metrics.funding_pnl) >= 0 ? "text-green" : "text-red"} />
+              <Metric label="成交额" value={money(metrics.turnover, 0)} />
+              <Metric label="交易 / 成交" value={`${metrics.trade_count} / ${metrics.fill_count}`} />
+              <Metric label="拒绝加仓" value={number(metrics.rejected_add_count, 0)} />
+            </div>
+          </section>
 
-      {status === "error" && (
-        <div className="flex items-center gap-2 bg-red/10 border border-red/20 text-red rounded-xl px-4 py-3 text-sm">
-          <AlertCircle size={16} /> {errMsg}
-        </div>
-      )}
+          <section>
+            <div className="mb-2">
+              <h2 className="text-sm font-semibold text-white">交易质量</h2>
+              <p className="text-xs text-muted">以下指标均为资金费分摊前口径，已扣成交手续费，不应与最终权益混为同一统计口径。</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+              <Metric label="胜率（资金费前）" value={percent(metrics.win_rate_before_funding)} />
+              <Metric label="Profit Factor（资金费前）" value={number(metrics.profit_factor_before_funding)} />
+              <Metric label="盈亏比（资金费前）" value={number(metrics.payoff_ratio_before_funding)} />
+              <Metric label="单笔期望（资金费前）" value={money(metrics.expectancy_before_funding)} />
+              <Metric label="平均盈利（资金费前）" value={money(metrics.average_win_before_funding)} tone="text-green" />
+              <Metric label="平均亏损（资金费前）" value={money(metrics.average_loss_before_funding)} tone="text-red" />
+            </div>
+          </section>
 
-      {/* 样本外对比 */}
-      {wf && (
-        <Section title={`样本外对比（切分 ${wf.split_date}）`} color="#a855f7">
-          <table className="w-full text-xs">
-            <thead><tr className="text-muted border-b border-border">
-              {["段", "净收益%", "回撤%", "夏普", "胜率%", "笔数"].map(h => <th key={h} className="text-left pb-2 pr-4">{h}</th>)}
-            </tr></thead>
-            <tbody>
-              {[["前段(调参)", wf.in_sample], ["后段(样本外)", wf.out_sample]].map(([name, s]) => (
-                <tr key={name} className="border-b border-border/40">
-                  <td className="py-1.5 pr-4 text-white">{name}</td>
-                  <td className={clsx("pr-4 font-mono", s.total_return_pct >= 0 ? "text-green" : "text-red")}>{s.total_return_pct}</td>
-                  <td className="pr-4 font-mono">{s.max_drawdown}</td>
-                  <td className="pr-4 font-mono">{s.sharpe}</td>
-                  <td className="pr-4 font-mono">{s.win_rate}</td>
-                  <td className="pr-4 font-mono">{s.num_trades}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="text-[10px] text-muted mt-2">前后段差异越大、后段越差，越说明参数对前段过拟合。</p>
-        </Section>
-      )}
+          <section className="rounded-md border border-border bg-card p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-white">权益与回撤</h2>
+                <p className="text-xs text-muted">左轴为账户权益，右轴为回撤。</p>
+              </div>
+              <span className="text-xs text-muted">{result.execution?.curve_points_total ?? chartData.length} 个原始点</span>
+            </div>
+            {chartData.length ? (
+              <div className="h-[320px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={chartData} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#0ecb81" stopOpacity={0.24} />
+                        <stop offset="100%" stopColor="#0ecb81" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="#1e2436" strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="label" minTickGap={70} tick={{ fill: "#8b94b2", fontSize: 10 }} tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="equity" width={76} tickFormatter={(v) => `$${number(v, 0)}`} tick={{ fill: "#8b94b2", fontSize: 10 }} tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="drawdown" orientation="right" width={55} tickFormatter={(v) => `${number(v * 100, 1)}%`} tick={{ fill: "#8b94b2", fontSize: 10 }} tickLine={false} axisLine={false} />
+                    <Tooltip
+                      contentStyle={{ background: "#141823", border: "1px solid #1e2436", borderRadius: 6, fontSize: 12 }}
+                      labelStyle={{ color: "#8b94b2" }}
+                      formatter={(value, name) => name === "权益" ? [money(value), name] : [percent(value), name]}
+                    />
+                    <Area yAxisId="equity" type="monotone" dataKey="equity" name="权益" stroke="#0ecb81" strokeWidth={1.5} fill="url(#equityFill)" dot={false} />
+                    <Line yAxisId="drawdown" type="monotone" dataKey="drawdown" name="回撤" stroke="#f6465d" strokeWidth={1.25} dot={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            ) : <div className="py-16 text-center text-sm text-muted">没有可绘制的权益数据。</div>}
+          </section>
 
-      {/* 指标卡 */}
-      {m && (
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-3">
-          <MetricCard label="净收益率（扣成本）"
-            value={`${m.total_return_pct >= 0 ? "+" : ""}${m.total_return_pct}%`}
-            color={isProfit ? "text-green" : "text-red"}
-            sub={`毛收益 ${m.gross_return_pct >= 0 ? "+" : ""}${m.gross_return_pct}%`} />
-          <MetricCard label="最大回撤" value={`-${m.max_drawdown}%`} color={m.max_drawdown > 20 ? "text-red" : "text-white"} />
-          <MetricCard label="夏普比率" value={m.sharpe} color={m.sharpe >= 1 ? "text-green" : "text-muted"} />
-          <MetricCard label="胜率" value={`${m.win_rate}%`} sub={`${m.num_trades} 笔 / 加仓 ${m.total_adds}`} />
-          <MetricCard label="总手续费" value={`$${m.total_fees}`} color="text-red" />
-          <MetricCard label="滑点成本" value={`$${m.slippage_cost}`} color="text-red" />
-          <MetricCard label="资金费" value={`$${m.total_funding}`} color={m.total_funding > 0 ? "text-red" : "text-green"} />
-          <MetricCard label="平均每笔盈亏" value={`$${m.avg_pnl}`} color={m.avg_pnl >= 0 ? "text-green" : "text-red"} />
-        </div>
-      )}
+          <section className="rounded-md border border-border bg-card p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-white">交易记录</h2>
+                <p className="text-xs text-muted">单笔净盈亏为资金费分摊前口径。</p>
+              </div>
+              <span className="text-xs text-muted">{trades.length} 笔</span>
+            </div>
+            {trades.length ? (
+              <div className="max-h-96 overflow-auto">
+                <table className="w-full min-w-[860px] text-left text-xs">
+                  <thead className="sticky top-0 bg-card text-muted">
+                    <tr className="border-b border-border">
+                      {["方向", "最大层数", "入场时间", "退出时间", "净盈亏（资金费前）", "退出原因"].map((label) => <th key={label} className="px-3 py-2 font-medium">{label}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trades.map((trade, index) => (
+                      <tr key={`${trade.entry_time || "trade"}-${index}`} className="border-b border-border/60 hover:bg-surface/50">
+                        <td className={`px-3 py-2 font-semibold ${Number(trade.direction) === 1 || String(trade.direction).toLowerCase() === "long" ? "text-green" : "text-red"}`}>{direction(trade.direction)}</td>
+                        <td className="px-3 py-2 font-mono text-white">{trade.max_layers ?? "--"}</td>
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">{dateTime(trade.entry_time)}</td>
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">{dateTime(trade.exit_time)}</td>
+                        <td className={`px-3 py-2 font-mono font-semibold ${Number(trade.net_pnl_before_funding) >= 0 ? "text-green" : "text-red"}`}>{money(trade.net_pnl_before_funding)}</td>
+                        <td className="px-3 py-2 text-white">{trade.exit_reason ?? "--"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : <div className="py-10 text-center text-sm text-muted">当前区间没有产生交易。账户指标仍按完整回测过程计算。</div>}
+          </section>
 
-      {/* 权益曲线 */}
-      {chartData.length > 0 && (
-        <div className="bg-card border border-border rounded-xl p-4">
-          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2"><BarChart2 size={15} className="text-accent" /> 权益曲线</h3>
-          <ResponsiveContainer width="100%" height={260}>
-            <AreaChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-              <defs><linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={isProfit ? "#0ecb81" : "#f6465d"} stopOpacity={0.3} />
-                <stop offset="95%" stopColor={isProfit ? "#0ecb81" : "#f6465d"} stopOpacity={0} />
-              </linearGradient></defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e2436" />
-              <XAxis dataKey="t" tick={{ fill: "#8b94b2", fontSize: 10 }} interval="preserveStartEnd" tickLine={false} />
-              <YAxis tick={{ fill: "#8b94b2", fontSize: 10 }} tickLine={false} axisLine={false}
-                tickFormatter={v => `$${v.toLocaleString()}`} width={70} />
-              <Tooltip contentStyle={{ background: "#141823", border: "1px solid #1e2436", borderRadius: 8 }}
-                labelStyle={{ color: "#8b94b2", fontSize: 11 }} formatter={v => [`$${v.toLocaleString()}`, "权益"]} />
-              <Area type="monotone" dataKey="equity" stroke={isProfit ? "#0ecb81" : "#f6465d"} strokeWidth={2} fill="url(#eqGrad)" dot={false} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+          <section className="rounded-md border border-border bg-card">
+            <button type="button" onClick={() => setDetailsOpen((open) => !open)} aria-expanded={detailsOpen} aria-controls="execution-details" className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left">
+              <span>
+                <span className="block text-sm font-semibold text-white">执行明细</span>
+                <span className="text-xs text-muted">成交 {result.fills?.length ?? 0} 条 · 资金费 {result.funding?.length ?? 0} 条</span>
+              </span>
+              {detailsOpen ? <ChevronUp size={17} className="text-muted" /> : <ChevronDown size={17} className="text-muted" />}
+            </button>
+            {detailsOpen && (
+              <div id="execution-details" className="border-t border-border">
+                <div className="flex gap-1 border-b border-border px-3 pt-2">
+                  {[["fills", "成交"], ["funding", "资金费"]].map(([key, label]) => (
+                    <button key={key} type="button" onClick={() => setActiveDetail(key)} className={`border-b-2 px-3 py-2 text-xs ${activeDetail === key ? "border-accent text-white" : "border-transparent text-muted hover:text-white"}`}>{label}</button>
+                  ))}
+                </div>
+                <DetailTable type={activeDetail} rows={result[activeDetail] ?? []} />
+              </div>
+            )}
+          </section>
 
-      {/* 交易明细 */}
-      {trades.length > 0 && (
-        <div className="bg-card border border-border rounded-xl p-4">
-          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2"><Activity size={15} className="text-accent" /> 交易明细（{trades.length} 笔）</h3>
-          <div className="overflow-x-auto max-h-96 overflow-y-auto">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-card"><tr className="text-muted border-b border-border">
-                {["入场时间", "出场时间", "方向", "档", "入场价", "出场价", "盈亏", "收益率", "原因"].map(h =>
-                  <th key={h} className="text-left pb-2 pr-3 font-medium">{h}</th>)}
-              </tr></thead>
-              <tbody>
-                {trades.map((t, i) => (
-                  <tr key={i} className="border-b border-border/40 hover:bg-surface/50">
-                    <td className="py-1.5 pr-3 text-muted">{t.entry_time.slice(0, 16).replace("T", " ")}</td>
-                    <td className="py-1.5 pr-3 text-muted">{t.exit_time.slice(0, 16).replace("T", " ")}</td>
-                    <td className={clsx("pr-3 font-bold", t.side === "LONG" ? "text-green" : "text-red")}>{t.side === "LONG" ? "多" : "空"}</td>
-                    <td className="pr-3 font-mono">{t.adds}</td>
-                    <td className="pr-3 font-mono">{t.entry_price}</td>
-                    <td className="pr-3 font-mono">{t.exit_price}</td>
-                    <td className={clsx("pr-3 font-mono font-bold", t.pnl >= 0 ? "text-green" : "text-red")}>{t.pnl >= 0 ? "+" : ""}{t.pnl}</td>
-                    <td className={clsx("pr-3 font-mono", t.pnl_pct >= 0 ? "text-green" : "text-red")}>{t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct}%</td>
-                    <td className="pr-3 text-muted">{t.exit_reason}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {status === "done" && trades.length === 0 && (
-        <div className="bg-card border border-border rounded-xl px-4 py-8 text-center text-muted text-sm">
-          该时间段内未产生任何交易，尝试调整时间范围或参数
-        </div>
+          <footer className="flex flex-col gap-2 border-t border-border pt-3 text-[11px] text-muted md:flex-row md:items-center md:justify-between">
+            <span className="flex items-center gap-1.5"><Database size={13} />{result.data_lineage?.ohlcv_release_id} · {result.data_lineage?.funding_release_id}</span>
+            <span>{result.execution?.engine} {result.execution?.engine_version} · {result.execution?.bar_count?.toLocaleString()} bars · {result.execution?.signal_timing}</span>
+          </footer>
+        </>
       )}
     </div>
   );

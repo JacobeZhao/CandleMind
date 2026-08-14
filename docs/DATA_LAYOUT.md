@@ -1,84 +1,52 @@
-# Data and Artifact Layout
+# Data And Artifact Layout
 
-## Ownership Boundary
+## Ownership
 
-The Git repository owns reproducible inputs to development: application source,
-tests, configuration templates, documentation, container definitions, and
-maintenance scripts. Generated market data, trained models, reports, logs,
-databases, credentials, caches, virtual environments, and frontend builds stay
-outside the repository.
+The repository contains application source, tests, configuration templates,
+documentation, and supported commands. Market data, reports, logs, databases,
+secrets, caches, frontend builds, and model artifacts remain outside Git.
 
-## G-Drive Layout
+The Windows market-data root defaults to
+`G:/CandleMind/CandleMind_data` and can be overridden with
+`MARKET_DATA_DIR`. `DATA_DIR` selects runtime database/key storage.
+
+## External Layout
 
 ```text
-G:\CandleMind\
-|-- CandleMind_data\
-|   |-- raw\
-|   |   |-- klines_json\      # Immutable source K-line downloads
-|   |   `-- funding\          # Funding-rate source data
-|   |-- normalized\
-|   |   `-- ohlcv_parquet\    # Canonical OHLCV tables
-|   |-- processed\
-|   |   |-- features_app\     # Lightweight application features
-|   |   |-- features_ml\      # ML training feature matrices
-|   |   `-- labels\           # Supervised labels by variant
-|   |-- models\
-|   |   |-- current\
-|   |   |   `-- ACTIVE                 # Active supervised release ID
-|   |   |-- releases\                  # Immutable promoted releases
-|   |   |-- candidates\supervised\    # Unpromoted supervised releases
-|   |   |-- archive\          # Superseded immutable releases
-|   |   `-- rl\
-|   |       `-- candidates\   # Unpromoted RL run directories
-|   |-- experiments\
-|   |   |-- backtests\
-|   |   |-- reports\
-|   |   `-- experiments.db
-|   |-- runtime\
-|   |   |-- app\             # trader.db and matching secret.key
-|   |   |-- journal\
-|   |   `-- regime_cache\
-|   `-- manifests\           # Root inventory and migration records
-`-- CandleMind_backups\      # Timestamped snapshots; never nested in data
+CandleMind_data/
+|-- raw/
+|   |-- klines_archive/
+|   |-- funding/
+|   `-- derivatives_archive/
+|-- normalized/
+|   |-- ohlcv_parquet/
+|   |-- ema/releases/
+|   `-- derivatives/releases/
+|-- processed/
+|   `-- features_app/
+|-- experiments/
+|   |-- backtests/
+|   `-- reports/
+|-- runtime/
+|   `-- app/
+`-- manifests/
 ```
 
-The application resolves this root through `MARKET_DATA_DIR`, defaulting to
-`G:/CandleMind/CandleMind_data` on Windows. `DATA_DIR` selects the paired
-application database/key directory and defaults to `runtime/app` on Windows.
-Docker bind-mounts both external locations; it does not create repository data.
+`backend/app/datastore.py` owns the authoritative market-data root. The
+repository must not contain a fallback `data/` tree. Market-data directories
+must already exist and pass `backend/app/data_layout.py` validation; importing
+the application does not create directories under that root.
 
-The directory constants in `backend/app/datastore.py` are authoritative. Do
-not reconstruct clean-layout paths by appending old flat subdirectory names to
-`MARKET_ROOT`; import `KLINES_DIR`, `FUNDING_DIR`, `PARQUET_DIR`,
-`FEATURES_DIR`, `FEATURES_ML_DIR`, `LABELS_DIR`, `BACKTEST_DIR`,
-`REPORTS_DIR`, `JOURNAL_DIR`, or `REGIME_DIR` as appropriate.
+`DATA_DIR` owns application state under `runtime/app`, including the database,
+encryption key, and `strategies/sar_adx_paper_<symbol>.json` restart state.
 
-The active supervised release is selected by `models/current/ACTIVE`, or by the
-sole release directory while migrating an older layout. RL artifacts are candidates,
-not production models, and remain under `models/rl/candidates` with a
-`manifest.json` in each run directory.
+## Release Rules
 
-`manifests/inventory_current.json` is the current root inventory. The existing
-`manifests/INVENTORY.md` is a migration-time record and must not be used as the
-source of current paths or release selection.
+K-line and derivatives commands publish validated outputs atomically. Never
+modify an immutable release in place. SAR+ADX backtests must bind their OHLCV,
+funding, parameters, costs, and code revision. Historical artifacts may remain
+in external archives, but no model directory is required by the current runtime.
 
-## Model Release Rules
-
-Never append, replace, or retrain files in an already promoted release. Train
-into a new candidate directory, record the data snapshot, feature set, label
-variant, time windows, cost assumptions, code revision, metrics, and SHA-256
-hashes, then promote the whole directory as a new release. Move superseded
-releases to `models/archive`; `models/current` must identify exactly one
-supervised release. RL models remain under versioned candidate directories
-until their walk-forward and stress gates pass.
-
-## Cleanup Rules
-
-1. Generate a current inventory and checksums before moving or deleting data.
-2. Validate source and destination containment for every destructive operation.
-3. Preserve raw data, active models, runtime key/database pairs, and the newest
-   verified backup.
-4. Treat `__pycache__/`, `.pytest_cache/`, `frontend/dist/`, dependency
-   directories, and local model copies as rebuildable.
-5. Do not consolidate overlapping raw snapshots by filename alone; compare
-   time coverage and content first.
+Before moving or deleting external data, inventory paths and checksums, verify
+containment, preserve raw data and runtime key/database pairs, and keep the
+newest verified backup.

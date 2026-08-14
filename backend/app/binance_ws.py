@@ -1,40 +1,46 @@
-"""
-Binance Futures WebSocket 行情订阅。
-订阅 <symbol>@ticker 流，实时推送到前端，替代 REST 轮询，彻底避免限流。
-支持 HTTP 代理和 SOCKS5 代理（Clash 两种模式均可）。
-"""
+"""Merge Binance Futures 24-hour ticker and mark-price WebSocket streams."""
+
 import asyncio
 import json
 import urllib.parse
+
 from loguru import logger
+
 from .ws_manager import manager
 
-WS_MAINNET = "wss://fstream.binance.com/ws"
-WS_TESTNET = "wss://stream.binancefuture.com/ws"
+WS_MAINNET = "wss://fstream.binance.com"
+WS_TESTNET = "wss://stream.binancefuture.com"
 
 
 class BinanceWSClient:
     def __init__(self):
-        self._task:   asyncio.Task | None = None
+        self._task: asyncio.Task | None = None
         self._running = False
-        self.symbol   = "BTCUSDT"
-        self.testnet  = True
-        self.proxy    = None
-
-    # ── 外部接口 ──────────────────────────────────────────────────────────────
+        self._subscription_id = 0
+        self._incoming_context: tuple[str, int] | None = None
+        self._stream_cache: dict[str, dict] = {}
+        self._stream_event_times: dict[str, int] = {}
+        self.symbol = "BTCUSDT"
+        self.testnet = True
+        self.proxy = None
 
     async def start(self, symbol: str, testnet: bool, proxy: str = None):
-        """启动（或重启）WS 订阅。"""
+        """Start or restart the combined stream subscription."""
         await self.stop()
-        self.symbol   = symbol.upper()
-        self.testnet  = testnet
-        self.proxy    = proxy or None
+        self.symbol = symbol.upper()
+        self.testnet = testnet
+        self.proxy = proxy or None
+        self._reset_stream_state()
+        self._subscription_id += 1
         self._running = True
-        self._task    = asyncio.create_task(self._run())
-        logger.info(f"Binance WS scheduled: {self.symbol} testnet={testnet}")
+        self._task = asyncio.create_task(self._run())
+        logger.info(
+            f"Binance WS scheduled: {self.symbol} testnet={self.testnet}"
+        )
 
     async def stop(self):
         self._running = False
+        self._subscription_id += 1
         if self._task:
             self._task.cancel()
             try:
@@ -42,16 +48,22 @@ class BinanceWSClient:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        self._reset_stream_state()
 
     async def switch_symbol(self, symbol: str):
-        """切换品种，自动重连。"""
-        if symbol.upper() == self.symbol:
+        """Reconnect to a different symbol and discard the old snapshot."""
+        symbol = symbol.upper()
+        if symbol == self.symbol:
             return
-        self.symbol = symbol.upper()
         if self._running:
-            await self.start(self.symbol, self.testnet, self.proxy)
+            await self.start(symbol, self.testnet, self.proxy)
+        else:
+            self.symbol = symbol
+            self._reset_stream_state()
 
-    # ── 内部逻辑 ──────────────────────────────────────────────────────────────
+    def _reset_stream_state(self):
+        self._stream_cache = {}
+        self._stream_event_times = {}
 
     async def _run(self):
         backoff = 2
@@ -61,69 +73,138 @@ class BinanceWSClient:
                 backoff = 2
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except Exception as exc:
                 if self._running:
-                    logger.warning(f"Binance WS error ({type(e).__name__}: {e}), retry {backoff}s")
+                    logger.warning(
+                        "Binance WS error "
+                        f"({type(exc).__name__}: {exc}), retry {backoff}s"
+                    )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
 
     async def _connect(self):
         import aiohttp
 
+        symbol = self.symbol
+        subscription_id = self._subscription_id
         base = WS_TESTNET if self.testnet else WS_MAINNET
-        url  = f"{base}/{self.symbol.lower()}@ticker"
+        stream = symbol.lower()
+        url = f"{base}/ws"
         logger.info(f"Connecting: {url}")
 
         connector = None
         proxy_url = None
-
         if self.proxy:
             parsed = urllib.parse.urlparse(self.proxy)
             if parsed.scheme.startswith("socks"):
-                # SOCKS5/SOCKS4 代理
                 from aiohttp_socks import ProxyConnector
+
                 connector = ProxyConnector.from_url(self.proxy)
             else:
-                # HTTP/HTTPS 代理
                 proxy_url = self.proxy
 
         async with aiohttp.ClientSession(
             connector=connector,
             connector_owner=True,
         ) as session:
-            ws_kw = {"heartbeat": 20}
+            ws_kwargs = {"heartbeat": 20}
             if proxy_url:
-                ws_kw["proxy"] = proxy_url
+                ws_kwargs["proxy"] = proxy_url
 
-            async with session.ws_connect(url, **ws_kw) as ws:
-                logger.info(f"Binance WS connected: {self.symbol}@ticker")
+            async with session.ws_connect(url, **ws_kwargs) as ws:
+                await ws.send_json({
+                    "method": "SUBSCRIBE",
+                    "params": [f"{stream}@ticker", f"{stream}@markPrice@1s"],
+                    "id": 1,
+                })
+                logger.info(f"Binance WS connected: {symbol} combined ticker")
                 async for msg in ws:
-                    if not self._running:
+                    if not self._running or subscription_id != self._subscription_id:
                         return
                     if msg.type == aiohttp.WSMsgType.TEXT:
-                        await self._handle(msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                        logger.warning(f"Binance WS {msg.type.name}, reconnecting...")
+                        self._incoming_context = (symbol, subscription_id)
+                        try:
+                            # Keep the one-argument call compatible with the
+                            # readiness wrapper in routes/settings.py.
+                            await self._handle(msg.data)
+                        finally:
+                            self._incoming_context = None
+                    elif msg.type in (
+                        aiohttp.WSMsgType.ERROR,
+                        aiohttp.WSMsgType.CLOSED,
+                    ):
+                        logger.warning(
+                            f"Binance WS {msg.type.name}, reconnecting..."
+                        )
                         return
 
-    async def _handle(self, raw: str):
+    async def _handle(
+        self,
+        raw: str,
+        expected_symbol: str | None = None,
+        subscription_id: int | None = None,
+    ):
+        """Merge one stream event and broadcast a compatible ticker snapshot."""
         try:
-            d = json.loads(raw)
-            if d.get("e") != "24hrTicker":
+            envelope = json.loads(raw)
+            event = envelope.get("data", envelope)
+            event_type = event.get("e")
+            symbol = event.get("s")
+            if self._incoming_context is not None:
+                context_symbol, context_id = self._incoming_context
+                expected_symbol = expected_symbol or context_symbol
+                if subscription_id is None:
+                    subscription_id = context_id
+            expected_symbol = (expected_symbol or self.symbol).upper()
+
+            if subscription_id is not None and subscription_id != self._subscription_id:
                 return
-            await manager.broadcast({
-                "type": "ticker",
-                "data": {
-                    "symbol":  d["s"],
-                    "price":   d["c"],   # 最新成交价
-                    "change":  d["P"],   # 24h 涨跌幅 %
-                    "high":    d["h"],
-                    "low":     d["l"],
-                    "volume":  d["q"],   # 成交额 USDT
-                },
-            })
-        except Exception as e:
-            logger.debug(f"WS handle error: {e}")
+            if not symbol or symbol.upper() != expected_symbol:
+                return
+
+            if event_type == "24hrTicker":
+                stream_name = "ticker"
+                required = ("E", "c", "P", "h", "l", "q")
+                if any(field not in event for field in required):
+                    return
+                snapshot = {
+                    "symbol": symbol.upper(),
+                    "price": event["c"],
+                    "change": event["P"],
+                    "high": event["h"],
+                    "low": event["l"],
+                    "volume": event["q"],
+                }
+            elif event_type == "markPriceUpdate":
+                stream_name = "mark"
+                if "E" not in event or "p" not in event:
+                    return
+                snapshot = {"markPrice": event["p"]}
+                for output_name, source_name in (
+                    ("indexPrice", "i"),
+                    ("fundingRate", "r"),
+                    ("nextFundingTime", "T"),
+                ):
+                    if source_name in event:
+                        snapshot[output_name] = event[source_name]
+            else:
+                return
+
+            event_time = int(event.get("E", 0))
+            previous_time = self._stream_event_times.get(stream_name, -1)
+            if event_time and event_time < previous_time:
+                return
+            self._stream_event_times[stream_name] = max(event_time, previous_time)
+            self._stream_cache[stream_name] = snapshot
+
+            ticker_snapshot = self._stream_cache.get("ticker")
+            if ticker_snapshot is None:
+                return
+            combined = dict(ticker_snapshot)
+            combined.update(self._stream_cache.get("mark", {}))
+            await manager.broadcast({"type": "ticker", "data": combined})
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.debug(f"WS handle error: {exc}")
 
 
 binance_ws_client = BinanceWSClient()

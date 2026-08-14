@@ -115,6 +115,34 @@ def test_save_with_api_key_waits_for_connection_before_commit(monkeypatch):
     assert result["symbol"] == "ETHUSDT"
 
 
+def test_empty_save_reconnects_with_existing_settings_before_commit(monkeypatch):
+    _set_runtime(monkeypatch)
+    current = _settings(
+        api_key_test_enc="encrypted-key",
+        api_secret_test_enc="encrypted-secret",
+        interval="5m",
+        proxy_url="http://proxy.test:8080",
+    )
+    original = vars(current).copy()
+    events = []
+    db = _Db(current, events)
+
+    async def connect_active(settings):
+        assert settings is current
+        events.append(f"connected:{settings.symbol}")
+
+    monkeypatch.setattr(settings_routes, "_connect_active", connect_active)
+
+    result = asyncio.run(settings_routes.save_settings(SettingsIn(), db=db))
+
+    assert events == ["connected:BTCUSDT", "commit"]
+    assert db.committed
+    assert not db.rolled_back
+    assert vars(current) == original
+    assert result["ok"] is True
+    assert result["symbol"] == "BTCUSDT"
+
+
 def test_connection_failure_rolls_back_database_and_runtime(monkeypatch):
     original_client = _set_runtime(monkeypatch)
     current = _settings(api_key_test_enc="encrypted-key")

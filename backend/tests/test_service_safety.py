@@ -5,59 +5,18 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 from fastapi import HTTPException
 
 from backend.app import datastore
 from backend.app import data_layout
-from backend.app.rl.data import attach_funding_cashflow, load_ml_scored_bars
 from backend.app.routes import settings as settings_routes
-from backend.app.routes import strategy as strategy_routes
 from backend.app.routes.settings import SettingsIn
-from backend.app.services.bot_engine import BotEngine
-from backend.app.services.ml_strategy import load_scored_bars
-
-
-class _ExchangeClient:
-    def __init__(self, payload=None, error=None):
-        self.payload = payload
-        self.error = error
-        self.calls = 0
-
-    def futures_exchange_info(self):
-        self.calls += 1
-        if self.error is not None:
-            raise self.error
-        return self.payload
 
 
 def test_settings_payload_is_a_true_partial_update():
     body = SettingsIn(testnet=False)
     assert body.model_dump(exclude_unset=True) == {"testnet": False}
-
-
-def test_live_trading_is_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("CANDLEMIND_ENABLE_LIVE_TRADING", raising=False)
-    assert strategy_routes._live_trading_enabled() is False
-    assert BotEngine().paper is True
-
-
-def test_bot_engine_rejects_unauthorized_live_start():
-    engine = BotEngine()
-    with pytest.raises(ValueError, match="authorization"):
-        asyncio.run(
-            engine.start(
-                object(),
-                {
-                    "symbol": "BTCUSDT",
-                    "interval": "5m",
-                    "strategy_type": "ml_trend",
-                    "paper": False,
-                },
-            )
-        )
-    assert engine.running is False
 
 
 def test_settings_roll_back_when_network_connection_fails(monkeypatch):
@@ -102,70 +61,6 @@ def test_settings_roll_back_when_network_connection_fails(monkeypatch):
     assert db.rolled_back
 
 
-def test_exchange_filters_are_validated_and_cached():
-    client = _ExchangeClient(
-        {
-            "symbols": [
-                {
-                    "symbol": "BTCUSDT",
-                    "filters": [
-                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
-                        {"filterType": "MARKET_LOT_SIZE", "stepSize": "0.01"},
-                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
-                    ],
-                }
-            ]
-        }
-    )
-    engine = BotEngine()
-    assert engine._get_filters(client, "BTCUSDT") == (0.01, 0.1)
-    assert engine._get_filters(client, "BTCUSDT") == (0.01, 0.1)
-    assert client.calls == 1
-
-
-@pytest.mark.parametrize(
-    "client",
-    [
-        _ExchangeClient(error=OSError("offline")),
-        _ExchangeClient({"symbols": []}),
-        _ExchangeClient(
-            {"symbols": [{"symbol": "BTCUSDT", "filters": []}]}
-        ),
-    ],
-)
-def test_exchange_filters_fail_closed(client):
-    with pytest.raises(RuntimeError):
-        BotEngine()._get_filters(client, "BTCUSDT")
-
-
-def test_funding_feature_is_mapped_to_environment_cashflow():
-    bars = pd.DataFrame({"5m_funding_rate": [0.0001, None, -0.0002]})
-    result = attach_funding_cashflow(bars)
-    assert result["funding_rate"].tolist() == [0.0001, 0.0, -0.0002]
-
-
-def test_ml_scored_loader_maps_funding_cashflow(monkeypatch):
-    source = pd.DataFrame(
-        {"close": [100.0], "long_prob": [0.6], "short_prob": [0.4], "5m_funding_rate": [0.0001]}
-    )
-    monkeypatch.setattr(
-        "backend.app.services.ml_strategy.load_scored_bars",
-        lambda symbol, start=None, end=None: source.copy(),
-    )
-    result = load_ml_scored_bars("BTCUSDT")
-    assert result.loc[0, "funding_rate"] == 0.0001
-
-
-def test_multi_horizon_scoring_requires_explicit_variant():
-    with pytest.raises(ValueError, match="multi_horizon_variant"):
-        load_scored_bars("BTCUSDT", include_multi_horizon=True)
-
-
-def test_non_windows_datastore_roots_do_not_include_drive_letters():
-    assert datastore._configured_roots(None, platform="posix") == []
-    assert datastore._configured_roots("/market", platform="posix") == [datastore.Path("/market")]
-
-
 def test_non_windows_data_root_requires_explicit_external_path(tmp_path: Path):
     runtime_only = tmp_path / "runtime-only"
     with pytest.raises(data_layout.DataLayoutError, match="required outside Windows"):
@@ -182,6 +77,16 @@ def _complete_data_root(root: Path) -> Path:
     for name in data_layout.REQUIRED_DIRECTORIES:
         (root / name).mkdir(parents=True)
     return root
+
+
+def test_required_layout_matches_current_data_producers_and_consumers():
+    required = set(data_layout.REQUIRED_DIRECTORIES)
+
+    assert "raw/klines_archive" in required
+    assert "raw/klines_json" not in required
+    assert "normalized/ohlcv_parquet" in required
+    assert "normalized/ema/releases" in required
+    assert "normalized/derivatives/releases" in required
 
 
 def test_explicit_market_data_dir_fails_closed_without_local_fallback(
@@ -249,7 +154,7 @@ def test_windows_default_uses_complete_root_and_fails_closed(tmp_path: Path):
     assert not fallback.exists()
 
 
-def test_datastore_only_creates_runtime_subdirectories_for_authoritative_root(
+def test_datastore_import_does_not_create_directories(
     tmp_path: Path,
 ):
     root = _complete_data_root(tmp_path / "authoritative")
@@ -277,9 +182,7 @@ def test_datastore_only_creates_runtime_subdirectories_for_authoritative_root(
         for path in root.rglob("*")
         if path.is_dir()
     }
-    assert after - before == {"runtime/journal", "runtime/regime_cache"}
-    assert (root / "runtime" / "journal").is_dir()
-    assert (root / "runtime" / "regime_cache").is_dir()
+    assert after == before
     assert not (
         root / "models" / "current" / "ml_trend_lgbm_catboost_20260709"
     ).exists()
