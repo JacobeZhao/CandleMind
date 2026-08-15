@@ -15,9 +15,23 @@ FastAPI + React 构建。项目聚焦 **SAR + ADX 趋势跟踪策略**，提供�
 > K 线、实盘订单或本项目回测引擎生成，也不能作为策略盈利能力证明。项目中
 > 冻结的真实研究证据仍表明当前 SAR + ADX V3 尚未盈利。
 
-<p align="center">
-  <img src="docs/assets/sar-adx-v3-illustrative-backtest.png" alt="SAR + ADX V3 模拟回测净值与回撤曲线" width="1200">
-</p>
+```mermaid
+xychart-beta
+    title "SAR + ADX V3 Illustrative Net Equity (Synthetic)"
+    x-axis ["2025-08", "09", "10", "11", "12", "2026-01", "02", "03", "04", "05", "06", "07", "08"]
+    y-axis "Net equity (USD)" 10000 --> 41000
+    line [10000, 12200, 11813, 17000, 22000, 24000, 28000, 25508, 29500, 31500, 30240, 36000, 40600]
+```
+
+```mermaid
+xychart-beta
+    title "Illustrative Drawdown (Synthetic)"
+    x-axis ["2025-08", "09", "10", "11", "12", "2026-01", "02", "03", "04", "05", "06", "07", "08"]
+    y-axis "Drawdown (%)" -10 --> 0
+    line [0, 0, -5.5, 0, 0, 0, 0, -8.9, 0, 0, -4.0, 0, 0]
+```
+
+[Mermaid 无法渲染时查看 PNG 版本](https://testingcf.jsdelivr.net/gh/JacobeZhao/CandleMind@2da8c0e/docs/assets/sar-adx-v3-illustrative-backtest.png)
 
 ### 模拟报告
 
@@ -157,6 +171,8 @@ Pull Request 应说明改动范围、验证命令、迁移影响；界面改动�
 <p align="center">
   <img src="docs/assets/wechat-trading-community.jpg" alt="AI 自动化交易交流群二维码" width="420">
 </p>
+
+[二维码无法加载时通过 CDN 查看原图](https://testingcf.jsdelivr.net/gh/JacobeZhao/CandleMind@main/docs/assets/wechat-trading-community.jpg)
 
 ## 开源许可
 
