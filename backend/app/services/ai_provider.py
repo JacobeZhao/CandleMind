@@ -1,6 +1,6 @@
 """
 Unified LLM provider interface.
-OpenAI-compatible providers (deepseek/qwen/kimi/glm/minimax/gemini/openrouter/litellm/ollama)
+OpenAI-compatible providers (deepseek/qwen/kimi/glm/minimax/gemini/openrouter/custom/litellm/ollama)
 all use the openai SDK with a custom base_url.
 Claude uses the anthropic SDK separately.
 """
@@ -44,8 +44,9 @@ PROVIDER_DEFAULTS = {
     "minimax":    {"base_url": "https://api.minimax.chat/v1",                             "model": "abab6.5s-chat"},
     "gemini":     {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai/","model": "gemini-2.0-flash"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1",                            "model": "openai/gpt-4o-mini"},
-    "litellm":    {"base_url": "http://localhost:4000/v1",                                "model": "gpt-4o-mini"},
-    "ollama":     {"base_url": "http://localhost:11434/v1",                               "model": "llama3"},
+    "custom":     {"base_url": "http://host.docker.internal:4000/v1",                    "model": "gpt-4o-mini"},
+    "litellm":    {"base_url": "http://host.docker.internal:4000/v1",                    "model": "gpt-4o-mini"},
+    "ollama":     {"base_url": "http://host.docker.internal:11434/v1",                   "model": "llama3"},
     "claude":     {"base_url": None,                                                       "model": "claude-3-5-haiku-20241022"},
 }
 
@@ -58,6 +59,7 @@ PROVIDER_NAMES = {
     "minimax":    "MiniMax",
     "gemini":     "Google Gemini",
     "openrouter": "OpenRouter",
+    "custom":     "OpenAI 兼容接口",
     "litellm":    "LiteLLM (本地代理)",
     "ollama":     "Ollama (本地)",
     "claude":     "Anthropic Claude",

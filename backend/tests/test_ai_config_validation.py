@@ -47,12 +47,28 @@ def test_rejects_dangerous_or_unapproved_urls(url):
 
 def test_local_and_explicit_gateway_hosts_are_allowed(monkeypatch):
     assert validation.validate_base_url("ollama", "http://localhost:11434/v1")
+    assert validation.validate_base_url("ollama", "http://192.168.1.20:11434/v1")
+    assert validation.validate_base_url("custom", "http://10.10.0.5:8000/v1")
+    assert validation.validate_base_url("custom", "https://llm.example.com/v1")
 
     monkeypatch.setenv("CANDLEMIND_AI_BASE_URL_HOSTS", "gateway.internal")
     assert validation.validate_base_url("litellm", "https://gateway.internal/v1")
 
 
-def test_cloud_key_and_model_are_required_but_ollama_key_is_optional():
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data",
+        "http://0.0.0.0:4000/v1",
+        "http://224.0.0.1:4000/v1",
+    ],
+)
+def test_local_providers_still_reject_special_networks(url):
+    with pytest.raises(validation.AIConfigValidationError):
+        validation.validate_base_url("custom", url)
+
+
+def test_cloud_key_and_model_are_required_but_local_keys_are_optional():
     with pytest.raises(validation.AIConfigValidationError, match="API Key"):
         validation.validate_ai_config(
             name="OpenAI",
@@ -71,6 +87,15 @@ def test_cloud_key_and_model_are_required_but_ollama_key_is_optional():
     )
     assert config.api_key == ""
     assert config.model_name == "llama3"
+
+    custom = validation.validate_ai_config(
+        name="Local gateway",
+        provider="custom",
+        api_key=None,
+        base_url="http://192.168.1.20:8000/v1",
+        model_name="local-model",
+    )
+    assert custom.api_key == ""
 
 
 def test_existing_key_is_reused_and_control_characters_are_rejected():

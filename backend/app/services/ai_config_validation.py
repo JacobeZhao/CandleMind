@@ -11,8 +11,12 @@ from urllib.parse import urlsplit, urlunsplit
 from .ai_provider import PROVIDER_DEFAULTS
 
 
-LOCAL_PROVIDERS = {"litellm", "ollama"}
+LOCAL_PROVIDERS = {"custom", "litellm", "ollama"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "litellm", "ollama"}
+PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
 
 
 class AIConfigValidationError(ValueError):
@@ -44,20 +48,35 @@ def _configured_hosts() -> set[str]:
     }
 
 
-def _is_non_public_ip(value: str) -> bool:
+def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
-        address = ipaddress.ip_address(value)
+        return ipaddress.ip_address(value)
     except ValueError:
+        return None
+
+
+def _is_allowed_local_ip(value: str) -> bool:
+    address = _parse_ip(value)
+    if address is None:
         return False
-    return not address.is_global
+    return address.is_loopback or any(address in network for network in PRIVATE_NETWORKS)
 
 
-def _resolves_to_non_public(host: str) -> bool:
+def _is_forbidden_special_ip(value: str) -> bool:
+    address = _parse_ip(value)
+    if address is None:
+        return False
+    if address.is_link_local or address.is_multicast or address.is_unspecified or address.is_reserved:
+        return True
+    return not address.is_global and not _is_allowed_local_ip(value)
+
+
+def _resolved_ips(host: str) -> set[str]:
     try:
         records = socket.getaddrinfo(host, None)
     except socket.gaierror:
-        return False
-    return any(_is_non_public_ip(record[4][0]) for record in records)
+        return set()
+    return {record[4][0] for record in records}
 
 
 def validate_base_url(provider: str, value: str | None) -> str | None:
@@ -84,9 +103,12 @@ def validate_base_url(provider: str, value: str | None) -> str | None:
 
     host = parsed.hostname.lower().rstrip(".")
     configured_hosts = _configured_hosts()
+    resolved_ips = _resolved_ips(host)
     if provider in LOCAL_PROVIDERS:
-        if host not in LOCAL_HOSTS and host not in configured_hosts:
-            raise AIConfigValidationError("Base URL 主机不在允许列表中")
+        if _is_forbidden_special_ip(host) or any(
+            _is_forbidden_special_ip(address) for address in resolved_ips
+        ):
+            raise AIConfigValidationError("Base URL 不能指向链路本地、保留或未指定地址")
     else:
         official_host = urlsplit(default_url).hostname.lower()
         if host != official_host:
@@ -95,7 +117,10 @@ def validate_base_url(provider: str, value: str | None) -> str | None:
             raise AIConfigValidationError("云端 Provider 的 Base URL 必须使用 HTTPS")
 
     explicitly_allowed = host in LOCAL_HOSTS or host in configured_hosts
-    if (_is_non_public_ip(host) or _resolves_to_non_public(host)) and not explicitly_allowed:
+    if provider not in LOCAL_PROVIDERS and not explicitly_allowed and (
+        (_parse_ip(host) is not None and not _parse_ip(host).is_global)
+        or any(not _parse_ip(address).is_global for address in resolved_ips)
+    ):
         raise AIConfigValidationError("Base URL 不能指向未授权的私有或本地地址")
 
     # Strip trailing slash to make persisted values and comparisons deterministic.

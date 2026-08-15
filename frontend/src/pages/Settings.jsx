@@ -389,6 +389,7 @@ export default function Settings() {
                       { id: "minimax",    name: "MiniMax" },
                       { id: "gemini",     name: "Google Gemini" },
                       { id: "openrouter", name: "OpenRouter" },
+                      { id: "custom",     name: "OpenAI 兼容接口" },
                       { id: "litellm",    name: "LiteLLM (本地代理)" },
                       { id: "ollama",     name: "Ollama (本地)" },
                       { id: "claude",     name: "Anthropic Claude" },

@@ -17,6 +17,8 @@ services:
       - DATA_DIR=/app/runtime
       - PYTHONUNBUFFERED=1
       - CANDLEMIND_AI_BASE_URL_HOSTS=${CANDLEMIND_AI_BASE_URL_HOSTS:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
