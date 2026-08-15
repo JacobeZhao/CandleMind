@@ -1,12 +1,12 @@
-# CandleMind G-Drive Store
+# CandleMind G 盘存储规范
 
-The authoritative data root is:
+权威实时数据根目录：
 
 ```text
 G:\CandleMind\CandleMind_data
 ```
 
-Keep backups as a sibling of live data, never inside it:
+备份必须与实时数据并列，禁止嵌套到实时目录：
 
 ```text
 G:\CandleMind\
@@ -14,15 +14,22 @@ G:\CandleMind\
 `-- CandleMind_backups\
 ```
 
-Required live-data groups are `raw`, `normalized`, `processed`,
-`experiments`, `runtime`, and `manifests`. Current application reads use
-`normalized/ohlcv_parquet`, `normalized/ema/releases`, and
-`normalized/derivatives/releases`. Paper runtime database, encryption key, and
-`strategies/sar_adx_paper_<symbol>.json` restart state belong together under
-`runtime/app`; SAR+ADX backtest outputs belong under `experiments/backtests` or
-`experiments/reports`.
+实时目录的标准分组为 `raw`、`normalized`、`processed`、`experiments`、
+`runtime` 和 `manifests`。当前应用读取：
 
-Use the supported commands in `backend/scripts/README.md`. Do not hand-edit
-immutable release files, mix generated data into the Git repository, or delete
-raw data based only on matching filenames. Historical artifacts may remain
-archived on G drive but are not part of the current application.
+- `normalized/ohlcv_parquet`
+- `normalized/ema/releases`
+- `normalized/derivatives/releases`
+
+paper 数据库、加密密钥和 `strategies/sar_adx_paper_<symbol>.json` 必须共同保存在
+`runtime/app`。回测输出放入 `experiments/backtests` 或
+`experiments/reports`。`models` 仅可作为历史模型归档，当前 SAR+ADX 策略不依赖
+其中内容。
+
+Docker Compose 对 `CandleMind_data` 使用只读挂载，对 `runtime/app` 使用可写
+挂载。数据同步应在宿主机通过 [`../backend/scripts/README.md`](../backend/scripts/README.md)
+中的命令执行。
+
+禁止手工编辑不可变 release、把生成数据放入 Git 仓库，或仅凭文件名相同删除
+raw 数据。`pytest_*` 和其他临时目录不是标准数据资产，清理前仍需确认无进程占用、
+无唯一日志且不在有效清单中。

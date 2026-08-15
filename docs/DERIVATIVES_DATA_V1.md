@@ -1,10 +1,16 @@
 # Derivatives Data V1
 
+## 当前状态
+
+本文是冻结的数据基础设施验收证据，不是策略盈利证明。当前 SAR+ADX V3 回测仅
+消费已观测资金费率 release；OI、basis 和 depth 尚未进入 paper 决策特征。任何
+新增特征都必须先完成因果对齐、匹配消融和样本外验证，不能直接修改现有清单。
+
 ## Decision
 
 The V1 collection and normalization pipeline passes source, causality, coverage,
 atomicity, and integrity acceptance. This is data-infrastructure evidence only;
-it does not show incremental alpha or make V3/V4 deployable.
+it does not show incremental alpha or make any strategy deployable.
 
 ## Source Contract
 

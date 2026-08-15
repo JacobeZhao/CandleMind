@@ -1,5 +1,10 @@
 # SAR + ADX Pyramiding Baseline V1
 
+## 文档状态
+
+这是冻结的基线研究证据，用于解释为何引入 V3 成熟度与再入场限制。它不是当前
+运行参数，也不是可交易性证明；实验数值、路径和哈希保持原样以便复核。
+
 ## Strategy Contract
 
 This diagnostic strategy uses completed 1-hour bars to calculate Wilder

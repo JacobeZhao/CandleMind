@@ -1,5 +1,10 @@
 # SAR + ADX Backtrader Validation V1
 
+## 文档状态
+
+这是冻结的跨引擎一致性证据。它证明确定性账本与 Backtrader 在指定数据和成本
+假设下结果一致，但不证明策略盈利，也不覆盖盘口冲击、延迟和交易所故障。
+
 ## Purpose
 
 The SOL SAR/ADX strategy was independently replayed through Backtrader

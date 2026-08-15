@@ -33,7 +33,7 @@ classes, and thin FastAPI handlers. Use React function components, PascalCase
 component files, camelCase variables, existing Tailwind patterns, and
 `lucide-react` icons. Name tests `test_*.py`; use mocks for Binance and
 network calls. Every backend change must pass pytest and compilation; every
-frontend change must pass `npm run build`.
+frontend change must pass `npm test` and `npm run build`.
 
 ## Commits, Security, And Trading Safety
 
@@ -42,4 +42,6 @@ Pull requests should state affected areas, verification commands, migration
 notes, and include screenshots for UI changes. Never commit secrets, databases,
 market data, or generated artifacts. Treat order code as high risk: preserve
 paper-only defaults, validate symbols and parameters, and document any future
-testnet validation before enabling exchange writes.
+testnet validation before enabling exchange writes. Documentation changes must
+keep the root Chinese README, `docs/` index, and linked operating contracts in
+sync; the project is distributed under the root MIT `LICENSE`.

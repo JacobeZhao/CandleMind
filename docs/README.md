@@ -1,15 +1,22 @@
-# Documentation
+# 文档索引
 
-Current operating documents:
+## 当前运行文档
 
-- `DATA_LAYOUT.md`: repository and external-data ownership boundaries.
-- `G_DRIVE_README.md`: expected G-drive directory structure.
-- `DERIVATIVES_DATA_V1.md`: derivatives availability and causality contract.
-- `research/SAR_ADX_*.md`: retained SAR+ADX backtest and optimization evidence.
-- `../backend/scripts/README.md`: supported maintenance and evaluation commands.
+- [`DATA_LAYOUT.md`](DATA_LAYOUT.md)：仓库、行情数据和运行状态的归属边界。
+- [`G_DRIVE_README.md`](G_DRIVE_README.md)：G 盘权威目录结构与备份规则。
+- [`DERIVATIVES_DATA_V1.md`](DERIVATIVES_DATA_V1.md)：衍生品数据来源、因果性和验收证据。
+- [`../backend/scripts/README.md`](../backend/scripts/README.md)：受支持的数据维护与评估命令。
+- [`../ops/README.md`](../ops/README.md)：Docker Compose 启动和隔离验证流程。
 
-Generated reports belong under
-`G:\CandleMind\CandleMind_data\experiments\reports`, not in this directory.
-Only the SAR+ADX evidence listed above is retained here; other historical
-research documentation belongs with its external artifacts, not in this
-repository.
+## 冻结研究证据
+
+- [`research/SAR_ADX_PYRAMID_BASELINE_V1.md`](research/SAR_ADX_PYRAMID_BASELINE_V1.md)
+- [`research/SAR_ADX_SOL_OPTIMIZATION_V1.md`](research/SAR_ADX_SOL_OPTIMIZATION_V1.md)
+- [`research/SAR_ADX_BACKTRADER_VALIDATION_V1.md`](research/SAR_ADX_BACKTRADER_VALIDATION_V1.md)
+
+这些研究文档保留实验时的参数、指标和清单哈希，不随当前页面文案改写。它们
+共同表明现有 SAR+ADX V3 仍是诊断与 paper trading 策略，不是盈利或生产准入
+证明。
+
+生成报告必须写入
+`G:\CandleMind\CandleMind_data\experiments\reports`，不得提交到 `docs/`。

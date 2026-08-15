@@ -1,5 +1,11 @@
 # SOL SAR + ADX Structural Optimization V1
 
+## 文档状态
+
+这是冻结的历史研究证据。其 V3 参数仍由当前 paper runtime 和离线回测使用，
+但结论仍是未盈利、不可作为生产准入依据。跨品种页面回测复用 SOL 参数，结果
+只用于诊断，不表示已完成对应品种调优。
+
 ## Fixed Skeleton
 
 The experiment keeps the requested structure unchanged:
