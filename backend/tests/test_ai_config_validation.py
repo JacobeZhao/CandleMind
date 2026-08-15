@@ -31,6 +31,19 @@ def test_cloud_provider_uses_official_https_host():
         validation.validate_base_url("deepseek", "http://api.deepseek.com/v1")
 
 
+def test_official_cloud_host_allows_proxy_fake_ip_dns(monkeypatch):
+    monkeypatch.setattr(
+        validation.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("198.18.1.198", 0))],
+    )
+
+    assert (
+        validation.validate_base_url("openai", "https://api.openai.com/v1")
+        == "https://api.openai.com/v1"
+    )
+
+
 @pytest.mark.parametrize(
     "url",
     [

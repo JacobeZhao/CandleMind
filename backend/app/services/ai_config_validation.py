@@ -84,6 +84,7 @@ def validate_base_url(provider: str, value: str | None) -> str | None:
 
     host = parsed.hostname.lower().rstrip(".")
     configured_hosts = _configured_hosts()
+    official_host: str | None = None
     if provider in LOCAL_PROVIDERS:
         if host not in LOCAL_HOSTS and host not in configured_hosts:
             raise AIConfigValidationError("Base URL 主机不在允许列表中")
@@ -94,7 +95,16 @@ def validate_base_url(provider: str, value: str | None) -> str | None:
         if parsed.scheme != "https":
             raise AIConfigValidationError("云端 Provider 的 Base URL 必须使用 HTTPS")
 
-    explicitly_allowed = host in LOCAL_HOSTS or host in configured_hosts
+    # Proxy clients using fake-IP DNS commonly map public hosts into
+    # 198.18.0.0/15. Cloud providers have already passed the exact official
+    # hostname check above, so treating that DNS answer as an SSRF target is a
+    # false positive. Custom and local gateways still require the explicit
+    # allowlist.
+    explicitly_allowed = (
+        host in LOCAL_HOSTS
+        or host in configured_hosts
+        or (official_host is not None and host == official_host)
+    )
     if (_is_non_public_ip(host) or _resolves_to_non_public(host)) and not explicitly_allowed:
         raise AIConfigValidationError("Base URL 不能指向未授权的私有或本地地址")
 
