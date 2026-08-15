@@ -364,3 +364,55 @@ def test_out_of_order_trade_does_not_replace_newer_price(monkeypatch):
 
     assert broadcasts[0]["data"]["price"] == "151"
     assert broadcasts[0]["data"]["eventTime"] == 300
+
+
+def test_connect_rewrites_loopback_http_proxy_in_docker(monkeypatch):
+    client = BinanceWSClient()
+    client.symbol = "SOLUSDT"
+    client.proxy = "http://127.0.0.1:7897"
+    client._running = True
+    connect_kwargs = []
+
+    class FakeWebSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def send_json(self, _payload):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def ws_connect(self, _url, **kwargs):
+            connect_kwargs.append(kwargs)
+            return FakeWebSocket()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(
+        binance_ws,
+        "rewrite_proxy_for_runtime",
+        lambda _url: "http://host.docker.internal:7897",
+    )
+
+    asyncio.run(client._connect())
+
+    assert connect_kwargs == [{
+        "heartbeat": 20,
+        "proxy": "http://host.docker.internal:7897",
+    }]

@@ -6,6 +6,7 @@ import urllib.parse
 
 from loguru import logger
 
+from .proxy import rewrite_proxy_for_runtime
 from .ws_manager import manager
 
 WS_MAINNET = "wss://fstream.binance.com"
@@ -144,13 +145,14 @@ class BinanceWSClient:
         connector = None
         proxy_url = None
         if self.proxy:
-            parsed = urllib.parse.urlparse(self.proxy)
+            runtime_proxy = rewrite_proxy_for_runtime(self.proxy)
+            parsed = urllib.parse.urlparse(runtime_proxy)
             if parsed.scheme.startswith("socks"):
                 from aiohttp_socks import ProxyConnector
 
-                connector = ProxyConnector.from_url(self.proxy)
+                connector = ProxyConnector.from_url(runtime_proxy)
             else:
-                proxy_url = self.proxy
+                proxy_url = runtime_proxy
 
         async with aiohttp.ClientSession(
             connector=connector,

@@ -77,6 +77,29 @@ def test_symbol_is_normalized_and_invalid_formats_are_rejected():
             SettingsIn(symbol=invalid)
 
 
+def test_futures_client_skips_spot_ping_and_validates_selected_endpoint(monkeypatch):
+    events = []
+
+    monkeypatch.setattr(
+        settings_routes._FuturesClient,
+        "futures_time",
+        lambda self: events.append(("time", self.FUTURES_URL)) or {"serverTime": 1},
+    )
+    monkeypatch.setattr(
+        settings_routes._FuturesClient,
+        "futures_ping",
+        lambda self: events.append(("ping", self.FUTURES_URL)) or {},
+    )
+
+    client = settings_routes._build_client("key", "secret", testnet=True)
+
+    assert client.FUTURES_URL == "https://testnet.binancefuture.com/fapi"
+    assert events == [
+        ("time", "https://testnet.binancefuture.com/fapi"),
+        ("ping", "https://testnet.binancefuture.com/fapi"),
+    ]
+
+
 def test_save_without_api_key_commits_normalized_symbol_to_app_state(monkeypatch):
     original_client = _set_runtime(monkeypatch)
     current = _settings()

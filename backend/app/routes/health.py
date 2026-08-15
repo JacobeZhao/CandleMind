@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..database import get_db, Settings
+from ..proxy import rewrite_proxy_for_runtime
 from ..state import app_state
 from ..services.bot_engine import bot_engine
 
@@ -25,7 +26,12 @@ async def health(db: Session = Depends(get_db)):
     # 出口 IP + 国家
     try:
         import requests as rq
-        proxies = {"http": proxy, "https": proxy} if proxy else None
+        runtime_proxy = rewrite_proxy_for_runtime(proxy) if proxy else None
+        proxies = (
+            {"http": runtime_proxy, "https": runtime_proxy}
+            if runtime_proxy
+            else None
+        )
         r = await asyncio.to_thread(
             lambda: rq.get("http://ip-api.com/json/?fields=query,countryCode,country",
                            proxies=proxies, timeout=10).json())

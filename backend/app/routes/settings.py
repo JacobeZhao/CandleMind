@@ -7,6 +7,7 @@ from ..database import get_db, Settings, active_keys
 from ..security import encrypt, decrypt
 from ..state import app_state
 from ..binance_ws import binance_ws_client
+from ..proxy import rewrite_proxy_for_runtime
 import asyncio
 import json
 import re
@@ -21,6 +22,13 @@ _KEEP = ("_keep_", "")
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]+(?:_[A-Z0-9]+)?$")
 _settings_lock = asyncio.Lock()
 _ws_switch_lock = asyncio.Lock()
+
+
+class _FuturesClient(Client):
+    """Avoid python-binance's unrelated spot ping during construction."""
+
+    def ping(self):
+        return {}
 
 
 class SettingsIn(BaseModel):
@@ -268,12 +276,7 @@ async def get_my_ip(db: Session = Depends(get_db)):
 
 def _rewrite_proxy(url: str) -> str:
     """Docker 容器内 localhost/127.0.0.1 不可达，替换为 host.docker.internal"""
-    import os
-    in_docker = os.path.exists("/.dockerenv") or os.getenv("DOCKER_CONTAINER")
-    if not in_docker:
-        return url
-    return (url.replace("://localhost:", "://host.docker.internal:")
-               .replace("://127.0.0.1:", "://host.docker.internal:"))
+    return rewrite_proxy_for_runtime(url)
 
 
 def _build_client(api_key: str, api_secret: str, testnet: bool,
@@ -284,8 +287,11 @@ def _build_client(api_key: str, api_secret: str, testnet: bool,
         p = _rewrite_proxy(proxy_url.strip())
         requests_params["proxies"] = {"http": p, "https": p}
 
-    client = Client(api_key.strip(), api_secret.strip(),
-                    requests_params=requests_params)
+    client = _FuturesClient(
+        api_key.strip(),
+        api_secret.strip(),
+        requests_params=requests_params,
+    )
 
     if testnet:
         client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
