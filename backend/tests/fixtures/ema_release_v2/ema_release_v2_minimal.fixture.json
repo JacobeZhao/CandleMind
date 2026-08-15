@@ -1,0 +1,76 @@
+{
+  "archive": {
+    "bytes": 46105,
+    "path": "ema_release_v2_minimal.zip",
+    "sha256": "5ee7df2c6a178ee5ecedbf991a0d3a7ccc0df2f3c2dafb728fa498725c9132ab"
+  },
+  "files": [
+    {
+      "bytes": 660,
+      "path": "evidence/pit_readiness_audit.json",
+      "sha256": "1459d318ff5a4e50d51397b01e37914acefbc2d144ca09ba129427b041c422f5"
+    },
+    {
+      "bytes": 651,
+      "path": "evidence/pit_universe_manifest.json",
+      "sha256": "c3613c373e045653cefeb7918340e25040100d7283a5512b502de5f9bf848d0b"
+    },
+    {
+      "bytes": 16030,
+      "path": "manifest.json",
+      "sha256": "c7e16201470360c0dd2f7f33f26fc21ad15e41daeea79223789ddf9e13fc02ae"
+    },
+    {
+      "bytes": 23871,
+      "path": "ohlcv/BTCUSDT_5m.parquet",
+      "sha256": "4c17d219e548d6b59ec9e8a16bbce97f93433aeb5ce6ed8e8d7689e545c92601"
+    },
+    {
+      "bytes": 27323,
+      "path": "source/backend/app/rl/ema_features_v2.py",
+      "sha256": "75273e3ac44993f8a7e8b8de28c601a2776bec9daa55190a1e050729ef913135"
+    },
+    {
+      "bytes": 32189,
+      "path": "source/backend/app/rl/ema_lifecycle.py",
+      "sha256": "386bd95a11237370e9206567fa554b3292261e39c5a54425580bdf2ffeac0a0f"
+    },
+    {
+      "bytes": 19855,
+      "path": "source/backend/app/rl/ema_universe.py",
+      "sha256": "4b8d64ab34a607036d74dfa5d368b968750b67da711bc39cd52f65e4731c67c6"
+    },
+    {
+      "bytes": 55229,
+      "path": "source/backend/app/services/ema_data_release.py",
+      "sha256": "405f68f0171d71597a29db28251e57b3882496fa916301292d8e2ca1c99bd03e"
+    },
+    {
+      "bytes": 7766,
+      "path": "source/backend/app/services/point_in_time_universe.py",
+      "sha256": "a5a9d6cea9f991d359a44d0674756869ab5ccb2ed84abe082db051d7e9b9756c"
+    },
+    {
+      "bytes": 2709,
+      "path": "source/backend/scripts/data/build_ema_data_release.py",
+      "sha256": "e372498f71cc38f5ff326ac6ed4bf4d2deabe05479014f634ef4db592f9ff0e5"
+    },
+    {
+      "bytes": 13754,
+      "path": "universe_snapshots.parquet",
+      "sha256": "477ec907a7976ca2b7a4516b940aa36ace79d59ba71baa8083a5510609ea9763"
+    }
+  ],
+  "manifest_sha256": "91fad31e235b783121b38899a549561b5bb254564d6af26edd92d314ac5d571c",
+  "release_digest": "aab5cca56a2a764fdef7965bd9c2012259498d94cd682eedfed4b722377985d0",
+  "schema": "candlemind-test-fixture-v1",
+  "source_commit": "192df97c0d1552f86f8db3733e45dc79eb24e9ac",
+  "source_tree_sha256": "59ffbfd06cbbf8acf22a4ae04b5ea817e22ccec8597f28857168c8ae097ec1ae",
+  "toolchain": {
+    "numpy": "2.2.6",
+    "pandas": "2.2.3",
+    "pyarrow": "23.0.0",
+    "python": "3.12.10"
+  },
+  "universe_content_sha256": "97faf9c2f5e45c2b41dc8b2f0372ecefa1594572e44901932bf59bbed849af79"
+}

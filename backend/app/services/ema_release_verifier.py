@@ -1,18 +1,13 @@
-"""Build and verify immutable point-in-time data releases for EMA research."""
+"""Verify immutable point-in-time EMA data releases without publishing them."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
-import shutil
-import subprocess
 from typing import Any
-import uuid
 
 import numpy as np
 import pandas as pd
@@ -20,20 +15,31 @@ import pyarrow.parquet as pq
 
 from backend.app.services.pit_universe_contract import (
     EMA_UNIVERSE_SCHEMA,
-    UNIVERSE_COLUMNS,
     ema_universe_content_hash,
 )
 
 
 RELEASE_SCHEMA = "candlemind-ema-data-release-v2"
+
+
 MANIFEST_NAME = "manifest.json"
-UNIVERSE_OUTPUT_NAME = "universe_snapshots.parquet"
-OHLC_OUTPUT_DIR = "ohlcv"
+
+
 SOURCE_OUTPUT_DIR = "source"
+
+
 EVIDENCE_OUTPUT_DIR = "evidence"
+
+
 PIT_UNIVERSE_MANIFEST_NAME = "pit_universe_manifest.json"
+
+
 PIT_READINESS_AUDIT_NAME = "pit_readiness_audit.json"
+
+
 BAR_INTERVAL = pd.Timedelta(minutes=5)
+
+
 SOURCE_SNAPSHOT_RELATIVE_PATHS = (
     "backend/app/services/ema_data_release.py",
     "backend/scripts/data/build_ema_data_release.py",
@@ -43,185 +49,21 @@ SOURCE_SNAPSHOT_RELATIVE_PATHS = (
     "backend/app/rl/ema_lifecycle.py",
 )
 
+
 _RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 _CODE_REVISION_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
 _OHLC_COLUMNS = ("open_time", "open", "high", "low", "close")
+
+
 class EmaDataReleaseError(ValueError):
     """Raised when an EMA data release cannot be built or trusted."""
-
-
-def build_ema_data_release(
-    *,
-    release_id: str,
-    output_root: Path,
-    ohlc_paths: Sequence[Path],
-    universe_snapshots_path: Path,
-    universe_manifest_path: Path,
-    pit_readiness_path: Path,
-    warmup_days: int,
-    label_horizon_days: int,
-    code_revision: str | None = None,
-) -> dict[str, Any]:
-    """Validate explicit sources, copy them, and atomically publish a release."""
-
-    if not isinstance(release_id, str) or not _RELEASE_ID_RE.fullmatch(release_id):
-        raise EmaDataReleaseError("release_id must be a simple 1-128 character key")
-    if not ohlc_paths:
-        raise EmaDataReleaseError("at least one explicit OHLC Parquet path is required")
-    coverage = _coverage_contract(
-        warmup_days=warmup_days,
-        label_horizon_days=label_horizon_days,
-    )
-
-    root = output_root.expanduser().resolve()
-    destination = root / release_id
-    if destination.exists():
-        raise FileExistsError(f"EMA data release already exists: {destination}")
-
-    sources = [
-        _explicit_parquet_path(path, label=f"OHLC source {index}")
-        for index, path in enumerate(ohlc_paths, start=1)
-    ]
-    universe_source = _explicit_parquet_path(
-        universe_snapshots_path, label="PIT universe snapshot source"
-    )
-    universe_manifest_source = _explicit_json_path(
-        universe_manifest_path, label="PIT universe release manifest"
-    )
-    readiness_source = _explicit_json_path(
-        pit_readiness_path, label="PIT readiness audit"
-    )
-    resolved_sources = [*sources, universe_source]
-    if len(set(resolved_sources)) != len(resolved_sources):
-        raise EmaDataReleaseError("source Parquet paths must be distinct")
-    output_names = [path.name for path in sources]
-    if len(set(output_names)) != len(output_names):
-        raise EmaDataReleaseError("OHLC source file names must be unique")
-
-    ohlc_records: list[dict[str, Any]] = []
-    symbols: set[str] = set()
-    ohlc_windows: list[dict[str, str]] = []
-    ohlc_windows_by_symbol: dict[str, dict[str, str]] = {}
-    for source in sources:
-        frame = _read_parquet(source)
-        symbol, window = _validate_ohlc_frame(frame, source)
-        if symbol in symbols:
-            raise EmaDataReleaseError(f"duplicate OHLC symbol: {symbol}")
-        symbols.add(symbol)
-        ohlc_windows.append(window)
-        ohlc_windows_by_symbol[symbol] = window
-        ohlc_records.append(
-            _input_record(source, frame, kind="ohlcv", symbol=symbol, window=window)
-        )
-
-    universe_frame = _read_parquet(universe_source)
-    universe_window, universe_contracts = _validate_universe_frame(universe_frame)
-    universe_content_sha256 = ema_universe_content_hash(universe_frame)
-    missing_symbols = sorted(symbols - universe_contracts)
-    if missing_symbols:
-        raise EmaDataReleaseError(
-            "PIT universe snapshots omit OHLC symbols: " + ", ".join(missing_symbols)
-        )
-    eligible_symbols = set(
-        universe_frame.loc[universe_frame["eligible"].astype(bool), "symbol"].astype(str)
-    )
-    missing_eligible_symbols = sorted(eligible_symbols - symbols)
-    if missing_eligible_symbols:
-        raise EmaDataReleaseError(
-            "eligible PIT universe symbols lack OHLC data: "
-            + ", ".join(missing_eligible_symbols)
-        )
-    coverage["eligible_pair_count"] = _validate_eligible_coverage(
-        universe_frame,
-        ohlc_windows_by_symbol,
-        coverage,
-    )
-    universe_record = _input_record(
-        universe_source,
-        universe_frame,
-        kind="point_in_time_universe",
-        window=universe_window,
-    )
-    pit_evidence = _validate_pit_source_evidence(
-        universe_manifest_source=universe_manifest_source,
-        readiness_source=readiness_source,
-        universe_source=universe_source,
-        universe_frame=universe_frame,
-        symbols=symbols,
-    )
-    release_window = _enclosing_window(ohlc_windows)
-
-    revision = code_revision or _code_revision()
-    if not isinstance(revision, str) or _CODE_REVISION_RE.fullmatch(revision) is None:
-        raise EmaDataReleaseError("code_revision must be a lowercase Git object id")
-    source_records = _source_snapshot_records()
-    source_tree_sha256 = _source_tree_sha256(source_records)
-
-    root.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise FileExistsError(f"EMA data release already exists: {destination}")
-    staging = root / f".{release_id}.{uuid.uuid4().hex}.staging"
-    try:
-        staging.mkdir()
-        (staging / OHLC_OUTPUT_DIR).mkdir()
-        (staging / EVIDENCE_OUTPUT_DIR).mkdir()
-        outputs: list[dict[str, Any]] = []
-        for source, input_record in zip(sources, ohlc_records, strict=True):
-            relative = Path(OHLC_OUTPUT_DIR) / source.name
-            outputs.append(
-                _copy_verified(source, staging / relative, relative, input_record)
-            )
-        universe_relative = Path(UNIVERSE_OUTPUT_NAME)
-        outputs.append(
-            _copy_verified(
-                universe_source,
-                staging / universe_relative,
-                universe_relative,
-                universe_record,
-            )
-        )
-        persisted_pit_evidence = _copy_pit_evidence(
-            staging,
-            pit_evidence=pit_evidence,
-            universe_manifest_source=universe_manifest_source,
-            readiness_source=readiness_source,
-        )
-        persisted_source_records = _copy_source_snapshot(source_records, staging)
-
-        manifest: dict[str, Any] = {
-            "schema": RELEASE_SCHEMA,
-            "release_id": release_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "code_revision": revision,
-            "window": release_window,
-            "coverage": coverage,
-            "universe": {
-                "schema": EMA_UNIVERSE_SCHEMA,
-                "content_sha256": universe_content_sha256,
-                "interval_semantics": "[effective_from,effective_to)",
-            },
-            "pit_evidence": persisted_pit_evidence,
-            "inputs": [*ohlc_records, universe_record],
-            "outputs": outputs,
-            "source_snapshot": {
-                "hash_algorithm": "sha256-path-and-content-v1",
-                "source_tree_sha256": source_tree_sha256,
-                "files": persisted_source_records,
-            },
-        }
-        manifest["release_digest"] = canonical_release_digest(manifest)
-        manifest["manifest_sha256"] = canonical_manifest_sha256(manifest)
-        _write_json_exclusive(staging / MANIFEST_NAME, manifest)
-        verified = verify_ema_data_release(staging)
-
-        if destination.exists():
-            raise FileExistsError(f"EMA data release already exists: {destination}")
-        os.rename(staging, destination)
-        return verified
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
 
 
 def verify_ema_data_release(release_dir: Path) -> dict[str, Any]:
@@ -554,73 +396,6 @@ def _validate_universe_binding(value: Any) -> Mapping[str, str]:
     return value
 
 
-def _validate_pit_source_evidence(
-    *,
-    universe_manifest_source: Path,
-    readiness_source: Path,
-    universe_source: Path,
-    universe_frame: pd.DataFrame,
-    symbols: set[str],
-) -> dict[str, dict[str, Any]]:
-    universe_manifest = _read_json(universe_manifest_source)
-    readiness = _read_json(readiness_source)
-    declared_output = universe_manifest.get("output")
-    declared_relative = (
-        declared_output.get("path") if isinstance(declared_output, Mapping) else None
-    )
-    if not isinstance(declared_relative, str) or not declared_relative:
-        raise EmaDataReleaseError("PIT universe output path is missing")
-    declared_path = (universe_manifest_source.parent / declared_relative).resolve()
-    if declared_path != universe_source:
-        raise EmaDataReleaseError(
-            "PIT universe manifest does not identify the supplied Parquet"
-        )
-    components = readiness.get("components")
-    pit_component = (
-        components.get("pit_universe") if isinstance(components, Mapping) else None
-    )
-    evidence_paths = (
-        pit_component.get("evidence_paths")
-        if isinstance(pit_component, Mapping)
-        else None
-    )
-    if (
-        not isinstance(evidence_paths, list)
-        or len(evidence_paths) != 1
-        or Path(str(evidence_paths[0])).expanduser().resolve()
-        != universe_manifest_source
-    ):
-        raise EmaDataReleaseError(
-            "PIT readiness does not identify the supplied universe manifest"
-        )
-    identity = _validate_pit_payloads(
-        universe_manifest,
-        readiness,
-        universe_sha256=_sha256_file(universe_source),
-        universe_bytes=universe_source.stat().st_size,
-        universe_frame=universe_frame,
-        symbols=symbols,
-    )
-    return {
-        "pit_universe_manifest": {
-            "path": f"{EVIDENCE_OUTPUT_DIR}/{PIT_UNIVERSE_MANIFEST_NAME}",
-            "source_path": str(universe_manifest_source),
-            "bytes": universe_manifest_source.stat().st_size,
-            "sha256": _sha256_file(universe_manifest_source),
-            "manifest_sha256": identity["universe_manifest_sha256"],
-            "release_id": identity["universe_release_id"],
-        },
-        "pit_readiness_audit": {
-            "path": f"{EVIDENCE_OUTPUT_DIR}/{PIT_READINESS_AUDIT_NAME}",
-            "source_path": str(readiness_source),
-            "bytes": readiness_source.stat().st_size,
-            "sha256": _sha256_file(readiness_source),
-            "report_sha256": identity["readiness_report_sha256"],
-            "status": "ready",
-        },
-    }
-
-
 def _validate_pit_payloads(
     universe_manifest: Mapping[str, Any],
     readiness: Mapping[str, Any],
@@ -782,30 +557,6 @@ def _validate_pit_evidence_manifest(value: Any) -> dict[str, Mapping[str, Any]]:
     return normalized
 
 
-def _copy_pit_evidence(
-    staging: Path,
-    *,
-    pit_evidence: Mapping[str, Mapping[str, Any]],
-    universe_manifest_source: Path,
-    readiness_source: Path,
-) -> dict[str, dict[str, Any]]:
-    sources = {
-        "pit_universe_manifest": universe_manifest_source,
-        "pit_readiness_audit": readiness_source,
-    }
-    persisted: dict[str, dict[str, Any]] = {}
-    for name, source in sources.items():
-        record = dict(pit_evidence[name])
-        if source.stat().st_size != record["bytes"] or _sha256_file(source) != record["sha256"]:
-            raise EmaDataReleaseError(f"{name} changed while publishing")
-        destination = _safe_release_path(staging, record["path"])
-        shutil.copyfile(source, destination)
-        if destination.stat().st_size != record["bytes"] or _sha256_file(destination) != record["sha256"]:
-            raise EmaDataReleaseError(f"copied {name} evidence differs from source")
-        persisted[name] = record
-    return persisted
-
-
 def _verify_pit_evidence(
     root: Path,
     *,
@@ -849,31 +600,6 @@ def _verify_pit_evidence(
     return paths
 
 
-def _input_record(
-    path: Path,
-    frame: pd.DataFrame,
-    *,
-    kind: str,
-    window: Mapping[str, str],
-    symbol: str | None = None,
-) -> dict[str, Any]:
-    record: dict[str, Any] = {
-        "kind": kind,
-        "path": str(path),
-        "rows": len(frame),
-        "bytes": path.stat().st_size,
-        "sha256": _sha256_file(path),
-        "semantic_hash_algorithm": "pandas-row-hash-v1",
-        "semantic_sha256": dataframe_semantic_sha256(frame),
-        "schema": parquet_schema(frame, path),
-        "window": dict(window),
-    }
-    if symbol is not None:
-        record["symbol"] = symbol
-    record["source_id"] = _source_record_id(record)
-    return record
-
-
 def _source_record_id(record: Mapping[str, Any]) -> str:
     """Identify source content independently of its mutable filesystem path."""
 
@@ -890,13 +616,6 @@ def _source_record_id(record: Mapping[str, Any]) -> str:
         "window": record.get("window"),
     }
     return hashlib.sha256(_canonical_json(identity)).hexdigest()
-
-
-def _is_content_id(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    digest = value.removeprefix("sha256:")
-    return _SHA256_RE.fullmatch(digest) is not None
 
 
 def _coverage_contract(
@@ -976,29 +695,6 @@ def _validate_eligible_coverage(
     return len(eligible)
 
 
-def _source_snapshot_records() -> list[dict[str, Any]]:
-    repository = _repository_root()
-    records: list[dict[str, Any]] = []
-    for relative in SOURCE_SNAPSHOT_RELATIVE_PATHS:
-        source = (repository / relative).resolve()
-        try:
-            source.relative_to(repository)
-        except ValueError as exc:
-            raise EmaDataReleaseError("source snapshot path escapes repository") from exc
-        if not source.is_file() or source.is_symlink():
-            raise EmaDataReleaseError(f"required source snapshot file is missing: {relative}")
-        records.append(
-            {
-                "repository_path": relative,
-                "path": f"{SOURCE_OUTPUT_DIR}/{relative}",
-                "bytes": source.stat().st_size,
-                "sha256": _sha256_file(source),
-                "_source_path": source,
-            }
-        )
-    return records
-
-
 def _source_tree_sha256(records: Sequence[Mapping[str, Any]]) -> str:
     identity = [
         {
@@ -1010,28 +706,6 @@ def _source_tree_sha256(records: Sequence[Mapping[str, Any]]) -> str:
     ]
     identity.sort(key=lambda item: str(item["repository_path"]))
     return hashlib.sha256(_canonical_json(identity)).hexdigest()
-
-
-def _copy_source_snapshot(
-    records: Sequence[Mapping[str, Any]], staging: Path
-) -> list[dict[str, Any]]:
-    persisted: list[dict[str, Any]] = []
-    for record in records:
-        source = record.get("_source_path")
-        if not isinstance(source, Path):
-            raise EmaDataReleaseError("source snapshot record lacks its source path")
-        destination = _safe_release_path(staging, str(record["path"]))
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
-        if (
-            _sha256_file(source) != record["sha256"]
-            or _sha256_file(destination) != record["sha256"]
-        ):
-            raise EmaDataReleaseError(
-                f"source changed while publishing snapshot: {record['repository_path']}"
-            )
-        persisted.append({key: value for key, value in record.items() if key != "_source_path"})
-    return persisted
 
 
 def _verify_source_snapshot(root: Path, value: Any) -> set[str]:
@@ -1086,23 +760,6 @@ def _verify_source_snapshot(root: Path, value: Any) -> set[str]:
     if _source_tree_sha256(normalized) != tree_hash:
         raise EmaDataReleaseError("source_tree_sha256 verification failed")
     return paths
-
-
-def _copy_verified(
-    source: Path,
-    destination: Path,
-    relative: Path,
-    input_record: Mapping[str, Any],
-) -> dict[str, Any]:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
-    if _sha256_file(source) != input_record["sha256"]:
-        raise EmaDataReleaseError(f"source changed while publishing: {source}")
-    if _sha256_file(destination) != input_record["sha256"]:
-        raise EmaDataReleaseError(f"copied output differs from source: {relative}")
-    record = {key: value for key, value in input_record.items() if key != "path"}
-    record["path"] = relative.as_posix()
-    return record
 
 
 def _validate_evidence_record(record: Any, *, input_record: bool) -> None:
@@ -1187,31 +844,6 @@ def _uses_current_alias(value: str) -> bool:
     )
 
 
-def _explicit_parquet_path(path: Path, *, label: str) -> Path:
-    return _explicit_source_path(path, label=label, suffix=".parquet")
-
-
-def _explicit_json_path(path: Path, *, label: str) -> Path:
-    return _explicit_source_path(path, label=label, suffix=".json")
-
-
-def _explicit_source_path(path: Path, *, label: str, suffix: str) -> Path:
-    raw = path.expanduser().absolute()
-    if any(Path(part).stem.casefold() == "current" for part in raw.parts):
-        raise EmaDataReleaseError(f"{label} must not use a current pointer: {raw}")
-    cursor = raw
-    while cursor != cursor.parent:
-        if cursor.exists() and cursor.is_symlink():
-            raise EmaDataReleaseError(f"{label} must not use a symlink: {raw}")
-        cursor = cursor.parent
-    resolved = raw.resolve()
-    if resolved.suffix.casefold() != suffix:
-        raise EmaDataReleaseError(f"{label} must be an explicit {suffix} file: {resolved}")
-    if not resolved.is_file():
-        raise FileNotFoundError(f"{label} does not exist: {resolved}")
-    return resolved
-
-
 def _safe_release_path(root: Path, relative: str) -> Path:
     path = (root / relative).resolve()
     try:
@@ -1285,40 +917,6 @@ def _utc_timestamp(value: Any, *, field: str) -> pd.Timestamp:
     return timestamp.tz_convert("UTC")
 
 
-def _code_revision() -> str:
-    repository = _repository_root()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repository,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise EmaDataReleaseError("cannot resolve the repository code revision") from exc
-    return result.stdout.strip().lower()
-
-
-def _repository_root() -> Path:
-    repository = Path(__file__).resolve().parents[3]
-    if not (repository / "backend").is_dir():
-        raise EmaDataReleaseError("cannot resolve the repository root")
-    return repository
-
-
-def _write_json_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
-    encoded = json.dumps(
-        payload,
-        indent=2,
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-    ).encode("ascii") + b"\n"
-    with path.open("xb") as handle:
-        handle.write(encoded)
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="ascii"))
@@ -1351,15 +949,3 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-__all__ = [
-    "EmaDataReleaseError",
-    "MANIFEST_NAME",
-    "RELEASE_SCHEMA",
-    "build_ema_data_release",
-    "canonical_manifest_sha256",
-    "canonical_release_digest",
-    "dataframe_semantic_sha256",
-    "verify_ema_data_release",
-]

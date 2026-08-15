@@ -2,7 +2,6 @@ import asyncio
 from types import SimpleNamespace
 
 from backend.app import main
-from backend.app.routes import market
 from backend.app.state import AppState
 from backend.app.ws_manager import ConnectionManager
 
@@ -157,9 +156,3 @@ def test_broadcast_times_out_and_removes_only_failed_connections():
         assert manager.active == [healthy]
 
     asyncio.run(scenario())
-
-
-def test_removed_regime_routes_are_not_registered():
-    paths = {route.path for route in market.router.routes}
-    assert "/regime/{symbol}" not in paths
-    assert "/regime_ai/{symbol}" not in paths

@@ -99,6 +99,7 @@ def select_data_root(
     *,
     market_data_dir: str | None,
     data_dir: str | None,
+    require_writable: bool = True,
     platform: str | None = None,
     default_windows_root: Path = Path("G:/CandleMind/CandleMind_data"),
     validator: Callable[..., Path] = validate_data_root,
@@ -107,11 +108,11 @@ def select_data_root(
     if market_data_dir is not None:
         if not market_data_dir.strip():
             raise DataLayoutError("MARKET_DATA_DIR is set but empty")
-        root = validator(Path(market_data_dir), require_writable=True)
+        root = validator(Path(market_data_dir), require_writable=require_writable)
         return DataRootSelection(root=root, authoritative=True)
 
     if (platform or os.name) == "nt":
-        root = validator(default_windows_root, require_writable=True)
+        root = validator(default_windows_root, require_writable=require_writable)
         return DataRootSelection(root=root, authoritative=True)
 
     runtime_hint = " DATA_DIR configures runtime state only." if data_dir else ""

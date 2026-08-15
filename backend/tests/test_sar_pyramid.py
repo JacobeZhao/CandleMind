@@ -8,7 +8,6 @@ from backend.app.strategies import sar_pyramid
 from backend.app.strategies.sar_pyramid import (
     SarPyramidConfig,
     adx_regime,
-    hourly_adx_regime,
     parabolic_sar,
     run_sar_pyramid_backtest,
 )
@@ -199,8 +198,8 @@ def test_hourly_adx_uses_only_completed_hours_and_is_prefix_stable() -> None:
         }
     )
     prefix_rows = 50 * 12
-    full = hourly_adx_regime(bars)
-    prefix = hourly_adx_regime(bars.iloc[:prefix_rows])
+    full = adx_regime(bars, timeframe="1h")
+    prefix = adx_regime(bars.iloc[:prefix_rows], timeframe="1h")
 
     pd.testing.assert_frame_equal(full.iloc[:prefix_rows], prefix)
     known = full["adx_available_at"].notna()

@@ -1,9 +1,13 @@
 from typing import Literal
 
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
 
 from ..services.bot_engine import bot_engine
+from ..services.sar_adx_runtime import SarAdxRuntimeError
 from ..state import app_state
 
 
@@ -38,23 +42,27 @@ async def start_engine(body: EngineStartRequest):
         "name": "SAR + ADX Pyramid V3",
         "symbol": body.symbol,
         "interval": "5m",
-        "leverage": 1,
-        "risk_pct": 0.0,
-        "stop_loss_pct": 0.0,
-        "take_profit_pct": 0.0,
         "check_interval": 15,
         "strategy_type": body.strategy_type,
-        "strategy_params": {},
-        "ai_strategy_json": None,
         "paper": True,
-        "live_authorized": False,
         "config_version": body.config_version,
         "initial_capital": body.initial_capital,
     }
     try:
         await bot_engine.start(app_state.client, cfg)
+    except SarAdxRuntimeError as exc:
+        raise HTTPException(409, f"Paper strategy state requires recovery: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except (BinanceAPIException, BinanceRequestException) as exc:
+        raise HTTPException(502, "Binance rejected or returned an invalid response") from exc
+    except (
+        TimeoutError,
+        ConnectionError,
+        RequestsTimeout,
+        RequestsConnectionError,
+    ) as exc:
+        raise HTTPException(503, "Binance is temporarily unavailable") from exc
     status = bot_engine.status
     return {
         "ok": True,

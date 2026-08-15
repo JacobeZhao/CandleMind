@@ -2,11 +2,15 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 from fastapi import HTTPException
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
 
 from backend.app.routes import strategy as strategy_routes
 from backend.app.services import bot_engine as bot_engine_module
 from backend.app.services.bot_engine import BotEngine
+from backend.app.services.sar_adx_runtime import SarAdxRuntimeError
 
 
 def _engine_config(**overrides):
@@ -97,6 +101,19 @@ def test_start_contract_rejects_removed_strategy():
         _request(strategy_type="ml_trend")
 
 
+def test_start_requires_connected_binance_client(monkeypatch):
+    start = AsyncMock()
+    monkeypatch.setattr(strategy_routes.app_state, "client", None)
+    monkeypatch.setattr(strategy_routes.bot_engine, "start", start)
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(strategy_routes.start_engine(_request()))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Binance is not connected"
+    start.assert_not_awaited()
+
+
 def test_start_binds_explicit_symbol(monkeypatch):
     captured = {}
 
@@ -110,10 +127,118 @@ def test_start_binds_explicit_symbol(monkeypatch):
     monkeypatch.setattr(strategy_routes.bot_engine, "start", start)
     result = asyncio.run(strategy_routes.start_engine(_request()))
 
+    assert set(captured) == {
+        "name",
+        "symbol",
+        "interval",
+        "check_interval",
+        "strategy_type",
+        "paper",
+        "config_version",
+        "initial_capital",
+    }
     assert captured["symbol"] == "ETHUSDT"
     assert captured["strategy_type"] == "sar_adx_pyramid"
     assert captured["paper"] is True
     assert result["symbol"] == "ETHUSDT"
+
+
+def test_start_preserves_running_conflict(monkeypatch):
+    monkeypatch.setattr(strategy_routes.app_state, "client", object())
+    monkeypatch.setattr(
+        strategy_routes.bot_engine,
+        "start",
+        AsyncMock(side_effect=ValueError("strategy already running for SOLUSDT")),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(strategy_routes.start_engine(_request()))
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "strategy already running for SOLUSDT"
+
+
+def test_start_maps_paper_recovery_failure_to_conflict(monkeypatch):
+    monkeypatch.setattr(strategy_routes.app_state, "client", object())
+    monkeypatch.setattr(
+        strategy_routes.bot_engine,
+        "start",
+        AsyncMock(side_effect=SarAdxRuntimeError("missed execution open")),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(strategy_routes.start_engine(_request()))
+
+    assert raised.value.status_code == 409
+    assert "requires recovery" in raised.value.detail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BinanceRequestException("upstream payload contained secret details"),
+        BinanceAPIException(
+            response=type(
+                "Response",
+                (),
+                {
+                    "status_code": 429,
+                    "text": '{"code": -1003, "msg": "sensitive upstream detail"}',
+                    "request": None,
+                },
+            )(),
+            status_code=429,
+            text='{ "code": -1003, "msg": "sensitive upstream detail" }',
+        ),
+    ],
+)
+def test_start_maps_binance_response_failures_to_safe_502(monkeypatch, error):
+    monkeypatch.setattr(strategy_routes.app_state, "client", object())
+    monkeypatch.setattr(
+        strategy_routes.bot_engine, "start", AsyncMock(side_effect=error)
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(strategy_routes.start_engine(_request()))
+
+    assert raised.value.status_code == 502
+    assert raised.value.detail == "Binance rejected or returned an invalid response"
+    assert "sensitive" not in raised.value.detail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("sensitive timeout detail"),
+        ConnectionError("sensitive connection detail"),
+        RequestsTimeout("sensitive request timeout detail"),
+        RequestsConnectionError("sensitive request connection detail"),
+    ],
+)
+def test_start_maps_binance_availability_failures_to_safe_503(monkeypatch, error):
+    monkeypatch.setattr(strategy_routes.app_state, "client", object())
+    monkeypatch.setattr(
+        strategy_routes.bot_engine, "start", AsyncMock(side_effect=error)
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(strategy_routes.start_engine(_request()))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Binance is temporarily unavailable"
+    assert "sensitive" not in raised.value.detail
+
+
+def test_start_does_not_hide_programming_errors(monkeypatch):
+    monkeypatch.setattr(strategy_routes.app_state, "client", object())
+    monkeypatch.setattr(
+        strategy_routes.bot_engine,
+        "start",
+        AsyncMock(side_effect=RuntimeError("runtime invariant failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="runtime invariant failed"):
+        asyncio.run(strategy_routes.start_engine(_request()))
 
 
 def test_engine_rejects_running_symbol_change():
@@ -284,7 +409,7 @@ def test_concurrent_starts_commit_only_one_runtime(monkeypatch):
     warmup_count = 0
     _install_runtime(monkeypatch, runtime)
 
-    async def cycle(*_args):
+    async def cycle(*_args, **_kwargs):
         nonlocal warmup_count
         warmup_count += 1
         warmup_entered.set()
@@ -319,7 +444,7 @@ def test_stop_during_warmup_waits_for_start_then_stops(monkeypatch):
     release_warmup = asyncio.Event()
     _install_runtime(monkeypatch, object())
 
-    async def cycle(*_args):
+    async def cycle(*_args, **_kwargs):
         warmup_entered.set()
         await release_warmup.wait()
         return bot_engine_module._CycleResult(100.0, "NONE", "warm", 0)

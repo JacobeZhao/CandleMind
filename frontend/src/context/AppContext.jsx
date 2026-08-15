@@ -43,12 +43,33 @@ export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initial);
   const symbolRequestId = useRef(0);
   const symbolSaveQueue = useRef(Promise.resolve());
+  const activeSymbol = useRef(initial.symbol);
+  const pendingTicker = useRef(null);
+  const switchingSymbol = useRef(false);
+
+  useEffect(() => {
+    activeSymbol.current = state.symbol;
+  }, [state.symbol]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const data = pendingTicker.current;
+      pendingTicker.current = null;
+      if (!data || data.symbol !== activeSymbol.current || switchingSymbol.current) return;
+      dispatch({ type: "WS_MSG", payload: { type: "ticker", data } });
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      pendingTicker.current = null;
+    };
+  }, []);
 
   // 启动时从 settings 读取全局交易对和 networkTab。
   useEffect(() => {
     getSettings()
       .then(({ data }) => {
         if (data.symbol && symbolRequestId.current === 0) {
+          activeSymbol.current = data.symbol;
           dispatch({ type: "SET_SYMBOL", payload: data.symbol });
         }
         dispatch({ type: "SET_NETWORK_TAB", payload: data.testnet !== false ? "test" : "main" });
@@ -57,6 +78,14 @@ export function AppProvider({ children }) {
   }, []);
 
   const handleMessage = useCallback((msg) => {
+    if (msg?.type === "ticker") {
+      const data = msg.data;
+      if (switchingSymbol.current || !data?.symbol || data.symbol !== activeSymbol.current) return;
+      pendingTicker.current = pendingTicker.current?.symbol === data.symbol
+        ? { ...pendingTicker.current, ...data }
+        : data;
+      return;
+    }
     dispatch({ type: "WS_MSG", payload: msg });
   }, []);
   const handleConnectionChange = useCallback((connected) => {
@@ -67,16 +96,22 @@ export function AppProvider({ children }) {
 
   const setSymbol = useCallback((sym) => {
     const requestId = ++symbolRequestId.current;
+    pendingTicker.current = null;
+    switchingSymbol.current = true;
     const save = symbolSaveQueue.current.then(async () => {
       try {
         const { data } = await saveSettings({ symbol: sym });
         if (requestId === symbolRequestId.current) {
-          dispatch({ type: "SET_SYMBOL", payload: data.symbol || sym.trim().toUpperCase() });
+          const nextSymbol = data.symbol || sym.trim().toUpperCase();
+          activeSymbol.current = nextSymbol;
+          dispatch({ type: "SET_SYMBOL", payload: nextSymbol });
         }
       } catch (error) {
         if (requestId === symbolRequestId.current) {
           console.error("Failed to switch symbol", error);
         }
+      } finally {
+        if (requestId === symbolRequestId.current) switchingSymbol.current = false;
       }
     });
     symbolSaveQueue.current = save;

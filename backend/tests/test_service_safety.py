@@ -111,6 +111,70 @@ def test_explicit_market_data_dir_fails_closed_without_local_fallback(
     assert not fallback.exists()
 
 
+def test_data_root_selection_requires_writable_root_by_default(tmp_path: Path):
+    authoritative = _complete_data_root(tmp_path / "authoritative")
+    writable_requirements: list[bool] = []
+
+    def record_validation(path: Path, *, require_writable: bool) -> Path:
+        writable_requirements.append(require_writable)
+        return path.resolve()
+
+    selection = data_layout.select_data_root(
+        market_data_dir=str(authoritative),
+        data_dir=None,
+        validator=record_validation,
+    )
+
+    assert selection.root == authoritative.resolve()
+    assert writable_requirements == [True]
+
+
+def test_datastore_selects_market_data_root_without_write_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    authoritative = _complete_data_root(tmp_path / "authoritative")
+    received: dict[str, object] = {}
+
+    def record_selection(**kwargs) -> data_layout.DataRootSelection:
+        received.update(kwargs)
+        return data_layout.DataRootSelection(
+            root=authoritative.resolve(), authoritative=True
+        )
+
+    monkeypatch.setattr(datastore, "select_data_root", record_selection)
+    selection = datastore._resolve_root(configured=str(authoritative))
+
+    assert selection.root == authoritative.resolve()
+    assert received["require_writable"] is False
+
+
+def test_read_only_selection_still_rejects_layout_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    authoritative = _complete_data_root(tmp_path / "authoritative")
+    escaped = tmp_path / "escaped"
+    escaped.mkdir()
+    escaped_child = authoritative.resolve() / "raw" / "funding"
+    escaped_target = escaped.resolve()
+    original_resolve = Path.resolve
+
+    def resolve_with_escape(path: Path, strict: bool = False) -> Path:
+        if path == escaped_child:
+            return escaped_target
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve_with_escape)
+
+    with pytest.raises(data_layout.DataLayoutError, match="escapes the root"):
+        data_layout.select_data_root(
+            market_data_dir=str(authoritative),
+            data_dir=None,
+            require_writable=False,
+        )
+
+
 @pytest.mark.parametrize("configured", ["", "missing-authoritative-root"])
 def test_explicit_invalid_market_data_dir_never_falls_back(
     tmp_path: Path,

@@ -90,6 +90,45 @@ def test_runtime_does_not_backfill_missed_execution_opens(tmp_path) -> None:
         runtime.process_bars(bars, server_time=bars.iloc[-1]["open_time"])
 
 
+def test_runtime_can_explicitly_rebaseline_stale_flat_state(tmp_path) -> None:
+    bars = _bars(505)
+    store = SarAdxStateStore(tmp_path)
+    runtime = SarAdxPaperRuntime("SOLUSDT", state_store=store)
+    runtime.process_bars(bars.iloc[:500], server_time=bars.iloc[499]["open_time"])
+    runtime.state = runtime.state.__class__(armed=True, regime_direction=1)
+
+    fills = runtime.process_bars(
+        bars,
+        server_time=bars.iloc[-1]["open_time"],
+        allow_flat_rebaseline=True,
+    )
+
+    assert fills == []
+    assert runtime.state == runtime.state.__class__()
+    assert runtime.last_processed_decision_time == bars.iloc[-2]["close_time"]
+    assert runtime.last_execution_open_time is None
+    assert runtime.recovery_status == "rebaselined"
+    recovered = SarAdxPaperRuntime("SOLUSDT", state_store=store)
+    assert recovered.last_processed_decision_time == bars.iloc[-2]["close_time"]
+
+
+def test_runtime_never_rebaselines_stale_open_position(tmp_path) -> None:
+    bars = _bars(505)
+    runtime = SarAdxPaperRuntime(
+        "SOLUSDT",
+        state_store=SarAdxStateStore(tmp_path),
+    )
+    runtime.process_bars(bars.iloc[:500], server_time=bars.iloc[499]["open_time"])
+    runtime.broker.open(1, 100.0, "existing-paper-position", runtime.config)
+
+    with pytest.raises(SarAdxRuntimeError, match="missed"):
+        runtime.process_bars(
+            bars,
+            server_time=bars.iloc[-1]["open_time"],
+            allow_flat_rebaseline=True,
+        )
+
+
 def test_failed_state_save_does_not_advance_memory(tmp_path, monkeypatch) -> None:
     bars = _bars()
     store = SarAdxStateStore(tmp_path)

@@ -13,6 +13,9 @@ Frontend route screens are in `frontend/src/pages/`, shared UI in
 `components/`, state in `context/`, and HTTP calls in `api/client.js`.
 Generated data, reports, runtime state, and historical artifacts belong under
 `G:/CandleMind/CandleMind_data`, never in a repository `data/` tree.
+Small, synthetic, immutable contract fixtures are the sole exception: keep them
+under `backend/tests/fixtures/` with checksums, provenance, and generation
+details. Never place production or downloaded market data there.
 
 ## Build, Test, and Development Commands
 

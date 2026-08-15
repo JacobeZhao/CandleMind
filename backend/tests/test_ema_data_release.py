@@ -14,6 +14,8 @@ from backend.app.services.pit_universe_contract import (
 )
 from backend.app.services.ema_data_release import (
     EmaDataReleaseError,
+    _is_absolute_source_path,
+    _uses_current_alias,
     build_ema_data_release,
     dataframe_semantic_sha256,
     verify_ema_data_release,
@@ -28,6 +30,43 @@ LABEL_HORIZON_DAYS = 1
 UNIVERSE_GOLDEN_SHA256 = (
     "97faf9c2f5e45c2b41dc8b2f0372ecefa1594572e44901932bf59bbed849af79"
 )
+
+
+@pytest.mark.parametrize(
+    "source_path",
+    [
+        "/srv/candlemind/source.parquet",
+        r"G:\CandleMind\source.parquet",
+        r"\\server\share\source.parquet",
+    ],
+    ids=["posix", "windows-drive", "windows-unc"],
+)
+def test_source_path_recognizes_cross_platform_absolute_paths(source_path: str) -> None:
+    assert _is_absolute_source_path(source_path)
+
+
+@pytest.mark.parametrize(
+    "source_path",
+    ["source.parquet", "data/source.parquet", r"data\source.parquet", r"G:source.parquet"],
+    ids=["name", "posix-relative", "windows-relative", "drive-relative"],
+)
+def test_source_path_rejects_relative_paths(source_path: str) -> None:
+    assert not _is_absolute_source_path(source_path)
+
+
+@pytest.mark.parametrize(
+    "source_path",
+    [
+        "/srv/current/source.parquet",
+        r"G:\CandleMind\CURRENT\source.parquet",
+        r"\\server\share\current.json\source.parquet",
+    ],
+    ids=["posix", "windows", "unc-with-suffix"],
+)
+def test_source_path_detects_current_alias_in_both_path_flavours(
+    source_path: str,
+) -> None:
+    assert _uses_current_alias(source_path)
 
 
 def _bars(

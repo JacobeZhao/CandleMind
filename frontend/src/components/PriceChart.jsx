@@ -7,6 +7,24 @@ import MarketAiDialog from "./MarketAiDialog";
 
 const INTERVALS   = ["1m", "5m", "15m", "1h", "4h", "1d"];
 const VISIBLE_BARS = 80;
+const BOUNDARY_REFRESH_DELAY_MS = 250;
+const BOUNDARY_RETRY_DELAY_MS = 500;
+const MAX_BOUNDARY_ATTEMPTS_PER_EVENT = 2;
+const INTERVAL_MS = {
+  "1m": 60_000,
+  "5m": 5 * 60_000,
+  "15m": 15 * 60_000,
+  "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+};
+
+export function intervalBucketStart(eventTime, interval) {
+  const timestamp = Number(eventTime);
+  const duration = INTERVAL_MS[interval];
+  if (!Number.isFinite(timestamp) || !duration) return null;
+  return Math.floor(timestamp / duration) * duration / 1000;
+}
 
 // ── Indicator metadata ────────────────────────────────────────────────────────
 const IND_META = {
@@ -157,6 +175,16 @@ export default function PriceChart({ symbol, defaultInterval = "15m", headerLead
   const chartRef     = useRef(null);
   const seriesRef    = useRef({});   // { key: series | {upper,middle,lower} }
   const lastBarRef   = useRef(null); // 最后一根 K 线，用于实时更新收盘价
+  const requestRef   = useRef({ generation: 0, controller: null });
+  const boundaryRef  = useRef({
+    key: null,
+    targetBucket: null,
+    timer: null,
+    inFlight: false,
+    attempts: 0,
+    complete: false,
+  });
+  const scheduleBoundaryRef = useRef(null);
 
   const [interval,     setIntervalState] = useState(defaultInterval);
   const [loading,      setLoading]       = useState(false);
@@ -252,17 +280,21 @@ export default function PriceChart({ symbol, defaultInterval = "15m", headerLead
     return { ids, params };
   }, [mainConf, subConf]);
 
-  // ── Data load ────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!symbol || !chartRef.current) return;
+  const loadData = useCallback((clearBeforeLoad) => {
+    if (!symbol || !chartRef.current) return null;
     const chart = chartRef.current;
     const sr    = seriesRef.current;
     const controller = new AbortController();
+    requestRef.current.controller?.abort();
+    const generation = requestRef.current.generation + 1;
+    requestRef.current = { generation, controller };
 
-    Object.values(sr).forEach(clearData);
-    lastBarRef.current = null;
+    if (clearBeforeLoad) {
+      Object.values(sr).forEach(clearData);
+      lastBarRef.current = null;
+    }
     setLoading(true);
-    getKlines(
+    const completion = getKlines(
       symbol,
       interval,
       200,
@@ -271,6 +303,7 @@ export default function PriceChart({ symbol, defaultInterval = "15m", headerLead
       controller.signal,
     )
       .then(({ data }) => {
+        if (controller.signal.aborted || requestRef.current.generation !== generation) return;
         const ts = (d) => toTs(d);
 
         // Candle
@@ -296,15 +329,88 @@ export default function PriceChart({ symbol, defaultInterval = "15m", headerLead
         // Visible range
         const total = data.length;
         chart.timeScale().setVisibleLogicalRange({ from: total - VISIBLE_BARS, to: total - 1 });
+        return lastBarRef.current?.time ?? null;
       })
       .catch((error) => {
         if (error?.code !== "ERR_CANCELED") console.error(error);
+        return null;
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted && requestRef.current.generation === generation) setLoading(false);
       });
-    return () => controller.abort();
-  }, [symbol, interval, indRequest]);
+    return { controller, completion };
+  }, [symbol, interval, indRequest, mainConf, subConf]);
+
+  const resetBoundaryRefresh = useCallback(() => {
+    const current = boundaryRef.current;
+    if (current.timer != null) window.clearTimeout(current.timer);
+    boundaryRef.current = {
+      key: null,
+      targetBucket: null,
+      timer: null,
+      inFlight: false,
+      attempts: 0,
+      complete: false,
+    };
+  }, []);
+
+  const scheduleBoundaryRefresh = useCallback((targetBucket, fromTickerEvent) => {
+    const key = `${symbol}:${interval}:${targetBucket}`;
+    let current = boundaryRef.current;
+    if (current.key !== key) {
+      if (current.timer != null) window.clearTimeout(current.timer);
+      current = {
+        key,
+        targetBucket,
+        timer: null,
+        inFlight: false,
+        attempts: 0,
+        complete: false,
+      };
+      boundaryRef.current = current;
+    }
+    if (current.complete || current.inFlight || current.timer != null) return;
+
+    if (fromTickerEvent && current.attempts >= MAX_BOUNDARY_ATTEMPTS_PER_EVENT) {
+      current.attempts = 0;
+    }
+    if (!fromTickerEvent && current.attempts >= MAX_BOUNDARY_ATTEMPTS_PER_EVENT) return;
+
+    const delay = current.attempts === 0
+      ? BOUNDARY_REFRESH_DELAY_MS
+      : BOUNDARY_RETRY_DELAY_MS;
+    current.timer = window.setTimeout(async () => {
+      const active = boundaryRef.current;
+      if (active.key !== key || active.complete) return;
+      active.timer = null;
+      active.inFlight = true;
+      active.attempts += 1;
+
+      const request = loadData(false);
+      const loadedBucket = request ? await request.completion : null;
+      const latest = boundaryRef.current;
+      if (latest.key !== key) return;
+      latest.inFlight = false;
+      if (loadedBucket != null && loadedBucket >= targetBucket) {
+        latest.complete = true;
+        return;
+      }
+      scheduleBoundaryRef.current?.(targetBucket, false);
+    }, delay);
+  }, [symbol, interval, loadData]);
+  scheduleBoundaryRef.current = scheduleBoundaryRefresh;
+
+  // ── Data load ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    resetBoundaryRefresh();
+    const request = loadData(true);
+    return () => request?.controller.abort();
+  }, [loadData, resetBoundaryRefresh]);
+
+  useEffect(() => () => {
+    resetBoundaryRefresh();
+    requestRef.current.controller?.abort();
+  }, [resetBoundaryRefresh]);
 
   // ── 实时价格更新（来自 Binance WS ticker）───────────────────────────────────
   useEffect(() => {
@@ -316,12 +422,19 @@ export default function PriceChart({ symbol, defaultInterval = "15m", headerLead
     const price = parseFloat(ticker.price);
     if (!Number.isFinite(price)) return;
 
+    const bucket = intervalBucketStart(ticker.eventTime, interval);
+    if (bucket != null && bucket > bar.time) {
+      scheduleBoundaryRefresh(bucket, true);
+      return;
+    }
+    if (bucket != null && bucket < bar.time) return;
+
     bar.close = price;
     if (price > bar.high) bar.high = price;
     if (price < bar.low)  bar.low  = price;
 
     try { candle.update(bar); } catch (_) {}
-  }, [ticker, symbol]);
+  }, [ticker, symbol, interval, scheduleBoundaryRefresh]);
 
   // ── Toggle helpers ───────────────────────────────────────────────────────────
   const toggleMain = (id) =>

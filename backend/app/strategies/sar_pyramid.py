@@ -459,14 +459,6 @@ def adx_regime(
     )
 
 
-def hourly_adx_regime(
-    bars: pd.DataFrame, *, period: int = 14, threshold: float = 25.0
-) -> pd.DataFrame:
-    """Backward-compatible 1-hour ADX regime helper."""
-
-    return adx_regime(bars, timeframe="1h", period=period, threshold=threshold)
-
-
 def run_sar_pyramid_backtest(
     bars: pd.DataFrame,
     *,

@@ -39,8 +39,9 @@ which enforces integer millisecond timestamps.
 ## Observed Funding Release
 
 `funding_observed_30_20240101_20260630_v1` is the immutable funding-only
-release for EMA research. It covers all 30 canonical symbols from 2024-01-01
-through 2026-06-30 using 900 checksum-verified monthly Binance Vision archives.
+release consumed by the SAR+ADX backtest. It covers all 30 canonical symbols
+from 2024-01-01 through 2026-06-30 using 900 checksum-verified monthly Binance
+Vision archives.
 The release contains 30 normalized Parquet outputs and 84,815 observed funding
 events. Every output starts on 2024-01-01, ends on 2026-06-30, and has a maximum
 observed event gap no greater than 8.000005 hours.

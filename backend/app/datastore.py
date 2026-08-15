@@ -23,6 +23,7 @@ def _resolve_root(
             os.environ.get("MARKET_DATA_DIR") if configured is None else configured
         ),
         data_dir=os.environ.get("DATA_DIR") if data_dir is None else data_dir,
+        require_writable=False,
         platform=platform,
         default_windows_root=default_windows_root,
     )

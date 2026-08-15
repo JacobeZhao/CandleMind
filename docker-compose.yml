@@ -8,6 +8,7 @@ services:
       - type: bind
         source: ${CANDLEMIND_DATA_ROOT:-G:/CandleMind/CandleMind_data}
         target: /app/market-data
+        read_only: true
       - type: bind
         source: ${CANDLEMIND_RUNTIME_ROOT:-G:/CandleMind/CandleMind_data/runtime/app}
         target: /app/runtime

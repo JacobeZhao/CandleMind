@@ -10,4 +10,6 @@ Current operating documents:
 
 Generated reports belong under
 `G:\CandleMind\CandleMind_data\experiments\reports`, not in this directory.
-Historical research documentation is not part of the active repository.
+Only the SAR+ADX evidence listed above is retained here; other historical
+research documentation belongs with its external artifacts, not in this
+repository.

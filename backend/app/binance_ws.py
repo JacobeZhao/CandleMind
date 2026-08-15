@@ -1,4 +1,4 @@
-"""Merge Binance Futures 24-hour ticker and mark-price WebSocket streams."""
+"""Merge Binance Futures trade, ticker, and mark-price WebSocket streams."""
 
 import asyncio
 import json
@@ -10,16 +10,21 @@ from .ws_manager import manager
 
 WS_MAINNET = "wss://fstream.binance.com"
 WS_TESTNET = "wss://stream.binancefuture.com"
+BROADCAST_INTERVAL_SECONDS = 0.5
 
 
 class BinanceWSClient:
-    def __init__(self):
+    def __init__(self, broadcast_interval: float = BROADCAST_INTERVAL_SECONDS):
         self._task: asyncio.Task | None = None
+        self._publisher_task: asyncio.Task | None = None
         self._running = False
         self._subscription_id = 0
         self._incoming_context: tuple[str, int] | None = None
         self._stream_cache: dict[str, dict] = {}
         self._stream_event_times: dict[str, int] = {}
+        self._cache_revision = 0
+        self._published_revision = 0
+        self.broadcast_interval = broadcast_interval
         self.symbol = "BTCUSDT"
         self.testnet = True
         self.proxy = None
@@ -34,6 +39,9 @@ class BinanceWSClient:
         self._subscription_id += 1
         self._running = True
         self._task = asyncio.create_task(self._run())
+        self._publisher_task = asyncio.create_task(
+            self._publish_loop(self._subscription_id)
+        )
         logger.info(
             f"Binance WS scheduled: {self.symbol} testnet={self.testnet}"
         )
@@ -41,13 +49,16 @@ class BinanceWSClient:
     async def stop(self):
         self._running = False
         self._subscription_id += 1
-        if self._task:
-            self._task.cancel()
+        tasks = [task for task in (self._task, self._publisher_task) if task]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
-            self._task = None
+        self._task = None
+        self._publisher_task = None
         self._reset_stream_state()
 
     async def switch_symbol(self, symbol: str):
@@ -64,6 +75,44 @@ class BinanceWSClient:
     def _reset_stream_state(self):
         self._stream_cache = {}
         self._stream_event_times = {}
+        self._cache_revision = 0
+        self._published_revision = 0
+
+    async def _publish_loop(self, subscription_id: int):
+        """Publish only the newest merged snapshot at a bounded cadence."""
+        while self._running and subscription_id == self._subscription_id:
+            await asyncio.sleep(self.broadcast_interval)
+            await self._publish_latest(subscription_id)
+
+    async def _publish_latest(self, subscription_id: int):
+        if (
+            not self._running
+            or subscription_id != self._subscription_id
+            or self._cache_revision == self._published_revision
+        ):
+            return
+
+        ticker = self._stream_cache.get("ticker")
+        trade = self._stream_cache.get("trade")
+        if ticker is None and trade is None:
+            return
+
+        combined = dict(ticker or {})
+        combined.update(self._stream_cache.get("mark", {}))
+        price_source = max(
+            (source for source in (ticker, trade) if source is not None),
+            key=lambda source: source["eventTime"],
+        )
+        combined.update({
+            "symbol": price_source["symbol"],
+            "price": price_source["price"],
+            "eventTime": price_source["eventTime"],
+        })
+
+        # Mark this revision consumed before awaiting a potentially slow client.
+        # Events received during the await advance the revision for the next tick.
+        self._published_revision = self._cache_revision
+        await manager.broadcast({"type": "ticker", "data": combined})
 
     async def _run(self):
         backoff = 2
@@ -114,7 +163,11 @@ class BinanceWSClient:
             async with session.ws_connect(url, **ws_kwargs) as ws:
                 await ws.send_json({
                     "method": "SUBSCRIBE",
-                    "params": [f"{stream}@ticker", f"{stream}@markPrice@1s"],
+                    "params": [
+                        f"{stream}@aggTrade",
+                        f"{stream}@ticker",
+                        f"{stream}@markPrice@1s",
+                    ],
                     "id": 1,
                 })
                 logger.info(f"Binance WS connected: {symbol} combined ticker")
@@ -144,7 +197,7 @@ class BinanceWSClient:
         expected_symbol: str | None = None,
         subscription_id: int | None = None,
     ):
-        """Merge one stream event and broadcast a compatible ticker snapshot."""
+        """Merge one stream event into the latest compatible ticker snapshot."""
         try:
             envelope = json.loads(raw)
             event = envelope.get("data", envelope)
@@ -174,6 +227,16 @@ class BinanceWSClient:
                     "high": event["h"],
                     "low": event["l"],
                     "volume": event["q"],
+                    "eventTime": int(event["E"]),
+                }
+            elif event_type == "aggTrade":
+                stream_name = "trade"
+                if "E" not in event or "p" not in event:
+                    return
+                snapshot = {
+                    "symbol": symbol.upper(),
+                    "price": event["p"],
+                    "eventTime": int(event["E"]),
                 }
             elif event_type == "markPriceUpdate":
                 stream_name = "mark"
@@ -196,13 +259,7 @@ class BinanceWSClient:
                 return
             self._stream_event_times[stream_name] = max(event_time, previous_time)
             self._stream_cache[stream_name] = snapshot
-
-            ticker_snapshot = self._stream_cache.get("ticker")
-            if ticker_snapshot is None:
-                return
-            combined = dict(ticker_snapshot)
-            combined.update(self._stream_cache.get("mark", {}))
-            await manager.broadcast({"type": "ticker", "data": combined})
+            self._cache_revision += 1
         except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             logger.debug(f"WS handle error: {exc}")
 

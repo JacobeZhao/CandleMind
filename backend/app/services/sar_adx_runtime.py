@@ -29,6 +29,9 @@ class SarAdxRuntimeError(RuntimeError):
     pass
 
 
+_UNSET = object()
+
+
 class SarAdxPaperRuntime:
     """Processes a contiguous tape and persists after every executed decision."""
 
@@ -60,6 +63,7 @@ class SarAdxPaperRuntime:
         funding: pd.DataFrame | None = None,
         execution_price: float | None = None,
         eligible: bool = True,
+        allow_flat_rebaseline: bool = False,
     ) -> list[PaperFill]:
         """Execute the latest completed decision at the currently tradable open."""
 
@@ -93,6 +97,18 @@ class SarAdxPaperRuntime:
                 decision_time=decision_time,
             )
         if decision_time != self.last_processed_decision_time + BAR_INTERVAL:
+            if allow_flat_rebaseline and not self.broker.position.direction:
+                reset_state = SarPyramidState()
+                self._save(
+                    state=reset_state,
+                    decision_time=decision_time,
+                    execution_time=None,
+                )
+                self.state = reset_state
+                self.last_processed_decision_time = decision_time
+                self.last_execution_open_time = None
+                self.recovery_status = "rebaselined"
+                return []
             raise SarAdxRuntimeError("missed an execution open; historical fills are forbidden")
         execution_index = decision_index + 1
         if execution_index >= len(tape):
@@ -281,12 +297,13 @@ class SarAdxPaperRuntime:
         state: SarPyramidState | None = None,
         broker: PaperBroker | None = None,
         decision_time: pd.Timestamp | None = None,
-        execution_time: pd.Timestamp | None = None,
+        execution_time: pd.Timestamp | None | object = _UNSET,
     ) -> None:
         state = self.state if state is None else state
         broker = self.broker if broker is None else broker
         decision_time = self.last_processed_decision_time if decision_time is None else decision_time
-        execution_time = self.last_execution_open_time if execution_time is None else execution_time
+        if execution_time is _UNSET:
+            execution_time = self.last_execution_open_time
         self.store.save(
             self.symbol,
             {

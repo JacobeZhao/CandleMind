@@ -89,7 +89,12 @@ class BotEngine:
                 raise ValueError(f"symbol is not currently tradable: {symbol}")
 
             runtime = SarAdxPaperRuntime(symbol, initial_cash=initial_capital)
-            first_cycle = await self._cycle(client, symbol, runtime)
+            first_cycle = await self._cycle(
+                client,
+                symbol,
+                runtime,
+                allow_flat_rebaseline=True,
+            )
 
             task: asyncio.Task[None] | None = None
             try:
@@ -175,6 +180,8 @@ class BotEngine:
         client,
         symbol: str,
         runtime: SarAdxPaperRuntime | None = None,
+        *,
+        allow_flat_rebaseline: bool = False,
     ) -> _CycleResult:
         """Advance the paper runtime from completed Binance 5m bars."""
 
@@ -223,6 +230,7 @@ class BotEngine:
             ),
             execution_price=float(mark["markPrice"]),
             eligible=self._is_tradable(exchange_info, symbol),
+            allow_flat_rebaseline=allow_flat_rebaseline,
         )
         mark_price = float(bars.iloc[-1]["close"])
         runtime_status = runtime.status(mark_price)
