@@ -10,6 +10,8 @@
 
 ## 冻结研究证据
 
+- [`research/RL_RESEARCH_STATUS.md`](research/RL_RESEARCH_STATUS.md)：保留的 EMA/RL
+  研究基础设施、当前运行边界与未来接入门槛。
 - [`research/SAR_ADX_PYRAMID_BASELINE_V1.md`](research/SAR_ADX_PYRAMID_BASELINE_V1.md)
 - [`research/SAR_ADX_SOL_OPTIMIZATION_V1.md`](research/SAR_ADX_SOL_OPTIMIZATION_V1.md)
 - [`research/SAR_ADX_BACKTRADER_VALIDATION_V1.md`](research/SAR_ADX_BACKTRADER_VALIDATION_V1.md)
@@ -17,6 +19,9 @@
 这些研究文档保留实验时的参数、指标和清单哈希，不随当前页面文案改写。它们
 共同表明现有 SAR+ADX V3 仍是诊断与 paper trading 策略，不是盈利或生产准入
 证明。
+
+强化学习相关代码当前只用于研究兼容和数据契约。在线决策仍由 SAR+ADX V3
+paper trading 链路承担，尚未接入 RL 推理。
 
 生成报告必须写入
 `G:\CandleMind\CandleMind_data\experiments\reports`，不得提交到 `docs/`。

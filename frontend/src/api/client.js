@@ -23,7 +23,6 @@ export const getKlines = (sym, interval, limit, inds = "psar", indParams = {}, s
 export const getSymbols = () => api.get("/market/symbols");
 export const getOrderHistory = (sym, limit) => api.get("/orders/history", { params: { symbol: sym, limit } });
 export const getRecentTrades = (sym) => api.get("/orders/trades", { params: { symbol: sym } });
-export const cancelOrder = (sym, id) => api.delete(`/orders/cancel/${sym}/${id}`);
 
 export const startEngine = (data) => api.post("/strategy/engine/start", data);
 export const stopEngine = () => api.post("/strategy/engine/stop");

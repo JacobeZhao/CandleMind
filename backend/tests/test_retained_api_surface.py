@@ -35,6 +35,20 @@ def test_strategy_api_retains_only_sar_engine_endpoints() -> None:
     }
 
 
+def test_order_api_retains_only_read_endpoints() -> None:
+    order_routes = {
+        (route.path, frozenset(route.methods or set()))
+        for route in app.routes
+        if route.path.startswith("/api/orders")
+    }
+
+    assert order_routes == {
+        ("/api/orders/open", frozenset({"GET"})),
+        ("/api/orders/history", frozenset({"GET"})),
+        ("/api/orders/trades", frozenset({"GET"})),
+    }
+
+
 def test_ai_api_does_not_expose_removed_strategy_parser() -> None:
     assert not any(route.path == "/api/ai/parse" for route in app.routes)
 

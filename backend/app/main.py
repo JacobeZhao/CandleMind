@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         await strategy_route.bot_engine.stop()
 
 
-app = FastAPI(title="Livermore Trading API", lifespan=lifespan)
+app = FastAPI(title="CandleMind API", lifespan=lifespan)
 
 _allowed_origins = [
     origin.strip()

@@ -1,6 +1,15 @@
 node_modules/
 dist/
 .vite/
+.coverage
+.git/
+.github/
+.idea/
+coverage/
+e2e/
+playwright-report/
+test-results/
 npm-debug.log*
 *.log
+.env
 .env*

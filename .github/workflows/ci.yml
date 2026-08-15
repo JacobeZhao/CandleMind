@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CANDLEMIND_ENABLE_MAINNET_READS: "false"
+  CANDLEMIND_AI_BASE_URL_HOSTS: ""
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.lock.txt
+      - name: Install locked dependencies
+        run: python -m pip install --requirement backend/requirements-dev.lock.txt
+      - name: Prepare isolated runtime directories
+        shell: bash
+        run: |
+          market_root="$RUNNER_TEMP/market-data"
+          mkdir -p \
+            "$market_root/raw/klines_archive" \
+            "$market_root/raw/funding" \
+            "$market_root/raw/derivatives_archive" \
+            "$market_root/normalized/ohlcv_parquet" \
+            "$market_root/normalized/ema/releases" \
+            "$market_root/normalized/derivatives/releases" \
+            "$market_root/processed/features_app" \
+            "$market_root/experiments/backtests" \
+            "$market_root/experiments/reports" \
+            "$market_root/runtime/app" \
+            "$market_root/manifests" \
+            "$RUNNER_TEMP/runtime" \
+            "$RUNNER_TEMP/pytest"
+          echo "MARKET_DATA_DIR=$RUNNER_TEMP/market-data" >> "$GITHUB_ENV"
+          echo "DATA_DIR=$RUNNER_TEMP/runtime" >> "$GITHUB_ENV"
+      - name: Test backend
+        run: python -m pytest backend/tests -q -p no:cacheprovider --basetemp "$RUNNER_TEMP/pytest"
+      - name: Compile Python sources
+        run: python -m compileall -q backend/app backend/scripts
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run isolated browser smoke tests
+        run: npm run test:e2e
+      - name: Audit dependencies
+        run: npm audit --registry=https://registry.npmjs.org --audit-level=high
+
+  docker:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build --tag candlemind-backend:ci backend
+      - name: Build frontend image
+        run: docker build --tag candlemind-frontend:ci frontend
+
+  windows-verification:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.lock.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+          registry-url: https://registry.npmjs.org
+      - name: Install locked backend dependencies
+        run: python -m pip install --requirement backend/requirements-dev.lock.txt
+      - name: Run isolated repository gate
+        shell: powershell
+        run: powershell -File ops/verify.ps1 -InstallFrontend

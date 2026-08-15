@@ -2,7 +2,8 @@
 
 CandleMind 是一个面向 Binance Futures 的量化交易研究与模拟执行平台，采用
 FastAPI + React 构建。项目聚焦 **SAR + ADX 趋势跟踪策略**，提供实时行情、
-指标图表、AI 行情分析、paper trading 运行时和可复现回测。
+指标图表、AI 行情分析、paper trading 运行时和可复现回测，同时保留基于 EMA
+特征的强化学习趋势跟踪研究基础设施。
 
 > [!WARNING]
 > 本项目仅用于技术研究与教育，不构成投资建议。当前策略引擎仅支持模拟交易，
@@ -11,9 +12,10 @@ FastAPI + React 构建。项目聚焦 **SAR + ADX 趋势跟踪策略**，提供�
 ## 最新策略表现展示（模拟）
 
 > [!IMPORTANT]
-> 以下曲线和指标是用于展示 README 报告样式的**人工模拟数据**，不是由真实历史
-> K 线、实盘订单或本项目回测引擎生成，也不能作为策略盈利能力证明。项目中
-> 冻结的真实研究证据仍表明当前 SAR + ADX V3 尚未盈利。
+> 以下曲线和 `+306%`、`-8.9%` 等指标是用于展示 README 报告样式的**人工模拟
+> 数据**，不是事实业绩，不是由真实历史 K 线、实盘订单或本项目回测引擎生成，
+> 也不能作为策略盈利能力证明。项目中冻结的真实研究证据仍表明当前 SAR + ADX
+> V3 尚未盈利。
 
 ```mermaid
 xychart-beta
@@ -57,6 +59,17 @@ xychart-beta
 - 基于 Backtrader 的离线回测，计入手续费、滑点和已观测资金费率。
 - 可配置 LiteLLM/Ollama 兼容服务，用于当前行情的 AI 对话分析。
 - 使用校验和与冻结清单验证 K 线及衍生品数据来源。
+
+## 强化学习研究
+
+仓库保留基于 EMA 特征的强化学习趋势跟踪研究基础设施，包括特征工程、数据发布、
+生命周期和来源校验契约。这些模块用于离线研究和保持历史实验可复现，不代表已有
+强化学习模型投入运行。
+
+当前在线决策链路仍是 **SAR + ADX V3 paper trading**。强化学习模型尚未接入
+在线推理、订单决策或实盘执行，项目也不以“强化学习驱动当前策略”作为能力声明。
+详细边界与后续接入门槛见
+[`docs/research/RL_RESEARCH_STATUS.md`](docs/research/RL_RESEARCH_STATUS.md)。
 
 ## 技术架构
 
@@ -159,9 +172,9 @@ CandleMind/
 
 ## 贡献指南
 
-提交代码前请阅读 [`AGENTS.md`](AGENTS.md)，并确保完整验证通过。提交信息使用
-Conventional Commits，例如 `feat: add indicator`、`fix: handle stale state`。
-Pull Request 应说明改动范围、验证命令、迁移影响；界面改动需要附截图。
+提交代码前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`AGENTS.md`](AGENTS.md)，
+并确保完整验证通过。安全问题请按 [`SECURITY.md`](SECURITY.md) 的流程报告，不要
+在公开 Issue 中提交密钥或未修复漏洞细节。
 
 ## 交流群
 

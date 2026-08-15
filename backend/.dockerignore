@@ -1,9 +1,15 @@
 __pycache__/
 *.py[cod]
+.coverage
+.coverage.*
+.git/
+.github/
+.idea/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
+htmlcov/
 tests/
 scripts/
 *.log
@@ -13,3 +19,5 @@ data/
 datas/
 models/
 artifacts/
+.env
+.env*

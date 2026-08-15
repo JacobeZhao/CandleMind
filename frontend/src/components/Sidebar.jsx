@@ -23,7 +23,7 @@ export default function Sidebar() {
     <aside className="w-16 md:w-52 bg-card border-r border-border flex flex-col shrink-0">
       <div className="flex items-center gap-2 px-4 h-16 border-b border-border shrink-0">
         <CandlestickChart className="shrink-0 text-accent" size={24} aria-hidden="true" />
-        <span className="hidden md:block font-bold text-accent text-lg">Livermore</span>
+        <span className="hidden md:block font-bold text-accent text-lg">CandleMind</span>
       </div>
       <nav className="flex-1 py-4 space-y-1">
         {nav.map(({ to, icon: Icon, label }) => (

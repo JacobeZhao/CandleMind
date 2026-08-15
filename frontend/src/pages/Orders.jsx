@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useApp } from "../context/AppContext";
 import {
-  getOrderHistory, getRecentTrades, cancelOrder,
+  getOrderHistory, getRecentTrades,
   startEngine, stopEngine, getEngineStatus,
 } from "../api/client";
 import {
-  RefreshCw, X, Play, Square, Loader,
+  RefreshCw, Play, Square, Loader,
   AlertTriangle, CheckCircle, AlertCircle,
   Zap,
 } from "lucide-react";
@@ -165,7 +165,6 @@ export default function Orders() {
   const [history, setHistory] = useState([]);
   const [trades, setTrades]   = useState([]);
   const [loading, setLoading] = useState(false);
-  const [cancelling, setCancelling] = useState(null);
 
   const fetchData = useCallback(async () => {
     if (!symbol) return;
@@ -186,17 +185,6 @@ export default function Orders() {
   }, [tab, symbol]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
-
-  const handleCancel = async (sym, orderId) => {
-    setCancelling(orderId);
-    try {
-      await cancelOrder(sym, orderId);
-    } catch (e) {
-      alert(e.response?.data?.detail || "撤单失败");
-    } finally {
-      setCancelling(null);
-    }
-  };
 
   const fmt = (v, d = 2) => parseFloat(v || 0).toFixed(d);
   const fmtTime = ts => new Date(ts).toLocaleString("zh");
@@ -233,14 +221,14 @@ export default function Orders() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-muted border-b border-border">
-                  {["时间", "品种", "方向", "类型", "数量", "价格", "触发价", "状态", "操作"].map(h => (
+                  {["时间", "品种", "方向", "类型", "数量", "价格", "触发价", "状态"].map(h => (
                     <th key={h} className="text-left px-4 py-2.5">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {openOrders.length === 0 ? (
-                  <tr><td colSpan={9} className="text-center text-muted py-10">暂无挂单</td></tr>
+                  <tr><td colSpan={8} className="text-center text-muted py-10">暂无挂单</td></tr>
                 ) : openOrders.map(o => (
                   <tr key={o.orderId} className="border-b border-border/40 hover:bg-surface/30">
                     <td className="px-4 py-2.5 text-muted">{fmtTime(o.time)}</td>
@@ -253,13 +241,6 @@ export default function Orders() {
                     <td className="px-4 py-2.5 font-mono">{fmt(o.price) === "0.00" ? "市价" : fmt(o.price)}</td>
                     <td className="px-4 py-2.5 font-mono text-orange-400">{fmt(o.stopPrice) !== "0.00" ? fmt(o.stopPrice) : "—"}</td>
                     <td className="px-4 py-2.5"><StatusBadge status={o.status} /></td>
-                    <td className="px-4 py-2.5">
-                      <button onClick={() => handleCancel(o.symbol, o.orderId)}
-                        disabled={cancelling === o.orderId}
-                        className="text-red hover:text-red/70 transition-colors">
-                        <X size={14} />
-                      </button>
-                    </td>
                   </tr>
                 ))}
               </tbody>

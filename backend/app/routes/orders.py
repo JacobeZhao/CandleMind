@@ -12,14 +12,19 @@ def _require_client():
 
 
 @router.get("/open")
-async def open_orders(symbol: str = Query(None)):
+async def open_orders(
+    symbol: str | None = Query(default=None, pattern=r"^[A-Z0-9]{5,20}$"),
+):
     client = _require_client()
     kwargs = {"symbol": symbol} if symbol else {}
     return await asyncio.to_thread(client.futures_get_open_orders, **kwargs)
 
 
 @router.get("/history")
-async def order_history(symbol: str = Query(None), limit: int = Query(50)):
+async def order_history(
+    symbol: str | None = Query(default=None, pattern=r"^[A-Z0-9]{5,20}$"),
+    limit: int = Query(default=50, ge=1, le=1000),
+):
     client = _require_client()
     sym = symbol or app_state.symbol
     orders = await asyncio.to_thread(client.futures_get_all_orders, symbol=sym, limit=limit)
@@ -27,13 +32,10 @@ async def order_history(symbol: str = Query(None), limit: int = Query(50)):
 
 
 @router.get("/trades")
-async def recent_trades(symbol: str = Query(None), limit: int = Query(50)):
+async def recent_trades(
+    symbol: str | None = Query(default=None, pattern=r"^[A-Z0-9]{5,20}$"),
+    limit: int = Query(default=50, ge=1, le=1000),
+):
     client = _require_client()
     sym = symbol or app_state.symbol
     return await asyncio.to_thread(client.futures_account_trades, symbol=sym, limit=limit)
-
-
-@router.delete("/cancel/{symbol}/{order_id}")
-async def cancel_order(symbol: str, order_id: int):
-    client = _require_client()
-    return await asyncio.to_thread(client.futures_cancel_order, symbol=symbol, orderId=order_id)

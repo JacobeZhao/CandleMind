@@ -48,11 +48,6 @@ class FakeBinanceClient:
         self.calls.append(("trades", kwargs))
         return [{"id": 3}]
 
-    def futures_cancel_order(self, **kwargs):
-        self.calls.append(("cancel", kwargs))
-        return {"status": "CANCELED", **kwargs}
-
-
 class FakeQuery:
     def __init__(self, settings: SimpleNamespace) -> None:
         self.settings = settings
@@ -157,13 +152,12 @@ def test_health_handles_ip_lookup_failure_without_network(client, monkeypatch):
         "/api/orders/open",
         "/api/orders/history",
         "/api/orders/trades",
-        "/api/orders/cancel/SOLUSDT/42",
     ],
 )
 def test_account_and_order_routes_require_binance_connection(client, path):
     app_state.client = None
 
-    response = client.delete(path) if "/cancel/" in path else client.get(path)
+    response = client.get(path)
 
     assert response.status_code == 503
 
@@ -201,14 +195,8 @@ def test_order_routes_forward_parameters_and_reverse_history(client):
     assert client.get("/api/orders/trades?symbol=ETHUSDT&limit=9").json() == [
         {"id": 3}
     ]
-    assert client.delete("/api/orders/cancel/SOLUSDT/42").json() == {
-        "status": "CANCELED",
-        "symbol": "SOLUSDT",
-        "orderId": 42,
-    }
     assert fake.calls == [
         ("open", {"symbol": "BTCUSDT"}),
         ("history", {"symbol": "SOLUSDT", "limit": 7}),
         ("trades", {"symbol": "ETHUSDT", "limit": 9}),
-        ("cancel", {"symbol": "SOLUSDT", "orderId": 42}),
     ]
