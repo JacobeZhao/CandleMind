@@ -4,7 +4,7 @@
 
 CandleMind has a FastAPI backend in `backend/app/` and a Vite/React frontend
 in `frontend/src/`. API routers live in `backend/app/routes/`; reusable
-market-data, AI, backtest, and paper-runtime logic lives in
+market-data, AI, backtest, and exchange-execution logic lives in
 `backend/app/services/`; SAR+ADX strategy code lives in
 `backend/app/strategies/`. Supported commands are limited to
 `backend/scripts/data/` and `backend/scripts/evaluation/`.
@@ -40,8 +40,8 @@ frontend change must pass `npm test` and `npm run build`.
 Use Conventional Commit prefixes such as `feat:`, `fix:`, and `chore:`.
 Pull requests should state affected areas, verification commands, migration
 notes, and include screenshots for UI changes. Never commit secrets, databases,
-market data, or generated artifacts. Treat order code as high risk: preserve
-paper-only defaults, validate symbols and parameters, and document any future
-testnet validation before enabling exchange writes. Documentation changes must
+market data, or generated artifacts. Treat order code as high risk: keep testnet
+as the default, validate account mode, quantities, and idempotency, and require
+documented testnet validation plus explicit authorization before mainnet writes. Documentation changes must
 keep the root Chinese README, `docs/` index, and linked operating contracts in
 sync; the project is distributed under the root MIT `LICENSE`.

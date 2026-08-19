@@ -9,7 +9,6 @@ from ..state import app_state
 from ..binance_ws import binance_ws_client
 from ..proxy import rewrite_proxy_for_runtime
 import asyncio
-import json
 import re
 import requests as _requests
 
@@ -66,6 +65,17 @@ class SettingsOut(BaseModel):
 @router.get("", response_model=SettingsOut)
 def get_settings(db: Session = Depends(get_db)):
     s = db.query(Settings).first()
+    return _settings_out(s)
+
+
+def _settings_out(s) -> SettingsOut:
+    connected = (
+        app_state.client is not None
+        and binance_ws_client.is_ready()
+        and binance_ws_client.symbol == s.symbol
+        and binance_ws_client.testnet == s.testnet
+        and binance_ws_client.proxy == (s.proxy_url or None)
+    )
     return SettingsOut(
         test_key_set=bool(s.api_key_test_enc or (s.testnet and s.api_key_enc)),
         main_key_set=bool(s.api_key_main_enc),
@@ -73,7 +83,7 @@ def get_settings(db: Session = Depends(get_db)):
         symbol=s.symbol,
         interval=s.interval,
         proxy_url=s.proxy_url or "",
-        connected=app_state.client is not None,
+        connected=connected,
     )
 
 
@@ -108,31 +118,43 @@ def _ws_target_changed(snapshot: dict, symbol: str, testnet: bool, proxy_url: Op
 
 
 async def _start_ws_and_wait(symbol: str, testnet: bool, proxy_url: Optional[str]) -> None:
-    """Restart the market stream and wait until it emits the target ticker."""
+    """Restart the market stream and wait for its first validated market event."""
     async with _ws_switch_lock:
-        ready = asyncio.Event()
-        original_handle = binance_ws_client._handle
-        expected_symbol = symbol.upper()
-
-        async def handle_with_ready(raw: str):
-            try:
-                payload = json.loads(raw)
-                if payload.get("e") == "24hrTicker" and payload.get("s") == expected_symbol:
-                    ready.set()
-            except (TypeError, ValueError):
-                pass
-            await original_handle(raw)
-
-        binance_ws_client._handle = handle_with_ready
         try:
-            await binance_ws_client.start(symbol, testnet, proxy_url)
-            await asyncio.wait_for(ready.wait(), timeout=WS_READY_TIMEOUT)
+            subscription_id = await binance_ws_client.start(symbol, testnet, proxy_url)
+            await binance_ws_client.wait_until_ready(
+                subscription_id,
+                timeout=WS_READY_TIMEOUT,
+            )
         except asyncio.TimeoutError as exc:
             await binance_ws_client.stop()
             raise RuntimeError(f"Binance WS did not become ready within {WS_READY_TIMEOUT}s") from exc
-        finally:
-            if binance_ws_client._handle is handle_with_ready:
-                binance_ws_client._handle = original_handle
+
+
+def _strategy_runtime_running() -> bool:
+    # Local import keeps settings initialization independent of the strategy stack.
+    from ..services.bot_engine import bot_engine
+
+    return bool(bot_engine.running)
+
+
+def _changes_execution_binding(body: SettingsIn, current) -> bool:
+    fields = body.model_fields_set
+    if "testnet" in fields and body.testnet != current.testnet:
+        return True
+    if "symbol" in fields and body.symbol != current.symbol:
+        return True
+    if "proxy_url" in fields and (body.proxy_url or None) != (current.proxy_url or None):
+        return True
+    return any(
+        field in fields and getattr(body, field) not in (None, *_KEEP)
+        for field in (
+            "api_key_test",
+            "api_secret_test",
+            "api_key_main",
+            "api_secret_main",
+        )
+    )
 
 
 async def _restore_runtime(snapshot: dict) -> None:
@@ -174,6 +196,11 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
     async with _settings_lock:
         s = db.query(Settings).first()
         runtime = _runtime_snapshot()
+        if _strategy_runtime_running() and _changes_execution_binding(body, s):
+            raise HTTPException(
+                status_code=409,
+                detail="Stop the running strategy before changing its network, symbol, proxy, or credentials",
+            )
         if body.api_key_test and body.api_key_test not in _KEEP:
             s.api_key_test_enc = encrypt(body.api_key_test.strip())
         if body.api_secret_test and body.api_secret_test not in _KEEP:
@@ -207,7 +234,8 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
                 if key_enc
                 else "配置已保存（当前模式未配置 API Key，暂未连接）"
             )
-            return {"ok": True, "message": message, "symbol": s.symbol}
+            authoritative = _settings_out(s).model_dump()
+            return {"ok": True, "message": message, **authoritative}
         except (Exception, asyncio.CancelledError) as exc:
             db.rollback()
             try:

@@ -17,6 +17,7 @@ services:
       - DATA_DIR=/app/runtime
       - PYTHONUNBUFFERED=1
       - CANDLEMIND_AI_BASE_URL_HOSTS=${CANDLEMIND_AI_BASE_URL_HOSTS:-}
+      - CANDLEMIND_MAINNET_TRADING_ENABLED=${CANDLEMIND_MAINNET_TRADING_ENABLED:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

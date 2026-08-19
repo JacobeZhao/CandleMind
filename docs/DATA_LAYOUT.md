@@ -50,9 +50,9 @@ release。`DATA_DIR` 独占运行状态，包括：
 
 - `trader.db`
 - `secret.key`
-- `strategies/sar_adx_paper_<symbol>.json`
+- `strategies/execution_<network>_<symbol>.json`
 
-数据库和密钥是不可拆分的加密配置对。paper 状态空仓且因停机落后时，V3
+数据库和密钥是不可拆分的加密配置对。执行日志与交易所持仓不一致时，策略
 运行时允许无历史成交地重新对齐；若恢复状态仍持仓，则拒绝跳过历史执行并要求
 人工处理。
 

@@ -41,13 +41,10 @@ const INPUT_CLASS =
 
 const FROZEN_PARAMETERS = [
   ["执行周期", "5m"],
-  ["SAR", "0.02 / 0.20"],
-  ["趋势过滤", "1h ADX(14) >= 45"],
-  ["ADX 动量", "连续上升 2 周期"],
-  ["入场确认", "6 根 K 线"],
-  ["仓位结构", "5 层 x 20%"],
-  ["回踩再突破", "0.24%"],
-  ["Regime 开仓上限", "2 次"],
+  ["趋势确认周期", "1h"],
+  ["入场方式", "趋势确认"],
+  ["仓位管理", "分批执行"],
+  ["风险控制", "策略内置"],
 ];
 
 function money(value, digits = 2) {
@@ -82,6 +79,11 @@ function direction(value) {
   if (Number(value) === 1 || String(value).toLowerCase() === "long") return "多";
   if (Number(value) === -1 || String(value).toLowerCase() === "short") return "空";
   return value ?? "--";
+}
+
+function publicStrategyText(value) {
+  if (value == null) return "--";
+  return String(value).replace(/SAR|ADX|V3/gi, "策略");
 }
 
 function apiError(error) {
@@ -281,7 +283,7 @@ export default function Backtest() {
       <header className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="mb-1 flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-            <h1 className="text-xl font-semibold text-white">SAR + ADX 回测</h1>
+            <h1 className="text-xl font-semibold text-white">CandleMind 趋势策略回测</h1>
             <span className="max-w-full whitespace-normal rounded border border-red/40 bg-red/10 px-2 py-0.5 text-xs font-medium text-red">
               研究回测 / 未通过生产准入
             </span>
@@ -343,7 +345,7 @@ export default function Backtest() {
           </div>
         </div>
         <div className="mt-3 border border-accent/25 bg-accent/5 px-3 py-2 text-xs leading-5 text-muted">
-          当前 V3 参数基于 SOLUSDT 调优。其他品种使用相同参数仅用于跨币诊断，不代表参数已适配或具备生产准入条件。
+          当前策略参数基于 SOLUSDT 调优。其他品种使用相同参数仅用于跨币诊断，不代表参数已适配或具备生产准入条件。
           {coverageStart && coverageEnd && <span className="ml-1">数据范围 {coverageStart} 至 {coverageEnd}，结束日期不含。</span>}
           {capabilityWarning && <span className="ml-1 text-accent">{capabilityWarning}</span>}
         </div>
@@ -462,7 +464,7 @@ export default function Backtest() {
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">{dateTime(trade.entry_time)}</td>
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">{dateTime(trade.exit_time)}</td>
                         <td className={`px-3 py-2 font-mono font-semibold ${Number(trade.net_pnl_before_funding) >= 0 ? "text-green" : "text-red"}`}>{money(trade.net_pnl_before_funding)}</td>
-                        <td className="px-3 py-2 text-white">{trade.exit_reason ?? "--"}</td>
+                        <td className="px-3 py-2 text-white">{publicStrategyText(trade.exit_reason)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -492,8 +494,8 @@ export default function Backtest() {
           </section>
 
           <footer className="flex flex-col gap-2 border-t border-border pt-3 text-[11px] text-muted md:flex-row md:items-center md:justify-between">
-            <span className="flex items-center gap-1.5"><Database size={13} />{result.data_lineage?.ohlcv_release_id} · {result.data_lineage?.funding_release_id}</span>
-            <span>{result.execution?.engine} {result.execution?.engine_version} · {result.execution?.bar_count?.toLocaleString()} bars · {result.execution?.signal_timing}</span>
+            <span className="flex items-center gap-1.5"><Database size={13} />{publicStrategyText(result.data_lineage?.ohlcv_release_id)} · {publicStrategyText(result.data_lineage?.funding_release_id)}</span>
+            <span>CandleMind 趋势策略 · {result.execution?.bar_count?.toLocaleString() ?? 0} bars · {publicStrategyText(result.execution?.signal_timing)}</span>
           </footer>
         </>
       )}

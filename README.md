@@ -1,25 +1,47 @@
 # CandleMind
 
-CandleMind 是一个面向 Binance Futures 的量化交易研究与模拟执行平台，采用
-FastAPI + React 构建。项目聚焦 **SAR + ADX 趋势跟踪策略**，提供实时行情、
-指标图表、AI 行情分析、paper trading 运行时和可复现回测，同时保留基于 EMA
+CandleMind 是一个面向 Binance Futures 的量化交易研究与自动化执行平台，采用
+FastAPI + React 构建。项目聚焦 **CandleMind 趋势策略**，提供实时行情、
+趋势指标图表、AI 行情分析、交易所执行运行时和可复现回测，同时保留基于 EMA
 特征的强化学习趋势跟踪研究基础设施。
 
+<table>
+  <tr>
+    <td>
+      <h2>特别致谢：NetAPI</h2>
+      <p>
+        感谢 <a href="https://netapi.cc/"><strong>NetAPI.cc</strong></a>
+        为 CandleMind 提供 Token 支持，帮助项目持续完善 AI 行情分析与智能助手能力。
+      </p>
+      <p><strong>一个 API 密钥，全部搞定。</strong></p>
+      <ul>
+        <li>不用分别申请，一个密钥调用所有主流 AI 模型。</li>
+        <li>智能调度，哪个快用哪个，系统自动帮你切。</li>
+        <li>用多少付多少，不花冤枉钱。</li>
+      </ul>
+      <p>
+        <strong>“就像一个万能充电头，什么手机都能充。”</strong><br>
+        访问：<a href="https://netapi.cc/">netapi.cc</a>
+      </p>
+    </td>
+  </tr>
+</table>
+
 > [!WARNING]
-> 本项目仅用于技术研究与教育，不构成投资建议。当前策略引擎仅支持模拟交易，
-> 不会向交易所发送真实订单。历史回测结果不代表未来收益。
+> 本项目仅用于技术研究与教育，不构成投资建议。订单页启动的策略会向当前选择的
+> Binance Futures 测试网或真实网发送订单；真实网默认由服务端禁用。历史回测结果不代表未来收益。
 
 ## 最新策略表现展示（模拟）
 
 > [!IMPORTANT]
 > 以下曲线和 `+306%`、`-8.9%` 等指标是用于展示 README 报告样式的**人工模拟
 > 数据**，不是事实业绩，不是由真实历史 K 线、实盘订单或本项目回测引擎生成，
-> 也不能作为策略盈利能力证明。项目中冻结的真实研究证据仍表明当前 SAR + ADX
-> V3 尚未盈利。
+> 也不能作为策略盈利能力证明。项目中冻结的真实研究证据仍表明当前策略
+> 尚未盈利。
 
 ```mermaid
 xychart-beta
-    title "SAR + ADX V3 Illustrative Net Equity (Synthetic)"
+    title "CandleMind Illustrative Net Equity (Synthetic)"
     x-axis ["2025-08", "09", "10", "11", "12", "2026-01", "02", "03", "04", "05", "06", "07", "08"]
     y-axis "Net equity (USD)" 10000 --> 41000
     line [10000, 12200, 11813, 17000, 22000, 24000, 28000, 25508, 29500, 31500, 30240, 36000, 40600]
@@ -33,13 +55,13 @@ xychart-beta
     line [0, 0, -5.5, 0, 0, 0, 0, -8.9, 0, 0, -4.0, 0, 0]
 ```
 
-[Mermaid 无法渲染时查看 PNG 版本](https://testingcf.jsdelivr.net/gh/JacobeZhao/CandleMind@2da8c0e/docs/assets/sar-adx-v3-illustrative-backtest.png)
+[Mermaid 无法渲染时查看 PNG 版本](docs/assets/candlemind-illustrative-backtest.png)
 
 ### 模拟报告
 
 | 指标 | 展示值 |
 | --- | ---: |
-| 策略 | SAR + ADX Pyramid V3 |
+| 策略 | CandleMind 趋势策略 |
 | 展示周期 | 过去 12 个月 |
 | 初始资金 | $10,000 |
 | 期末权益 | $40,600 |
@@ -53,9 +75,9 @@ xychart-beta
 ## 主要功能
 
 - 五个核心页面：概览、行情、订单、回测和设置。
-- K 线主图默认显示 PSAR，副图默认显示 ADX、+DI 和 -DI。
+- K 线工作区固定展示趋势方向、趋势强度与方向性指标。
 - Binance WebSocket 行情以最新值优先的方式每约 500ms 更新。
-- SAR + ADX Pyramid V3 模拟策略绑定前端当前选择的交易品种。
+- CandleMind 趋势策略绑定前端当前选择的交易品种和 Binance 网络。
 - 基于 Backtrader 的离线回测，计入手续费、滑点和已观测资金费率。
 - 可配置 LiteLLM/Ollama 兼容服务，用于人工问答和基于已收盘 K 线的持续 AI 行情分析。
 - 使用校验和与冻结清单验证 K 线及衍生品数据来源。
@@ -66,7 +88,7 @@ xychart-beta
 生命周期和来源校验契约。这些模块用于离线研究和保持历史实验可复现，不代表已有
 强化学习模型投入运行。
 
-当前在线决策链路仍是 **SAR + ADX V3 paper trading**。强化学习模型尚未接入
+当前在线决策链路使用交易所执行和幂等订单日志。强化学习模型尚未接入
 在线推理、订单决策或实盘执行，项目也不以“强化学习驱动当前策略”作为能力声明。
 详细边界与后续接入门槛见
 [`docs/research/RL_RESEARCH_STATUS.md`](docs/research/RL_RESEARCH_STATUS.md)。
@@ -76,7 +98,7 @@ xychart-beta
 | 模块 | 技术 | 位置 |
 | --- | --- | --- |
 | 后端 API | Python 3.12、FastAPI、Pandas | `backend/app/` |
-| 策略与回测 | SAR + ADX、Backtrader | `backend/app/strategies/` |
+| 策略与回测 | CandleMind 趋势策略、Backtrader | `backend/app/strategies/` |
 | 前端 | React 18、Vite、Tailwind CSS | `frontend/src/` |
 | 部署 | Docker Compose、Nginx | `docker-compose.yml` |
 | 外部数据 | K 线、运行状态、报告 | `G:/CandleMind/CandleMind_data` |
@@ -108,7 +130,7 @@ CANDLEMIND_DATA_ROOT=D:/CandleMind/data
 CANDLEMIND_RUNTIME_ROOT=D:/CandleMind/runtime/app
 ```
 
-行情数据在容器内以只读方式挂载，数据库、加密密钥和 paper 状态写入独立的
+行情数据在容器内以只读方式挂载，数据库、加密密钥和执行日志写入独立的
 runtime 目录。
 
 ### 本地开发
@@ -136,8 +158,8 @@ Vite 默认运行在 <http://localhost:5173>，并将 API 请求代理到后端�
 2. Binance 凭据应通过设置页面录入，并与 `trader.db`、`secret.key` 一起备份。
 3. 云端 AI 仅允许内置的官方 HTTPS 主机；本地兼容 Provider 可使用回环或
    RFC1918 地址，具体边界见 [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md)。
-4. 不要提交 `.env`、数据库、密钥、下载行情、回测报告或 paper 运行状态。
-5. 如未来接入真实交易，必须单独完成 testnet、权限隔离和风控验收。
+4. 不要提交 `.env`、数据库、密钥、下载行情、回测报告或执行日志。
+5. 测试网是默认执行环境；真实网必须完成 testnet 验收，并同时通过服务端开关和页面确认。
 
 ## 测试与验证
 

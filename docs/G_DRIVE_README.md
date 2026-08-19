@@ -21,7 +21,7 @@ G:\CandleMind\
 - `normalized/ema/releases`
 - `normalized/derivatives/releases`
 
-paper 数据库、加密密钥和 `strategies/sar_adx_paper_<symbol>.json` 必须共同保存在
+运行数据库、加密密钥和 `strategies/execution_<network>_<symbol>.json` 必须共同保存在
 `runtime/app`。回测输出放入 `experiments/backtests` 或
 `experiments/reports`。`models` 仅可作为历史模型归档，当前 SAR+ADX 策略不依赖
 其中内容。

@@ -1,5 +1,4 @@
 import asyncio
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -65,6 +64,11 @@ def _set_runtime(monkeypatch, *, symbol="BTCUSDT", running=False):
     monkeypatch.setattr(settings_routes.binance_ws_client, "symbol", symbol)
     monkeypatch.setattr(settings_routes.binance_ws_client, "testnet", True)
     monkeypatch.setattr(settings_routes.binance_ws_client, "proxy", None)
+    monkeypatch.setattr(
+        settings_routes.binance_ws_client,
+        "is_ready",
+        lambda: running,
+    )
     return client
 
 
@@ -235,26 +239,78 @@ def test_ws_restart_waits_for_target_ticker(monkeypatch):
     _set_runtime(monkeypatch)
     events = []
 
-    async def original_handle(raw):
-        events.append(json.loads(raw)["s"])
-
     async def start(symbol, testnet, proxy):
         events.append("start")
         settings_routes.binance_ws_client.symbol = symbol
         settings_routes.binance_ws_client.testnet = testnet
         settings_routes.binance_ws_client.proxy = proxy
         settings_routes.binance_ws_client._running = True
-        await settings_routes.binance_ws_client._handle(
-            json.dumps({"e": "24hrTicker", "s": symbol})
-        )
+        return 42
 
-    monkeypatch.setattr(settings_routes.binance_ws_client, "_handle", original_handle)
+    async def wait_until_ready(subscription_id, timeout):
+        events.append(("ready", subscription_id, timeout))
+
     monkeypatch.setattr(settings_routes.binance_ws_client, "start", start)
+    monkeypatch.setattr(
+        settings_routes.binance_ws_client,
+        "wait_until_ready",
+        wait_until_ready,
+    )
 
     asyncio.run(settings_routes._start_ws_and_wait("ETHUSDT", False, "http://proxy"))
 
-    assert events == ["start", "ETHUSDT"]
-    assert settings_routes.binance_ws_client._handle is original_handle
+    assert events == ["start", ("ready", 42, settings_routes.WS_READY_TIMEOUT)]
+
+
+def test_save_returns_authoritative_network_and_connection_state(monkeypatch):
+    _set_runtime(monkeypatch, running=True)
+    current = _settings(testnet=True, symbol="BTCUSDT")
+    db = _Db(current)
+
+    result = asyncio.run(settings_routes.save_settings(SettingsIn(), db=db))
+
+    assert result["testnet"] is True
+    assert result["symbol"] == "BTCUSDT"
+    assert result["connected"] is True
+    assert result["test_key_set"] is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        SettingsIn(testnet=False),
+        SettingsIn(symbol="ETHUSDT"),
+        SettingsIn(proxy_url="http://proxy.test:8080"),
+        SettingsIn(api_key_test="replacement"),
+    ],
+)
+def test_running_strategy_rejects_execution_binding_changes(monkeypatch, body):
+    _set_runtime(monkeypatch)
+    current = _settings()
+    db = _Db(current)
+    monkeypatch.setattr(settings_routes, "_strategy_runtime_running", lambda: True)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(settings_routes.save_settings(body, db=db))
+
+    assert error.value.status_code == 409
+    assert not db.committed
+    assert vars(current) == vars(_settings())
+
+
+def test_running_strategy_allows_non_binding_interval_change(monkeypatch):
+    _set_runtime(monkeypatch)
+    current = _settings()
+    db = _Db(current)
+    monkeypatch.setattr(settings_routes, "_strategy_runtime_running", lambda: True)
+
+    result = asyncio.run(
+        settings_routes.save_settings(SettingsIn(interval="5m"), db=db)
+    )
+
+    assert db.committed
+    assert current.interval == "5m"
+    assert result["interval"] == "5m"
 
 
 def test_restore_failure_still_restores_symbol_metadata(monkeypatch):

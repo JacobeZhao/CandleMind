@@ -54,19 +54,18 @@ describe("Dashboard strategy status", () => {
     expect(screen.getByText("$150.00")).toBeTruthy();
   });
 
-  it("shows the current paper position and persisted fill count", () => {
+  it("shows the current exchange position and filled order count", () => {
     renderDashboard({
       engine_state: "running",
       running: true,
       position_direction: "NONE",
-      paper_fill_count: 3,
-      paper_fill_count_complete: true,
+      filled_order_count: 3,
       last_action: "opened LONG",
     });
 
     expect(screen.getByText("当前持仓方向")).toBeTruthy();
     expect(screen.getByText("空仓")).toBeTruthy();
-    expect(screen.getByText("策略纸面成交")).toBeTruthy();
+    expect(screen.getByText("交易所成交")).toBeTruthy();
     expect(screen.getByText("3 笔")).toBeTruthy();
     expect(screen.getByText("opened LONG")).toBeTruthy();
   });
@@ -76,8 +75,7 @@ describe("Dashboard strategy status", () => {
       engine_state: "retrying",
       running: true,
       position_direction: "LONG",
-      paper_fill_count: null,
-      paper_fill_count_complete: false,
+      filled_order_count: null,
       last_action: "[SAR+ADX paper] halted: recovery required",
       error: "RemoteDisconnected secret proxy detail",
     });
@@ -99,8 +97,7 @@ describe("Dashboard strategy status", () => {
         engine_state: "network_halted",
         running: false,
         position_direction: "NONE",
-        paper_fill_count: 0,
-        paper_fill_count_complete: true,
+        filled_order_count: 0,
       },
     };
 
@@ -120,8 +117,7 @@ describe("Dashboard strategy status", () => {
       engine_state: engineState,
       running: false,
       position_direction: "SHORT",
-      paper_fill_count: 1,
-      paper_fill_count_complete: true,
+      filled_order_count: 1,
       error: "sensitive raw exception",
     });
 

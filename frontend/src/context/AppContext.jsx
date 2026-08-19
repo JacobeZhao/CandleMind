@@ -15,6 +15,8 @@ const initial = {
   botStatusLoaded: false,
   symbol:     "BTCUSDT",
   networkTab: "test",   // "test" | "main"
+  networkSwitching: false,
+  networkError: null,
 };
 
 function reducer(state, action) {
@@ -24,6 +26,8 @@ function reducer(state, action) {
       ? state
       : { ...state, connected: action.payload };
     case "SET_NETWORK_TAB": return { ...state, networkTab: action.payload };
+    case "SET_NETWORK_SWITCHING": return { ...state, networkSwitching: action.payload };
+    case "SET_NETWORK_ERROR": return { ...state, networkError: action.payload };
     case "SET_BOT_STATUS":  return { ...state, botStatus: action.payload, botStatusLoaded: true };
     case "WS_MSG": {
       const { type, data } = action.payload;
@@ -44,6 +48,7 @@ export function AppProvider({ children }) {
   const activeSymbol = useRef(initial.symbol);
   const pendingTicker = useRef(null);
   const switchingSymbol = useRef(false);
+  const networkSwitchInFlight = useRef(false);
   const botStatusRevision = useRef(0);
 
   useEffect(() => {
@@ -150,14 +155,28 @@ export function AppProvider({ children }) {
   const setConnected = (v)   => dispatch({ type: "SET_CONNECTED", payload: v   });
 
   // 切换测试网 / 真实网，同步写入后端设置
-  const switchNetwork = async (tab) => {
+  const switchNetwork = useCallback(async (tab) => {
+    if (networkSwitchInFlight.current || tab === state.networkTab) return;
+    networkSwitchInFlight.current = true;
+    dispatch({ type: "SET_NETWORK_SWITCHING", payload: true });
+    dispatch({ type: "SET_NETWORK_ERROR", payload: null });
     try {
-      await saveSettings({ testnet: tab === "test" });
-      dispatch({ type: "SET_NETWORK_TAB", payload: tab });
+      const { data } = await saveSettings({ testnet: tab === "test" });
+      if (typeof data?.testnet !== "boolean") {
+        throw new Error("Network response did not include testnet state");
+      }
+      dispatch({ type: "SET_NETWORK_TAB", payload: data.testnet ? "test" : "main" });
     } catch (error) {
-      console.error("Failed to switch network", error);
+      const detail = error?.response?.data?.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : "网络切换失败，请检查连接和 API 配置。";
+      dispatch({ type: "SET_NETWORK_ERROR", payload: message });
+    } finally {
+      networkSwitchInFlight.current = false;
+      dispatch({ type: "SET_NETWORK_SWITCHING", payload: false });
     }
-  };
+  }, [state.networkTab]);
 
   return (
     <AppContext.Provider value={{ ...state, setSymbol, setConnected, switchNetwork, dispatch }}>

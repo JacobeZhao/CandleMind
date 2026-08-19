@@ -21,6 +21,11 @@ const ENGINE_STATE_VIEWS = {
   halted: { label: "已安全停止", tone: "text-red" },
   recovery_required: { label: "需要恢复", tone: "text-red" },
 };
+const NO_ACTION_LABELS = {
+  baseline: "等待下一根完整 K 线",
+  bar_already_processed: "当前 K 线已经处理",
+  no_strategy_action: "当前条件未形成有效交易信号",
+};
 
 // ── 订单表格辅助 ──────────────────────────────────────────────────────────────
 
@@ -53,6 +58,9 @@ function EnginePanel() {
   const [engine, setEngine] = useState({ running: false, circuit_open: false, engine_state: "loading" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [capitalLimit, setCapitalLimit] = useState("1000");
+  const [showMainnetConfirm, setShowMainnetConfirm] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
 
   const loadStatus = useCallback(() => {
     getEngineStatus().then(({ data }) => setEngine(data)).catch(() => {});
@@ -64,21 +72,32 @@ function EnginePanel() {
     return () => clearInterval(id);
   }, [loadStatus]);
 
-  const toggleEngine = async () => {
+  const toggleEngine = async (confirmed = false) => {
+    if (!engine.running && networkTab === "main" && !confirmed) {
+      setConfirmation("");
+      setShowMainnetConfirm(true);
+      return;
+    }
+    if (!engine.running && !(Number(capitalLimit) > 0)) {
+      setMsg({ ok: false, text: "资金上限必须大于 0" });
+      return;
+    }
     setBusy(true); setMsg(null);
     try {
       if (engine.running) {
         await stopEngine();
         setMsg({ ok: true, text: "策略已停止" });
       } else {
-        const { data } = await startEngine({
+        const request = {
           strategy_type: "sar_adx_pyramid",
           config_version: "sar_adx_v3",
           symbol,
-          paper: true,
-          initial_capital: 10000,
-        });
+          capital_limit: Number(capitalLimit),
+        };
+        if (networkTab === "main") request.mainnet_confirmation = confirmation;
+        const { data } = await startEngine(request);
         setMsg({ ok: true, text: data.message || "已启动" });
+        setShowMainnetConfirm(false);
       }
       const { data } = await getEngineStatus();
       setEngine(data);
@@ -89,17 +108,24 @@ function EnginePanel() {
     }
   };
 
-  const isTestnet = networkTab === "test";
+  const boundNetwork = engine.running && engine.network
+    ? String(engine.network).toLowerCase()
+    : networkTab;
+  const isTestnet = !["main", "mainnet", "production"].includes(boundNetwork);
   const boundSymbol = engine.symbol || engine.strategy_symbol || symbol;
-  const fillCount = engine.paper_fill_count ?? engine.trade_count;
-  const fillCountComplete = engine.paper_fill_count_complete !== false;
-  const fillCountLabel = fillCountComplete && fillCount != null && Number.isFinite(Number(fillCount)) ? `${fillCount} 笔` : "--";
-  const strategyAction = engine.last_action
-    && !/(halted|recovery|required|network|connection|error|retry|连接|网络|重试|恢复)/i.test(engine.last_action)
-    ? engine.last_action
-    : null;
   const engineState = engine.engine_state || (engine.running ? "running" : "stopped");
   const engineView = ENGINE_STATE_VIEWS[engineState] || ENGINE_STATE_VIEWS.halted;
+  const stats = [
+    ["决策", engine.decision_count],
+    ["已提交", engine.submitted_order_count],
+    ["已成交", engine.filled_order_count],
+    ["已拒绝", engine.rejected_order_count],
+    ["待恢复", engine.unknown_order_count],
+  ];
+  const noActionReason = engine.no_action_reason
+    ? NO_ACTION_LABELS[engine.no_action_reason]
+      || String(engine.no_action_reason).replace(/SAR|ADX|V3/gi, "策略")
+    : null;
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden mb-4">
@@ -120,9 +146,6 @@ function EnginePanel() {
               {isTestnet ? "测试网" : "真实网"}
             </span>
             <span className="text-xs text-muted font-mono">{engine.running ? `绑定 ${boundSymbol}` : `待启动 ${symbol}`}</span>
-            {engine.running && engine.paper && (
-              <span className="text-xs text-accent">纸面 · ${engine.paper_equity}</span>
-            )}
           </div>
         </div>
 
@@ -132,8 +155,22 @@ function EnginePanel() {
               {msg.ok ? <CheckCircle size={11} /> : <AlertCircle size={11} />} {msg.text}
             </span>
           )}
-          <span className="border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-accent">仅纸面</span>
-          <button onClick={toggleEngine} disabled={busy || !symbol}
+          {!engine.running && (
+            <label className="flex items-center gap-2 text-xs text-muted">
+              资金上限
+              <input
+                aria-label="资金上限"
+                type="number"
+                min="1"
+                step="100"
+                value={capitalLimit}
+                onChange={(event) => setCapitalLimit(event.target.value)}
+                className="w-24 rounded-md border border-border bg-surface px-2 py-1 text-right font-mono text-white outline-none focus:border-accent"
+              />
+              USDT
+            </label>
+          )}
+          <button onClick={() => toggleEngine()} disabled={busy || !symbol}
             className={clsx("flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors disabled:opacity-50",
               engine.running
                 ? "bg-red/10 border border-red/30 text-red hover:bg-red/20"
@@ -146,10 +183,11 @@ function EnginePanel() {
       </div>
 
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 px-4 py-2 text-xs text-muted">
-        <span>策略 <strong className="font-mono font-medium text-white">SAR + ADX 分批加仓 V3</strong></span>
-        <span>执行周期 <strong className="font-mono font-medium text-white">5m</strong></span>
-        <span>趋势过滤 <strong className="font-mono font-medium text-white">1h ADX</strong></span>
-        <span>目标仓位 <strong className="font-mono font-medium text-white">5 x 20%</strong></span>
+        <span>策略 <strong className="font-medium text-white">CandleMind 趋势策略</strong></span>
+        <span>执行方式 <strong className="font-medium text-white">交易所订单</strong></span>
+        {engine.last_exchange_order_id && (
+          <span>最近订单 <strong className="font-mono font-medium text-white">{engine.last_exchange_order_id}</strong></span>
+        )}
       </div>
 
       {/* ── 运行状态条 ───────────────────────────────────────── */}
@@ -159,12 +197,39 @@ function EnginePanel() {
           熔断器触发：日内回撤超限，新入场已暂停。明日 UTC 0 点自动重置。
         </div>
       )}
-      {(strategyAction || fillCount !== undefined || engine.paper_fill_count_complete === false) && (
-        <div className="px-4 py-2 bg-surface/40 border-b border-border/40 text-xs text-muted truncate">
-          {strategyAction && <span>上次操作：{strategyAction}</span>}
-          <span className={clsx("text-accent", strategyAction && "ml-3")}>
-            策略纸面成交：{fillCountLabel}
-          </span>
+      <div className="flex flex-wrap gap-x-5 gap-y-1 border-t border-border/40 bg-surface/40 px-4 py-2 text-xs text-muted">
+        {stats.map(([label, value]) => (
+          <span key={label}>{label} <strong className="font-mono text-white">{Number.isFinite(Number(value)) ? value : 0}</strong></span>
+        ))}
+        {noActionReason && <span className="min-w-0 truncate">未执行原因：{noActionReason}</span>}
+      </div>
+
+      {showMainnetConfirm && (
+        <div role="dialog" aria-modal="true" aria-labelledby="mainnet-confirm-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-md border border-red/40 bg-card p-4 shadow-2xl">
+            <h2 id="mainnet-confirm-title" className="text-base font-semibold text-white">确认启动真实网交易</h2>
+            <p className="mt-2 text-sm leading-5 text-muted">
+              策略将在出现有效信号后使用真实资金下单。请输入 <strong className="font-mono text-red">MAINNET:{symbol}</strong> 继续。
+            </p>
+            <input
+              autoFocus
+              aria-label="真实网确认文本"
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              className="mt-3 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm text-white outline-none focus:border-red"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setShowMainnetConfirm(false)} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-white">取消</button>
+              <button
+                type="button"
+                onClick={() => toggleEngine(true)}
+                disabled={confirmation !== `MAINNET:${symbol}` || busy}
+                className="rounded-md bg-red px-3 py-1.5 text-xs font-bold text-white disabled:opacity-40"
+              >
+                确认真实网启动
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

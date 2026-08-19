@@ -27,7 +27,7 @@ def test_readme_states_rl_runtime_and_synthetic_performance_boundaries():
     rl_status = _read("docs/research/RL_RESEARCH_STATUS.md")
 
     assert "基于 EMA 特征的强化学习趋势跟踪研究基础设施" in readme
-    assert "SAR + ADX V3 paper trading" in readme
+    assert "交易所执行运行时" in readme
     assert "强化学习模型尚未接入" in readme
     assert "不是事实业绩" in readme
     assert "SAR+ADX V3 paper trading" in rl_status

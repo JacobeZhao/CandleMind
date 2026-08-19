@@ -24,7 +24,19 @@ export const getSymbols = () => api.get("/market/symbols");
 export const getOrderHistory = (sym, limit) => api.get("/orders/history", { params: { symbol: sym, limit } });
 export const getRecentTrades = (sym) => api.get("/orders/trades", { params: { symbol: sym } });
 
-export const startEngine = (data) => api.post("/strategy/engine/start", data);
+export const startEngine = ({
+  strategy_type,
+  config_version,
+  symbol,
+  capital_limit,
+  mainnet_confirmation,
+}) => api.post("/strategy/engine/start", {
+  strategy_type,
+  config_version,
+  symbol,
+  capital_limit,
+  ...(mainnet_confirmation ? { mainnet_confirmation } : {}),
+});
 export const stopEngine = () => api.post("/strategy/engine/stop");
 export const getEngineStatus = () => api.get("/strategy/engine/status");
 

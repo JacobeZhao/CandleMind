@@ -36,13 +36,18 @@ vi.mock("../api/client", () => ({
 
 describe("Orders", () => {
   beforeEach(() => {
+    appState.networkTab = "test";
     getEngineStatus.mockResolvedValue({
       data: {
         running: false,
         engine_state: "stopped",
         circuit_open: false,
-        paper_fill_count: 0,
-        paper_fill_count_complete: true,
+        network: "testnet",
+        decision_count: 3,
+        submitted_order_count: 2,
+        filled_order_count: 1,
+        rejected_order_count: 0,
+        unknown_order_count: 0,
       },
     });
     startEngine.mockResolvedValue({ data: { message: "已启动" } });
@@ -62,7 +67,7 @@ describe("Orders", () => {
     await waitFor(() => expect(getEngineStatus).toHaveBeenCalled());
   });
 
-  it("starts the selected SAR+ADX strategy in paper mode", async () => {
+  it("starts the selected strategy with exchange execution parameters", async () => {
     render(<Orders />);
 
     fireEvent.click(screen.getByRole("button", { name: "启动策略" }));
@@ -72,32 +77,40 @@ describe("Orders", () => {
         strategy_type: "sar_adx_pyramid",
         config_version: "sar_adx_v3",
         symbol: "SOLUSDT",
-        paper: true,
-        initial_capital: 10000,
+        capital_limit: 1000,
       });
     });
+    expect(screen.getByText("CandleMind 趋势策略")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/SAR|ADX|V3/i);
   });
 
-  it("distinguishes paper fills from exchange trade records", async () => {
+  it("shows exchange execution counters and records", async () => {
     render(<Orders />);
 
-    await waitFor(() => expect(screen.getByText("策略纸面成交：0 笔")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText((_, element) => (
+      element.tagName === "SPAN" && element.textContent === "已成交 1"
+    ))).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "交易所成交记录" }));
     expect(await screen.findByText("暂无交易所成交记录")).toBeTruthy();
   });
 
-  it("shows an unknown paper fill count as unavailable", async () => {
-    getEngineStatus.mockResolvedValue({
-      data: {
-        running: false,
-        engine_state: "stopped",
-        paper_fill_count: null,
-        paper_fill_count_complete: false,
-      },
-    });
-
+  it("requires an exact confirmation before starting on mainnet", async () => {
+    appState.networkTab = "main";
     render(<Orders />);
-    await waitFor(() => expect(screen.getByText("策略纸面成交：--")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "启动策略" }));
+
+    expect(screen.getByRole("dialog", { name: "确认启动真实网交易" })).toBeTruthy();
+    const confirmButton = screen.getByRole("button", { name: "确认真实网启动" });
+    expect(confirmButton.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("真实网确认文本"), { target: { value: "MAINNET:SOLUSDT" } });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(startEngine).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: "SOLUSDT",
+      capital_limit: 1000,
+      mainnet_confirmation: "MAINNET:SOLUSDT",
+    })));
+    appState.networkTab = "test";
   });
 
   it("shows recovery-required as a distinct engine state", async () => {
@@ -105,8 +118,7 @@ describe("Orders", () => {
       data: {
         running: false,
         engine_state: "recovery_required",
-        paper_fill_count: 2,
-        paper_fill_count_complete: true,
+        filled_order_count: 2,
       },
     });
 

@@ -110,7 +110,7 @@ def test_health_reports_runtime_and_mocked_exit_ip(client, monkeypatch):
     assert response.json() == {
         "connected": True,
         "engine_running": bot_engine.running,
-        "paper": bot_engine.paper,
+        "execution_mode": "exchange",
         "testnet": True,
         "proxy_set": True,
         "exit_ip": "203.0.113.10",

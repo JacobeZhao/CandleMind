@@ -57,9 +57,8 @@ export default function Dashboard() {
     ? "--"
     : direction == null ? "--"
       : direction === "LONG" ? "多头" : direction === "SHORT" ? "空头" : "空仓";
-  const fillCount = botStatus?.paper_fill_count ?? botStatus?.trade_count;
-  const fillCountComplete = botStatus?.paper_fill_count_complete !== false;
-  const fillCountLabel = botStatusLoaded && fillCountComplete && fillCount != null && Number.isFinite(Number(fillCount))
+  const fillCount = botStatus?.filled_order_count ?? botStatus?.trade_count;
+  const fillCountLabel = botStatusLoaded && fillCount != null && Number.isFinite(Number(fillCount))
     ? `${fillCount} 笔`
     : "--";
   const lastAction = isStrategyAction(botStatus?.last_action) ? botStatus.last_action : "—";
@@ -108,7 +107,7 @@ export default function Dashboard() {
             </div>
           </div>
           <div>
-            <div className="text-muted text-xs mb-1">策略纸面成交</div>
+            <div className="text-muted text-xs mb-1">交易所成交</div>
             <div className="text-accent font-bold">{fillCountLabel}</div>
           </div>
           <div className="col-span-2">

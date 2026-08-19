@@ -20,7 +20,7 @@ vi.mock("../api/client", () => ({
 }));
 
 function Probe() {
-  const { symbol, setSymbol, botStatus, botStatusLoaded } = useApp();
+  const { symbol, setSymbol, botStatus, botStatusLoaded, networkTab, networkSwitching, networkError, switchNetwork } = useApp();
   const ticker = useTicker();
   return (
     <div>
@@ -28,7 +28,11 @@ function Probe() {
       <span data-testid="price">{ticker?.price ?? "none"}</span>
       <span data-testid="bot-loaded">{String(botStatusLoaded)}</span>
       <span data-testid="bot-state">{botStatus?.engine_state ?? "none"}</span>
+      <span data-testid="network">{networkTab}</span>
+      <span data-testid="network-switching">{String(networkSwitching)}</span>
+      <span data-testid="network-error">{networkError ?? "none"}</span>
       <button onClick={() => setSymbol("SOLUSDT")}>switch</button>
+      <button onClick={() => switchNetwork("main")}>mainnet</button>
     </div>
   );
 }
@@ -163,5 +167,42 @@ describe("AppProvider ticker scheduling", () => {
 
     expect(getEngineStatus).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("bot-loaded").textContent).toBe("true");
+  });
+
+  it("uses the backend response as the authority when switching networks", async () => {
+    saveSettings.mockResolvedValue({ data: { testnet: false } });
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    await act(async () => fireEvent.click(screen.getByText("mainnet")));
+
+    expect(saveSettings).toHaveBeenCalledWith({ testnet: false });
+    expect(screen.getByTestId("network").textContent).toBe("main");
+    expect(screen.getByTestId("network-switching").textContent).toBe("false");
+  });
+
+  it("keeps the current network and exposes a switch failure", async () => {
+    saveSettings.mockRejectedValue({ response: { data: { detail: "目标网络行情连接超时" } } });
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    await act(async () => fireEvent.click(screen.getByText("mainnet")));
+
+    expect(screen.getByTestId("network").textContent).toBe("test");
+    expect(screen.getByTestId("network-error").textContent).toBe("目标网络行情连接超时");
+  });
+
+  it("deduplicates concurrent network switch requests", async () => {
+    let finishSwitch;
+    saveSettings.mockReturnValue(new Promise((resolve) => { finishSwitch = resolve; }));
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByText("mainnet"));
+    fireEvent.click(screen.getByText("mainnet"));
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+
+    await act(async () => finishSwitch({ data: { testnet: false } }));
+    expect(screen.getByTestId("network").textContent).toBe("main");
   });
 });

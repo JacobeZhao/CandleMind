@@ -7,6 +7,7 @@ const json = (route, body) => route.fulfill({
 });
 
 let agentRunning;
+let networkTestnet;
 
 const marketRows = Array.from({ length: 120 }, (_, index) => {
   const open = 140 + index * 0.08;
@@ -28,6 +29,7 @@ const marketRows = Array.from({ length: 120 }, (_, index) => {
 
 test.beforeEach(async ({ page }) => {
   agentRunning = false;
+  networkTestnet = true;
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
@@ -35,9 +37,12 @@ test.beforeEach(async ({ page }) => {
     }
     if (!url.pathname.startsWith("/api/")) return route.continue();
     if (url.pathname === "/api/settings") {
+      if (route.request().method() === "POST") {
+        networkTestnet = route.request().postDataJSON().testnet;
+      }
       return json(route, {
         symbol: "SOLUSDT",
-        testnet: true,
+        testnet: networkTestnet,
         test_key_set: false,
         main_key_set: false,
       });
@@ -84,11 +89,21 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("runs a mocked SAR+ADX backtest", async ({ page }) => {
+test("runs a mocked CandleMind trend strategy backtest", async ({ page }) => {
   await page.goto("/backtest");
-  await expect(page.getByRole("heading", { name: "SAR + ADX 回测" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "CandleMind 趋势策略回测" })).toBeVisible();
+  await expect(page.getByText(/SAR|ADX|V3/i)).toHaveCount(0);
   await page.getByRole("button", { name: "运行回测" }).click();
   await expect(page.getByRole("status")).toContainText("回测完成");
+});
+
+test("switches to mainnet from a mobile viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/markets");
+
+  await page.getByRole("button", { name: "真实网" }).click();
+
+  await expect(page.getByRole("button", { name: "真实网" })).toHaveAttribute("aria-pressed", "true");
 });
 
 test("opens the inline assistant, narrows the chart, and resizes it", async ({ page }) => {

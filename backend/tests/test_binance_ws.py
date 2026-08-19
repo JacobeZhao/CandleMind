@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 
 import aiohttp
+import pytest
 
 from backend.app.binance_ws import BinanceWSClient
 from backend.app import binance_ws
@@ -37,9 +38,14 @@ def _mark(symbol="SOLUSDT", event_time=100, price="145.20"):
     )
 
 
-def _trade(symbol="SOLUSDT", event_time=100, price="145.30"):
+def _trade(
+    symbol="SOLUSDT",
+    event_time=100,
+    price="145.30",
+    event_type="aggTrade",
+):
     return _event(
-        e="aggTrade",
+        e=event_type,
         E=event_time,
         s=symbol,
         a=123,
@@ -104,6 +110,30 @@ def test_ticker_broadcasts_without_fabricating_mark_price(monkeypatch):
     data = broadcasts[0]["data"]
     assert data["price"] == "145.25"
     assert "markPrice" not in data
+
+
+def test_raw_trade_event_updates_price_and_marks_subscription_ready(monkeypatch):
+    client = BinanceWSClient()
+    client.symbol = "SOLUSDT"
+    client._running = True
+    client._subscription_id = 3
+    client._ready_subscription_id = 3
+    broadcasts = []
+
+    async def capture(payload):
+        broadcasts.append(payload)
+
+    monkeypatch.setattr(binance_ws.manager, "broadcast", capture)
+    asyncio.run(client._handle(
+        _trade(event_time=130, price="146.10", event_type="trade"),
+        "SOLUSDT",
+        3,
+    ))
+    asyncio.run(client._publish_latest(3))
+
+    assert client.is_ready(3)
+    assert broadcasts[0]["data"]["price"] == "146.10"
+    assert broadcasts[0]["data"]["eventTime"] == 130
 
 
 def test_out_of_order_and_incomplete_events_do_not_replace_cache(monkeypatch):
@@ -219,6 +249,43 @@ def test_plain_events_remain_supported(monkeypatch):
     assert broadcasts[0]["data"]["symbol"] == "SOLUSDT"
 
 
+def test_combined_trade_event_marks_exact_subscription_ready():
+    client = BinanceWSClient()
+    client.symbol = "SOLUSDT"
+    client._running = True
+    client._subscription_id = 7
+    client._ready_subscription_id = 7
+
+    asyncio.run(client._handle(_trade(), "SOLUSDT", 7))
+
+    assert client.is_ready(7)
+
+
+def test_stale_subscription_cannot_mark_replacement_ready():
+    client = BinanceWSClient()
+    client.symbol = "SOLUSDT"
+    client._running = True
+    client._subscription_id = 8
+    client._ready_subscription_id = 8
+
+    asyncio.run(client._handle(_ticker(), "SOLUSDT", 7))
+
+    assert not client.is_ready(8)
+
+
+def test_wait_until_ready_rejects_replaced_subscription():
+    client = BinanceWSClient()
+    client._running = True
+    client._subscription_id = 9
+    client._ready_subscription_id = 9
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="replaced"):
+            await client.wait_until_ready(8, timeout=0.01)
+
+    asyncio.run(scenario())
+
+
 def test_connect_subscribes_to_all_raw_streams(monkeypatch):
     client = BinanceWSClient()
     client.symbol = "SOLUSDT"
@@ -271,7 +338,7 @@ def test_connect_subscribes_to_all_raw_streams(monkeypatch):
     assert subscriptions == [{
         "method": "SUBSCRIBE",
         "params": [
-            "solusdt@aggTrade",
+            "solusdt@trade",
             "solusdt@ticker",
             "solusdt@markPrice@1s",
         ],

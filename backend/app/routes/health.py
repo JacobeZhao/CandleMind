@@ -20,7 +20,7 @@ async def health(db: Session = Depends(get_db)):
     proxy = s.proxy_url if s else None
     info = {"connected": app_state.client is not None,
             "engine_running": bot_engine.running,
-            "paper": bot_engine.paper,
+            "execution_mode": "exchange",
             "testnet": s.testnet if s else None,
             "proxy_set": bool(proxy)}
     # 出口 IP + 国家

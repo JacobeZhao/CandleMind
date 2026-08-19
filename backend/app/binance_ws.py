@@ -20,6 +20,8 @@ class BinanceWSClient:
         self._publisher_task: asyncio.Task | None = None
         self._running = False
         self._subscription_id = 0
+        self._ready_event = asyncio.Event()
+        self._ready_subscription_id = 0
         self._incoming_context: tuple[str, int] | None = None
         self._stream_cache: dict[str, dict] = {}
         self._stream_event_times: dict[str, int] = {}
@@ -30,7 +32,12 @@ class BinanceWSClient:
         self.testnet = True
         self.proxy = None
 
-    async def start(self, symbol: str, testnet: bool, proxy: str = None):
+    async def start(
+        self,
+        symbol: str,
+        testnet: bool,
+        proxy: str | None = None,
+    ) -> int:
         """Start or restart the combined stream subscription."""
         await self.stop()
         self.symbol = symbol.upper()
@@ -38,6 +45,8 @@ class BinanceWSClient:
         self.proxy = proxy or None
         self._reset_stream_state()
         self._subscription_id += 1
+        self._ready_subscription_id = self._subscription_id
+        self._ready_event = asyncio.Event()
         self._running = True
         self._task = asyncio.create_task(self._run())
         self._publisher_task = asyncio.create_task(
@@ -46,10 +55,12 @@ class BinanceWSClient:
         logger.info(
             f"Binance WS scheduled: {self.symbol} testnet={self.testnet}"
         )
+        return self._subscription_id
 
     async def stop(self):
         self._running = False
         self._subscription_id += 1
+        self._ready_event.set()
         tasks = [task for task in (self._task, self._publisher_task) if task]
         for task in tasks:
             task.cancel()
@@ -60,7 +71,32 @@ class BinanceWSClient:
                 pass
         self._task = None
         self._publisher_task = None
+        self._ready_event = asyncio.Event()
+        self._ready_subscription_id = self._subscription_id
         self._reset_stream_state()
+
+    async def wait_until_ready(
+        self,
+        subscription_id: int,
+        timeout: float,
+    ) -> None:
+        """Wait for a validated market event from one exact subscription."""
+        if subscription_id != self._ready_subscription_id:
+            raise RuntimeError("Binance WS subscription was replaced before readiness")
+        await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+        if subscription_id != self._subscription_id or not self._running:
+            raise RuntimeError("Binance WS subscription changed while becoming ready")
+
+    def is_ready(self, subscription_id: int | None = None) -> bool:
+        expected = (
+            self._subscription_id if subscription_id is None else subscription_id
+        )
+        return (
+            self._running
+            and expected == self._subscription_id
+            and expected == self._ready_subscription_id
+            and self._ready_event.is_set()
+        )
 
     async def switch_symbol(self, symbol: str):
         """Reconnect to a different symbol and discard the old snapshot."""
@@ -166,7 +202,7 @@ class BinanceWSClient:
                 await ws.send_json({
                     "method": "SUBSCRIBE",
                     "params": [
-                        f"{stream}@aggTrade",
+                        f"{stream}@trade",
                         f"{stream}@ticker",
                         f"{stream}@markPrice@1s",
                     ],
@@ -231,7 +267,7 @@ class BinanceWSClient:
                     "volume": event["q"],
                     "eventTime": int(event["E"]),
                 }
-            elif event_type == "aggTrade":
+            elif event_type in ("aggTrade", "trade"):
                 stream_name = "trade"
                 if "E" not in event or "p" not in event:
                     return
@@ -262,6 +298,17 @@ class BinanceWSClient:
             self._stream_event_times[stream_name] = max(event_time, previous_time)
             self._stream_cache[stream_name] = snapshot
             self._cache_revision += 1
+            effective_subscription_id = (
+                subscription_id
+                if subscription_id is not None
+                else self._subscription_id
+            )
+            if (
+                self._running
+                and effective_subscription_id == self._subscription_id
+                and effective_subscription_id == self._ready_subscription_id
+            ):
+                self._ready_event.set()
         except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             logger.debug(f"WS handle error: {exc}")
 

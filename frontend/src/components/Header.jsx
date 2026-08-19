@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { getSymbols } from "../api/client";
-import { Activity, ChevronDown, Search, Wifi, WifiOff } from "lucide-react";
+import { Activity, AlertCircle, ChevronDown, Loader, Search, Wifi, WifiOff } from "lucide-react";
 import clsx from "clsx";
 
 function SymbolDropdown({ symbol, symbols, onSelect }) {
@@ -80,27 +80,38 @@ function SymbolDropdown({ symbol, symbols, onSelect }) {
 }
 
 function NetworkTabs() {
-  const { networkTab, switchNetwork } = useApp();
+  const { networkTab, networkSwitching, networkError, switchNetwork } = useApp();
 
   return (
-    <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border bg-surface p-0.5">
-      {[["test", "测试网"], ["main", "真实网"]].map(([tab, label]) => (
-        <button
-          type="button"
-          key={tab}
-          onClick={() => switchNetwork(tab)}
-          className={clsx(
-            "rounded-md px-2 py-1 text-xs font-medium transition-colors sm:px-3",
-            networkTab === tab
-              ? tab === "main"
-                ? "bg-red/80 text-white"
-                : "bg-accent/90 text-black"
-              : "text-muted hover:text-white",
-          )}
-        >
-          {label}
-        </button>
-      ))}
+    <div className="relative shrink-0">
+      <div className="flex items-center gap-0.5 rounded-lg border border-border bg-surface p-0.5">
+        {[["test", "测试网"], ["main", "真实网"]].map(([tab, label]) => (
+          <button
+            type="button"
+            key={tab}
+            onClick={() => switchNetwork(tab)}
+            disabled={networkSwitching}
+            aria-pressed={networkTab === tab}
+            className={clsx(
+              "flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:cursor-wait disabled:opacity-60 sm:px-3",
+              networkTab === tab
+                ? tab === "main"
+                  ? "bg-red/80 text-white"
+                  : "bg-accent/90 text-black"
+                : "text-muted hover:text-white",
+            )}
+          >
+            {networkSwitching && networkTab !== tab && <Loader size={11} className="animate-spin" />}
+            {label}
+          </button>
+        ))}
+      </div>
+      {networkError && (
+        <div role="alert" className="absolute right-0 top-full z-50 mt-2 flex w-72 max-w-[calc(100vw-1rem)] items-start gap-2 rounded-md border border-red/40 bg-card px-3 py-2 text-xs text-red shadow-xl">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span>{networkError}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -109,8 +120,7 @@ export default function Header() {
   const { botStatus, botStatusLoaded, connected, symbol, setSymbol } = useApp();
   const [symbols, setSymbols] = useState([]);
   const direction = botStatus?.position_direction ?? botStatus?.last_signal;
-  const fillCount = botStatus?.paper_fill_count ?? botStatus?.trade_count;
-  const fillCountComplete = botStatus?.paper_fill_count_complete !== false;
+  const fillCount = botStatus?.filled_order_count;
   const engineState = botStatus?.engine_state || (botStatus?.running ? "running" : "stopped");
   const engineLabel = engineState === "retrying" ? "策略重试中" : "策略运行中";
 
@@ -123,9 +133,7 @@ export default function Header() {
       <SymbolDropdown symbol={symbol} symbols={symbols} onSelect={setSymbol} />
 
       <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
-        <div className="hidden sm:block">
-          <NetworkTabs />
-        </div>
+        <NetworkTabs />
 
         {botStatusLoaded && direction && direction !== "NONE" && (
           <span
@@ -145,8 +153,8 @@ export default function Header() {
           <span className="hidden items-center gap-1.5 text-xs text-accent lg:flex">
             <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
             {engineLabel}
-            {fillCountComplete && Number(fillCount) > 0 && (
-              <span className="ml-1 text-muted">纸面成交 {fillCount} 笔</span>
+            {Number(fillCount) > 0 && (
+              <span className="ml-1 text-muted">成交 {fillCount} 笔</span>
             )}
           </span>
         )}
