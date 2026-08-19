@@ -5,6 +5,7 @@
 - [`DATA_LAYOUT.md`](DATA_LAYOUT.md)：仓库、行情数据和运行状态的归属边界。
 - [`G_DRIVE_README.md`](G_DRIVE_README.md)：G 盘权威目录结构与备份规则。
 - [`DERIVATIVES_DATA_V1.md`](DERIVATIVES_DATA_V1.md)：衍生品数据来源、因果性和验收证据。
+- [`AI_CONFIGURATION.md`](AI_CONFIGURATION.md)：AI Provider、Base URL、代理和密钥安全边界。
 - [`../backend/scripts/README.md`](../backend/scripts/README.md)：受支持的数据维护与评估命令。
 - [`../ops/README.md`](../ops/README.md)：Docker Compose 启动和隔离验证流程。
 

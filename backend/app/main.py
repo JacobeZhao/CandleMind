@@ -10,9 +10,11 @@ from .security import decrypt
 from .state import app_state
 from .binance_ws import binance_ws_client
 from .ws_manager import manager
-from .routes import settings, account, market, orders, backtest, ai_config, health
+from .routes import settings, account, market, orders, backtest, ai_config, health, market_agent
 from .routes import strategy as strategy_route
 from .routes.settings import _build_client
+from .services.market_agent import market_agent_manager
+from .services.market_agent_state_store import MarketAgentStateError
 
 
 async def _reconnect_loop():
@@ -56,6 +58,16 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    try:
+        await market_agent_manager.restore()
+    except MarketAgentStateError:
+        logger.error("Market agent startup rejected: a single Uvicorn worker is required")
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Market agent restore failed: exception_type={}", type(exc).__name__
+        )
+
     background_tasks = (
         asyncio.create_task(
             app_state.broadcast_loop(), name="app-state-broadcast-loop"
@@ -67,6 +79,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        try:
+            await market_agent_manager.shutdown()
+        except Exception as exc:
+            logger.warning(
+                "Market agent shutdown failed: exception_type={}", type(exc).__name__
+            )
         for task in background_tasks:
             task.cancel()
         await asyncio.gather(*background_tasks, return_exceptions=True)
@@ -105,6 +123,7 @@ app.include_router(orders.router,          prefix="/api/orders",    tags=["order
 app.include_router(strategy_route.router,  prefix="/api/strategy",  tags=["strategy"])
 app.include_router(backtest.router,        prefix="/api/backtest",  tags=["backtest"])
 app.include_router(ai_config.router,       prefix="/api/ai",        tags=["ai"])
+app.include_router(market_agent.router,     prefix="/api/ai",        tags=["ai"])
 app.include_router(health.router,          prefix="/api/health",    tags=["health"])
 
 

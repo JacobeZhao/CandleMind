@@ -47,6 +47,21 @@ class MarketChatResult:
     adx_bar_closed_at: str
 
 
+def _wilder_atr(frame: pd.DataFrame, period: int = 14) -> pd.Series:
+    previous_close = frame["close"].shift(1)
+    true_range = pd.concat(
+        (
+            frame["high"] - frame["low"],
+            (frame["high"] - previous_close).abs(),
+            (frame["low"] - previous_close).abs(),
+        ),
+        axis=1,
+    ).max(axis=1)
+    return true_range.ewm(
+        alpha=1.0 / period, adjust=False, min_periods=period
+    ).mean()
+
+
 def _iso_utc(milliseconds: int) -> str:
     return datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc).isoformat().replace(
         "+00:00", "Z"
@@ -137,6 +152,9 @@ def build_market_snapshot(
         raise MarketDataError("Not enough completed 1h bars for ADX")
 
     latest = current.iloc[-1]
+    previous_atr = _wilder_atr(current).shift(1).iloc[-1]
+    body_size = abs(float(latest["close"]) - float(latest["open"]))
+    body_atr_ratio = body_size / previous_atr if previous_atr > 0 else math.nan
     latest_psar = psar.iloc[-1]
     latest_adx = adx.iloc[-1]
     previous_adx = adx.iloc[-2] if len(adx) > 1 else latest_adx
@@ -169,6 +187,14 @@ def build_market_snapshot(
             "return_24_bars": _return(current["close"], 24),
             "range_24_high": _finite(current.tail(24)["high"].max()),
             "range_24_low": _finite(current.tail(24)["low"].min()),
+        },
+        "candle": {
+            "open": _finite(latest["open"]),
+            "high": _finite(latest["high"]),
+            "low": _finite(latest["low"]),
+            "close": _finite(latest["close"]),
+            "body_atr_ratio": _finite(body_atr_ratio),
+            "large_body": bool(math.isfinite(body_atr_ratio) and body_atr_ratio >= 1.5),
         },
         "sar": {
             "value": _finite(latest_psar["psar"]),
@@ -256,4 +282,34 @@ async def analyze_market(
         snapshot_at=snapshot["snapshot_at"],
         current_bar_closed_at=snapshot["current_bar_closed_at"],
         adx_bar_closed_at=snapshot["adx_bar_closed_at"],
+    )
+
+
+async def analyze_market_snapshot(
+    *,
+    snapshot: dict[str, Any],
+    reasons: Sequence[str],
+    provider_config: dict[str, Any],
+    proxy_url: str | None,
+) -> str:
+    """Analyze one immutable completed-bar snapshot for the background agent."""
+
+    reason_text = ", ".join(reasons)
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"This completed candle triggered: {reason_text}. Analyze the current trend, "
+                "trend strength, invalidation risks, and whether this is actionable. "
+                "This is read-only research; do not place orders or promise returns."
+            ),
+        }
+    ]
+    return await chat_complete(
+        provider_config["provider"],
+        provider_config["api_key"],
+        provider_config.get("base_url"),
+        provider_config["model_name"],
+        build_provider_messages(snapshot, messages),
+        proxy_url,
     )

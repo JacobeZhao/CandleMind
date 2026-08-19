@@ -1,38 +1,36 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { getSettings, saveSettings } from "../api/client";
+import { getEngineStatus, getSettings, saveSettings } from "../api/client";
+import { clearTicker, publishTicker } from "./MarketTickerContext";
+import { publishRealtimeEvent } from "../services/realtimeEvents";
 
 const AppContext = createContext(null);
 
 const initial = {
   connected:  false,
-  ticker:     null,
   account:    null,
   positions:  [],
   openOrders: [],
-  botStatus:  { running: false, last_signal: "NONE", last_action: "", trade_count: 0 },
+  botStatus:  null,
+  botStatusLoaded: false,
   symbol:     "BTCUSDT",
   networkTab: "test",   // "test" | "main"
 };
 
 function reducer(state, action) {
   switch (action.type) {
-    case "SET_SYMBOL":      return { ...state, symbol: action.payload, ticker: null };
-    case "SET_CONNECTED":   return { ...state, connected: action.payload };
+    case "SET_SYMBOL":      return { ...state, symbol: action.payload };
+    case "SET_CONNECTED":   return state.connected === action.payload
+      ? state
+      : { ...state, connected: action.payload };
     case "SET_NETWORK_TAB": return { ...state, networkTab: action.payload };
+    case "SET_BOT_STATUS":  return { ...state, botStatus: action.payload, botStatusLoaded: true };
     case "WS_MSG": {
       const { type, data } = action.payload;
-      if (type === "ticker") {
-        if (!data?.symbol || data.symbol !== state.symbol) return state;
-        const ticker = state.ticker?.symbol === data.symbol
-          ? { ...state.ticker, ...data }
-          : data;
-        return { ...state, ticker, connected: true };
-      }
       if (type === "account")     return { ...state, account: data };
       if (type === "positions")   return { ...state, positions: data };
       if (type === "open_orders") return { ...state, openOrders: data };
-      if (type === "bot_status")  return { ...state, botStatus: data };
+      if (type === "bot_status")  return { ...state, botStatus: data, botStatusLoaded: true };
       return state;
     }
     default: return state;
@@ -46,6 +44,7 @@ export function AppProvider({ children }) {
   const activeSymbol = useRef(initial.symbol);
   const pendingTicker = useRef(null);
   const switchingSymbol = useRef(false);
+  const botStatusRevision = useRef(0);
 
   useEffect(() => {
     activeSymbol.current = state.symbol;
@@ -56,7 +55,7 @@ export function AppProvider({ children }) {
       const data = pendingTicker.current;
       pendingTicker.current = null;
       if (!data || data.symbol !== activeSymbol.current || switchingSymbol.current) return;
-      dispatch({ type: "WS_MSG", payload: { type: "ticker", data } });
+      publishTicker(data);
     }, 500);
     return () => {
       window.clearInterval(timer);
@@ -70,11 +69,36 @@ export function AppProvider({ children }) {
       .then(({ data }) => {
         if (data.symbol && symbolRequestId.current === 0) {
           activeSymbol.current = data.symbol;
+          clearTicker();
           dispatch({ type: "SET_SYMBOL", payload: data.symbol });
         }
         dispatch({ type: "SET_NETWORK_TAB", payload: data.testnet !== false ? "test" : "main" });
       })
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let retryTimer = null;
+    const loadStatus = () => {
+      const requestedAtRevision = botStatusRevision.current;
+      getEngineStatus()
+        .then(({ data }) => {
+          if (active && botStatusRevision.current === requestedAtRevision) {
+            dispatch({ type: "SET_BOT_STATUS", payload: data });
+          }
+        })
+        .catch(() => {
+          if (active && botStatusRevision.current === requestedAtRevision) {
+            retryTimer = window.setTimeout(loadStatus, 3000);
+          }
+        });
+    };
+    loadStatus();
+    return () => {
+      active = false;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
   }, []);
 
   const handleMessage = useCallback((msg) => {
@@ -86,6 +110,11 @@ export function AppProvider({ children }) {
         : data;
       return;
     }
+    if (msg?.type === "market_agent_event" || msg?.type === "market_agent_status") {
+      publishRealtimeEvent(msg);
+      return;
+    }
+    if (msg?.type === "bot_status") botStatusRevision.current += 1;
     dispatch({ type: "WS_MSG", payload: msg });
   }, []);
   const handleConnectionChange = useCallback((connected) => {
@@ -98,6 +127,7 @@ export function AppProvider({ children }) {
     const requestId = ++symbolRequestId.current;
     pendingTicker.current = null;
     switchingSymbol.current = true;
+    clearTicker();
     const save = symbolSaveQueue.current.then(async () => {
       try {
         const { data } = await saveSettings({ symbol: sym });

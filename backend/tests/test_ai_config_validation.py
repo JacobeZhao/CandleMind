@@ -10,7 +10,6 @@ def public_dns(monkeypatch):
         "getaddrinfo",
         lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))],
     )
-    monkeypatch.delenv("CANDLEMIND_AI_BASE_URL_HOSTS", raising=False)
 
 
 def test_cloud_provider_uses_official_https_host():
@@ -24,11 +23,41 @@ def test_cloud_provider_uses_official_https_host():
 
     assert config.name == "DeepSeek"
     assert config.base_url == "https://api.deepseek.com/v1"
+    assert validation.validate_base_url("deepseek", "https://api.deepseek.com") == (
+        "https://api.deepseek.com"
+    )
 
     with pytest.raises(validation.AIConfigValidationError, match="官方"):
         validation.validate_base_url("deepseek", "https://example.com/v1")
     with pytest.raises(validation.AIConfigValidationError, match="HTTPS"):
         validation.validate_base_url("deepseek", "http://api.deepseek.com/v1")
+
+
+def test_cloud_provider_accepts_official_host_with_clash_fake_ip(monkeypatch):
+    monkeypatch.setattr(
+        validation.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("198.18.0.1", 0))],
+    )
+
+    assert validation.validate_base_url(
+        "deepseek", "https://api.deepseek.com/v1"
+    ) == "https://api.deepseek.com/v1"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.deepseek.com.evil.example/v1",
+        "https://user:password@api.deepseek.com/v1",
+        "https://api.deepseek.com:8443/v1",
+        "https://api.deepseek.com/v1?token=x",
+        "https://api.deepseek.com/v1#fragment",
+    ],
+)
+def test_cloud_provider_rejects_non_official_or_malformed_urls(url):
+    with pytest.raises(validation.AIConfigValidationError):
+        validation.validate_base_url("deepseek", url)
 
 
 @pytest.mark.parametrize(
@@ -45,13 +74,12 @@ def test_rejects_dangerous_or_unapproved_urls(url):
         validation.validate_base_url("litellm", url)
 
 
-def test_local_and_explicit_gateway_hosts_are_allowed(monkeypatch):
+def test_local_and_gateway_hosts_are_allowed():
     assert validation.validate_base_url("ollama", "http://localhost:11434/v1")
     assert validation.validate_base_url("ollama", "http://192.168.1.20:11434/v1")
     assert validation.validate_base_url("custom", "http://10.10.0.5:8000/v1")
     assert validation.validate_base_url("custom", "https://llm.example.com/v1")
 
-    monkeypatch.setenv("CANDLEMIND_AI_BASE_URL_HOSTS", "gateway.internal")
     assert validation.validate_base_url("litellm", "https://gateway.internal/v1")
 
 
@@ -66,6 +94,17 @@ def test_local_and_explicit_gateway_hosts_are_allowed(monkeypatch):
 def test_local_providers_still_reject_special_networks(url):
     with pytest.raises(validation.AIConfigValidationError):
         validation.validate_base_url("custom", url)
+
+
+def test_local_provider_rejects_hostname_resolving_to_special_network(monkeypatch):
+    monkeypatch.setattr(
+        validation.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("169.254.169.254", 0))],
+    )
+
+    with pytest.raises(validation.AIConfigValidationError):
+        validation.validate_base_url("custom", "https://gateway.example/v1")
 
 
 def test_cloud_key_and_model_are_required_but_local_keys_are_optional():

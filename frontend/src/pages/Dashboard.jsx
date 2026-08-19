@@ -1,5 +1,6 @@
 import React from "react";
 import { useApp } from "../context/AppContext";
+import { useTicker } from "../context/MarketTickerContext";
 import { useNavigate } from "react-router-dom";
 import { Wallet, TrendingUp, Activity, AlertCircle, BarChart3 } from "lucide-react";
 import clsx from "clsx";
@@ -17,30 +18,67 @@ function StatCard({ icon: Icon, label, value, sub, color = "text-white" }) {
   );
 }
 
-export default function Dashboard() {
-  const { account, positions, botStatus, ticker, connected } = useApp();
-  const navigate = useNavigate();
+const ENGINE_STATES = {
+  stopped: { label: "已停止", tone: "bg-surface text-muted" },
+  running: { label: "运行中", tone: "bg-green/10 text-green" },
+  retrying: { label: "重试中", tone: "bg-accent/10 text-accent" },
+  network_halted: { label: "网络故障", tone: "bg-red/10 text-red" },
+  halted: { label: "已安全停止", tone: "bg-red/10 text-red" },
+  recovery_required: { label: "需要恢复", tone: "bg-red/10 text-red" },
+};
 
-  if (!connected) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 gap-4">
-        <AlertCircle size={48} className="text-muted" />
-        <p className="text-muted text-lg">未连接到 Binance</p>
-        <button onClick={() => navigate("/settings")}
-          className="bg-accent text-black px-6 py-2 rounded-lg font-medium hover:bg-accent/90">
-          前往配置 API Key
-        </button>
-      </div>
-    );
-  }
+const ERROR_MESSAGES = {
+  retrying: "行情连接中断，正在自动重试。",
+  network_halted: "网络故障，策略已停止。",
+  halted: "策略已安全停止，请检查配置或运行日志。",
+  recovery_required: "策略状态需要人工恢复。",
+};
+
+function isStrategyAction(value) {
+  if (!value) return false;
+  return !/(halted|recovery|required|network|connection|error|retry|连接|网络|重试|恢复)/i.test(value);
+}
+
+export default function Dashboard() {
+  const { account, positions, botStatus, botStatusLoaded, connected } = useApp();
+  const ticker = useTicker();
+  const navigate = useNavigate();
 
   const totalBalance = parseFloat(account?.totalWalletBalance || 0);
   const unrealized   = parseFloat(account?.totalUnrealizedProfit || 0);
   const margin       = parseFloat(account?.totalMarginBalance || 0);
   const available    = parseFloat(account?.availableBalance || 0);
+  const engineState = botStatus?.engine_state || (botStatus?.running ? "running" : "stopped");
+  const stateView = ENGINE_STATES[engineState] || ENGINE_STATES.halted;
+  const direction = botStatus && Object.hasOwn(botStatus, "position_direction")
+    ? botStatus.position_direction
+    : botStatus?.last_signal;
+  const directionLabel = !botStatusLoaded
+    ? "--"
+    : direction == null ? "--"
+      : direction === "LONG" ? "多头" : direction === "SHORT" ? "空头" : "空仓";
+  const fillCount = botStatus?.paper_fill_count ?? botStatus?.trade_count;
+  const fillCountComplete = botStatus?.paper_fill_count_complete !== false;
+  const fillCountLabel = botStatusLoaded && fillCountComplete && fillCount != null && Number.isFinite(Number(fillCount))
+    ? `${fillCount} 笔`
+    : "--";
+  const lastAction = isStrategyAction(botStatus?.last_action) ? botStatus.last_action : "—";
+  const runtimeMessage = botStatusLoaded ? ERROR_MESSAGES[engineState] : null;
 
   return (
     <div className="space-y-4">
+      {!connected && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-red/20 bg-red/5 px-4 py-3 text-sm text-red">
+          <span className="flex items-center gap-2">
+            <AlertCircle size={16} /> 行情连接已断开，策略状态仍可查看。
+          </span>
+          <button onClick={() => navigate("/settings")}
+            className="text-xs font-medium text-accent hover:text-accent/80">
+            检查连接配置
+          </button>
+        </div>
+      )}
+
       {/* 账户总览 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard icon={Wallet} label="账户净值" value={`$${totalBalance.toFixed(2)}`} />
@@ -56,33 +94,33 @@ export default function Dashboard() {
         <div className="flex items-center justify-between mb-3">
           <span className="font-semibold text-sm">机器人状态</span>
           <span className={clsx("text-xs px-2 py-0.5 rounded-full",
-            botStatus.running ? "bg-green/10 text-green" : "bg-surface text-muted")}>
-            {botStatus.running ? "● 运行中" : "○ 已停止"}
+            botStatusLoaded ? stateView.tone : "bg-surface text-muted")}>
+            {botStatusLoaded ? stateView.label : "加载中"}
           </span>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <div>
-            <div className="text-muted text-xs mb-1">最新信号</div>
+            <div className="text-muted text-xs mb-1">当前持仓方向</div>
             <div className={clsx("font-medium",
-              botStatus.last_signal === "LONG"  ? "text-green" :
-              botStatus.last_signal === "SHORT" ? "text-red" : "text-muted")}>
-              {botStatus.last_signal === "NONE" ? "暂无" : botStatus.last_signal}
+              direction === "LONG"  ? "text-green" :
+              direction === "SHORT" ? "text-red" : "text-muted")}>
+              {directionLabel}
             </div>
           </div>
           <div>
-            <div className="text-muted text-xs mb-1">已成交</div>
-            <div className="text-accent font-bold">{botStatus.trade_count} 笔</div>
+            <div className="text-muted text-xs mb-1">策略纸面成交</div>
+            <div className="text-accent font-bold">{fillCountLabel}</div>
           </div>
           <div className="col-span-2">
             <div className="text-muted text-xs mb-1">上次操作</div>
             <div className="text-xs font-mono text-white truncate">
-              {botStatus.last_action || "—"}
+              {lastAction}
             </div>
           </div>
         </div>
-        {botStatus.error && (
+        {runtimeMessage && (
           <div className="mt-3 text-xs text-red bg-red/5 border border-red/20 rounded px-3 py-2">
-            错误: {botStatus.error}
+            {runtimeMessage}
           </div>
         )}
       </div>

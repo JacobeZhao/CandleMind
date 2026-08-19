@@ -34,3 +34,15 @@ def test_corrupted_or_incompatible_state_fails_closed(tmp_path) -> None:
     store.save("SOLUSDT", _payload())
     with pytest.raises(SarAdxStateError, match="config_hash"):
         store.load("SOLUSDT", config_version="sar_adx_v3", config_hash="different")
+
+
+def test_summary_load_validates_identity_without_requiring_config_hash(tmp_path) -> None:
+    store = SarAdxStateStore(tmp_path)
+    store.save("SOLUSDT", _payload())
+
+    summary = store.load_summary("SOLUSDT", config_version="sar_adx_v3")
+
+    assert summary is not None
+    assert summary["config_hash"] == "abc"
+    with pytest.raises(SarAdxStateError, match="config_version"):
+        store.load_summary("SOLUSDT", config_version="sar_adx_v4")

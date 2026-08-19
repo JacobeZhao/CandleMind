@@ -57,7 +57,7 @@ xychart-beta
 - Binance WebSocket 行情以最新值优先的方式每约 500ms 更新。
 - SAR + ADX Pyramid V3 模拟策略绑定前端当前选择的交易品种。
 - 基于 Backtrader 的离线回测，计入手续费、滑点和已观测资金费率。
-- 可配置 LiteLLM/Ollama 兼容服务，用于当前行情的 AI 对话分析。
+- 可配置 LiteLLM/Ollama 兼容服务，用于人工问答和基于已收盘 K 线的持续 AI 行情分析。
 - 使用校验和与冻结清单验证 K 线及衍生品数据来源。
 
 ## 强化学习研究
@@ -134,7 +134,8 @@ Vite 默认运行在 <http://localhost:5173>，并将 API 请求代理到后端�
 
 1. 从 `.env.example` 创建本地 `.env`，不要提交任何密钥或敏感配置。
 2. Binance 凭据应通过设置页面录入，并与 `trader.db`、`secret.key` 一起备份。
-3. AI 网关只允许本地主机和 `CANDLEMIND_AI_BASE_URL_HOSTS` 中显式授权的主机。
+3. 云端 AI 仅允许内置的官方 HTTPS 主机；本地兼容 Provider 可使用回环或
+   RFC1918 地址，具体边界见 [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md)。
 4. 不要提交 `.env`、数据库、密钥、下载行情、回测报告或 paper 运行状态。
 5. 如未来接入真实交易，必须单独完成 testnet、权限隔离和风控验收。
 

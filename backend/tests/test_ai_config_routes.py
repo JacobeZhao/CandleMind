@@ -157,6 +157,37 @@ def test_provider_change_does_not_reuse_existing_secret(monkeypatch):
         assert unchanged.api_key_enc == "enc:saved-secret"
 
 
+def test_provider_change_to_local_clears_existing_secret(monkeypatch):
+    client, sessions = _client(monkeypatch)
+    with sessions() as session:
+        config = database.AIConfig(
+            name="Saved",
+            provider="openai",
+            api_key_enc="enc:saved-secret",
+            model_name="gpt-4o-mini",
+        )
+        session.add(config)
+        session.commit()
+        config_id = config.id
+
+    response = client.put(
+        f"/api/ai/{config_id}",
+        json={
+            "name": "Local gateway",
+            "provider": "custom",
+            "api_key": "",
+            "base_url": "http://192.168.1.20:8000/v1",
+            "model_name": "local-model",
+        },
+    )
+
+    assert response.status_code == 200
+    with sessions() as session:
+        updated = session.get(database.AIConfig, config_id)
+        assert updated.provider == "custom"
+        assert updated.api_key_enc is None
+
+
 def test_missing_activate_does_not_clear_current_active_config(monkeypatch):
     client, sessions = _client(monkeypatch)
     with sessions() as session:
@@ -219,3 +250,32 @@ def test_invalid_draft_is_rejected_before_provider_call(monkeypatch):
     )
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "invalid_config"
+
+
+def test_failed_draft_test_does_not_persist_or_expose_key(monkeypatch):
+    client, sessions = _client(monkeypatch)
+
+    async def rejected(config, proxy):
+        raise AIProviderError("provider_auth_failed", "API Key 无效或无权访问该服务")
+
+    monkeypatch.setattr(ai_config, "test_connection", rejected)
+    response = client.post(
+        "/api/ai/test-draft",
+        json={
+            "name": "Unsaved DeepSeek",
+            "provider": "deepseek",
+            "api_key": "draft-top-secret",
+            "base_url": "https://api.deepseek.com/v1",
+            "model_name": "deepseek-chat",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "provider_auth_failed",
+        "message": "API Key 无效或无权访问该服务",
+        "retryable": False,
+    }
+    assert "draft-top-secret" not in response.text
+    with sessions() as session:
+        assert session.query(database.AIConfig).count() == 0

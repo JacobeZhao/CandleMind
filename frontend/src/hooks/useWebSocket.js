@@ -18,7 +18,10 @@ export function useWebSocket(onMessage, onConnectionChange) {
       const socket = new WebSocket(url);
       ws.current = socket;
 
-      socket.onopen = () => console.log("WS connected");
+      socket.onopen = () => {
+        onConnectionChangeRef.current?.(true);
+        console.log("WS connected");
+      };
       socket.onmessage = (event) => {
         if (!active) return;
         try {

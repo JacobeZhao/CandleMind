@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -12,7 +11,6 @@ from .ai_provider import PROVIDER_DEFAULTS
 
 
 LOCAL_PROVIDERS = {"custom", "litellm", "ollama"}
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "litellm", "ollama"}
 PRIVATE_NETWORKS = tuple(
     ipaddress.ip_network(network)
     for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
@@ -38,14 +36,6 @@ class ValidatedAIConfig:
             "base_url": self.base_url,
             "model_name": self.model_name,
         }
-
-
-def _configured_hosts() -> set[str]:
-    return {
-        host.strip().lower().rstrip(".")
-        for host in os.getenv("CANDLEMIND_AI_BASE_URL_HOSTS", "").split(",")
-        if host.strip()
-    }
 
 
 def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -102,9 +92,8 @@ def validate_base_url(provider: str, value: str | None) -> str | None:
         raise AIConfigValidationError("Base URL 端口无效") from exc
 
     host = parsed.hostname.lower().rstrip(".")
-    configured_hosts = _configured_hosts()
-    resolved_ips = _resolved_ips(host)
     if provider in LOCAL_PROVIDERS:
+        resolved_ips = _resolved_ips(host)
         if _is_forbidden_special_ip(host) or any(
             _is_forbidden_special_ip(address) for address in resolved_ips
         ):
@@ -115,13 +104,8 @@ def validate_base_url(provider: str, value: str | None) -> str | None:
             raise AIConfigValidationError("云端 Provider 必须使用官方 API 主机")
         if parsed.scheme != "https":
             raise AIConfigValidationError("云端 Provider 的 Base URL 必须使用 HTTPS")
-
-    explicitly_allowed = host in LOCAL_HOSTS or host in configured_hosts
-    if provider not in LOCAL_PROVIDERS and not explicitly_allowed and (
-        (_parse_ip(host) is not None and not _parse_ip(host).is_global)
-        or any(not _parse_ip(address).is_global for address in resolved_ips)
-    ):
-        raise AIConfigValidationError("Base URL 不能指向未授权的私有或本地地址")
+        if parsed.port not in {None, 443}:
+            raise AIConfigValidationError("云端 Provider 的 Base URL 只能使用 HTTPS 标准端口")
 
     # Strip trailing slash to make persisted values and comparisons deterministic.
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))

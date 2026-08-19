@@ -8,6 +8,7 @@ from requests.exceptions import Timeout as RequestsTimeout
 
 from ..services.bot_engine import bot_engine
 from ..services.sar_adx_runtime import SarAdxRuntimeError
+from ..services.sar_adx_state_store import SarAdxStateError
 from ..state import app_state
 
 
@@ -29,6 +30,7 @@ class EngineStartRequest(BaseModel):
 
 @router.get("/engine/status")
 def engine_status():
+    bot_engine.hydrate_persisted_status(app_state.symbol)
     return bot_engine.status
 
 
@@ -50,7 +52,7 @@ async def start_engine(body: EngineStartRequest):
     }
     try:
         await bot_engine.start(app_state.client, cfg)
-    except SarAdxRuntimeError as exc:
+    except (SarAdxRuntimeError, SarAdxStateError) as exc:
         raise HTTPException(409, f"Paper strategy state requires recovery: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

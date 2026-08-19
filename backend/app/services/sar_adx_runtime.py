@@ -230,6 +230,12 @@ class SarAdxPaperRuntime:
             "paper_cash": self.broker.cash,
             "paper_equity": self.broker.equity(mark_price),
             "unrealized_pnl": self.broker.equity(mark_price) - self.broker.cash,
+            "paper_fill_count": (
+                self.broker.paper_fill_count
+                if self.broker.paper_fill_count_complete
+                else None
+            ),
+            "paper_fill_count_complete": self.broker.paper_fill_count_complete,
             "recovery_status": self.recovery_status,
         }
 

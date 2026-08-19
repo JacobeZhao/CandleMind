@@ -1,0 +1,132 @@
+import React from "react";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import Dashboard from "./Dashboard";
+
+let appState;
+let tickerState;
+
+vi.mock("../context/AppContext", () => ({
+  useApp: () => appState,
+}));
+
+vi.mock("../context/MarketTickerContext", () => ({
+  useTicker: () => tickerState,
+}));
+
+vi.mock("react-router-dom", () => ({
+  useNavigate: () => vi.fn(),
+}));
+
+function renderDashboard(botStatus, botStatusLoaded = true, ticker = null) {
+  tickerState = ticker;
+  appState = {
+    account: {},
+    positions: [],
+    connected: true,
+    botStatus,
+    botStatusLoaded,
+  };
+  return render(<Dashboard />);
+}
+
+describe("Dashboard strategy status", () => {
+  afterEach(cleanup);
+
+  it("does not invent a direction or fill count before status loads", () => {
+    renderDashboard(null, false);
+
+    expect(screen.getByText("加载中")).toBeTruthy();
+    expect(screen.getAllByText("--")).toHaveLength(2);
+  });
+
+  it("displays ticker data from the external ticker store", () => {
+    renderDashboard(null, false, {
+      symbol: "SOLUSDT",
+      price: "150",
+      change: "2.5",
+      high: "155",
+      low: "145",
+      volume: "1000000",
+    });
+
+    expect(screen.getByText(/SOLUSDT/)).toBeTruthy();
+    expect(screen.getByText("$150.00")).toBeTruthy();
+  });
+
+  it("shows the current paper position and persisted fill count", () => {
+    renderDashboard({
+      engine_state: "running",
+      running: true,
+      position_direction: "NONE",
+      paper_fill_count: 3,
+      paper_fill_count_complete: true,
+      last_action: "opened LONG",
+    });
+
+    expect(screen.getByText("当前持仓方向")).toBeTruthy();
+    expect(screen.getByText("空仓")).toBeTruthy();
+    expect(screen.getByText("策略纸面成交")).toBeTruthy();
+    expect(screen.getByText("3 笔")).toBeTruthy();
+    expect(screen.getByText("opened LONG")).toBeTruthy();
+  });
+
+  it("keeps network failures out of the last strategy action", () => {
+    renderDashboard({
+      engine_state: "retrying",
+      running: true,
+      position_direction: "LONG",
+      paper_fill_count: null,
+      paper_fill_count_complete: false,
+      last_action: "[SAR+ADX paper] halted: recovery required",
+      error: "RemoteDisconnected secret proxy detail",
+    });
+
+    expect(screen.getByText("重试中")).toBeTruthy();
+    expect(screen.getByText("多头")).toBeTruthy();
+    expect(screen.getByText("行情连接中断，正在自动重试。")).toBeTruthy();
+    expect(screen.queryByText(/RemoteDisconnected/)).toBeNull();
+    expect(screen.queryByText(/recovery required/)).toBeNull();
+  });
+
+  it("keeps strategy failure status visible when market data is disconnected", () => {
+    appState = {
+      account: {},
+      positions: [],
+      connected: false,
+      botStatusLoaded: true,
+      botStatus: {
+        engine_state: "network_halted",
+        running: false,
+        position_direction: "NONE",
+        paper_fill_count: 0,
+        paper_fill_count_complete: true,
+      },
+    };
+
+    render(<Dashboard />);
+
+    expect(screen.getByText("行情连接已断开，策略状态仍可查看。")).toBeTruthy();
+    expect(screen.getByText("网络故障")).toBeTruthy();
+    expect(screen.getByText("空仓")).toBeTruthy();
+  });
+
+  it.each([
+    ["network_halted", "网络故障", "网络故障，策略已停止。"],
+    ["halted", "已安全停止", "策略已安全停止，请检查配置或运行日志。"],
+    ["recovery_required", "需要恢复", "策略状态需要人工恢复。"],
+  ])("renders %s without exposing the raw error", (engineState, stateLabel, message) => {
+    renderDashboard({
+      engine_state: engineState,
+      running: false,
+      position_direction: "SHORT",
+      paper_fill_count: 1,
+      paper_fill_count_complete: true,
+      error: "sensitive raw exception",
+    });
+
+    expect(screen.getByText(stateLabel)).toBeTruthy();
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.queryByText(/sensitive raw exception/)).toBeNull();
+  });
+});

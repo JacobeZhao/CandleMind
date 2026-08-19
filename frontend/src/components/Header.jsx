@@ -106,8 +106,13 @@ function NetworkTabs() {
 }
 
 export default function Header() {
-  const { botStatus, connected, symbol, setSymbol } = useApp();
+  const { botStatus, botStatusLoaded, connected, symbol, setSymbol } = useApp();
   const [symbols, setSymbols] = useState([]);
+  const direction = botStatus?.position_direction ?? botStatus?.last_signal;
+  const fillCount = botStatus?.paper_fill_count ?? botStatus?.trade_count;
+  const fillCountComplete = botStatus?.paper_fill_count_complete !== false;
+  const engineState = botStatus?.engine_state || (botStatus?.running ? "running" : "stopped");
+  const engineLabel = engineState === "retrying" ? "策略重试中" : "策略运行中";
 
   useEffect(() => {
     getSymbols().then(({ data }) => setSymbols(data)).catch(() => {});
@@ -122,26 +127,26 @@ export default function Header() {
           <NetworkTabs />
         </div>
 
-        {botStatus?.last_signal && botStatus.last_signal !== "NONE" && (
+        {botStatusLoaded && direction && direction !== "NONE" && (
           <span
             className={clsx(
               "hidden items-center gap-1 rounded border px-2 py-1 text-xs md:flex",
-              botStatus.last_signal === "LONG"
+              direction === "LONG"
                 ? "border-green/30 bg-green/5 text-green"
                 : "border-red/30 bg-red/5 text-red",
             )}
           >
             <Activity size={12} />
-            {botStatus.last_signal === "LONG" ? "多头信号" : "空头信号"}
+            {direction === "LONG" ? "多头持仓" : "空头持仓"}
           </span>
         )}
 
         {botStatus?.running && (
           <span className="hidden items-center gap-1.5 text-xs text-accent lg:flex">
             <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
-            策略运行中
-            {botStatus.trade_count > 0 && (
-              <span className="ml-1 text-muted">{botStatus.trade_count} 笔</span>
+            {engineLabel}
+            {fillCountComplete && Number(fillCount) > 0 && (
+              <span className="ml-1 text-muted">纸面成交 {fillCount} 笔</span>
             )}
           </span>
         )}

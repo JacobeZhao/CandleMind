@@ -496,9 +496,13 @@ def test_loop_failure_is_terminal_and_engine_can_restart(monkeypatch):
         "_cycle",
         AsyncMock(side_effect=(
             bot_engine_module._CycleResult(100.0, "NONE", "warm one", 0),
-            RuntimeError("loop failed"),
             bot_engine_module._CycleResult(101.0, "NONE", "warm two", 0),
         )),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_cycle_with_retry",
+        AsyncMock(side_effect=RuntimeError("loop failed")),
     )
 
     async def scenario():
@@ -506,10 +510,31 @@ def test_loop_failure_is_terminal_and_engine_can_restart(monkeypatch):
         first_task = engine._task
         await first_task
         assert engine.running is False
-        assert engine.error_msg == "loop failed"
+        assert engine.engine_state == "halted"
+        assert engine.error_msg == "Paper strategy stopped unexpectedly"
+        assert "loop failed" not in engine.error_msg
         await engine.start(client, _engine_config())
         assert engine.running is True
         assert engine._task is not first_task
+        await engine.stop()
+
+    asyncio.run(scenario())
+
+
+def test_new_runtime_does_not_reuse_previous_runtime_action(monkeypatch):
+    engine = BotEngine()
+    client = _ReadOnlyClient()
+    _install_runtime(monkeypatch, object())
+    engine.last_action = "[SAR+ADX paper] OPEN LONG 1 @ 100"
+    monkeypatch.setattr(
+        engine,
+        "_cycle",
+        AsyncMock(return_value=bot_engine_module._CycleResult(101.0, "NONE", "", 0)),
+    )
+
+    async def scenario():
+        await engine.start(client, _engine_config())
+        assert engine.last_action == ""
         await engine.stop()
 
     asyncio.run(scenario())

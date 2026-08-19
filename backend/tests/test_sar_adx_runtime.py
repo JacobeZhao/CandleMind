@@ -153,6 +153,32 @@ def test_runtime_recovers_persisted_progress(tmp_path) -> None:
     assert recovered.broker.to_dict() == runtime.broker.to_dict()
 
 
+def test_runtime_status_reports_persisted_paper_fill_count(tmp_path) -> None:
+    store = SarAdxStateStore(tmp_path)
+    runtime = SarAdxPaperRuntime("SOLUSDT", state_store=store)
+    runtime.broker.open(1, 100.0, "d1", runtime.config)
+    runtime._save()
+
+    recovered = SarAdxPaperRuntime("SOLUSDT", state_store=store)
+    status = recovered.status(101.0)
+
+    assert status["paper_fill_count"] == 1
+    assert status["paper_fill_count_complete"] is True
+
+
+def test_runtime_status_does_not_report_incomplete_legacy_count_as_zero(tmp_path) -> None:
+    runtime = SarAdxPaperRuntime(
+        "SOLUSDT",
+        state_store=SarAdxStateStore(tmp_path),
+    )
+    runtime.broker.paper_fill_count_complete = False
+
+    status = runtime.status(101.0)
+
+    assert status["paper_fill_count"] is None
+    assert status["paper_fill_count_complete"] is False
+
+
 def test_runtime_rejects_bar_gaps(tmp_path) -> None:
     bars = _bars().drop(index=100).reset_index(drop=True)
     runtime = SarAdxPaperRuntime("SOLUSDT", state_store=SarAdxStateStore(tmp_path))

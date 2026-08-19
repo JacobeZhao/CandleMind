@@ -4,11 +4,16 @@ OpenAI-compatible providers (deepseek/qwen/kimi/glm/minimax/gemini/openrouter/cu
 all use the openai SDK with a custom base_url.
 Claude uses the anthropic SDK separately.
 """
+import asyncio
 from typing import Optional
 
 from loguru import logger
 
+from backend.app.proxy import rewrite_proxy_for_runtime
+
 AI_REQUEST_TIMEOUT_SECONDS = 30
+AI_PROVIDER_CONCURRENCY = 2
+_provider_slots = asyncio.Semaphore(AI_PROVIDER_CONCURRENCY)
 
 
 class AIProviderError(RuntimeError):
@@ -37,7 +42,7 @@ def _classify_provider_error(exc: Exception) -> AIProviderError:
 
 PROVIDER_DEFAULTS = {
     "openai":     {"base_url": "https://api.openai.com/v1",                               "model": "gpt-4o-mini"},
-    "deepseek":   {"base_url": "https://api.deepseek.com/v1",                             "model": "deepseek-v4-flash"},
+    "deepseek":   {"base_url": "https://api.deepseek.com",                                "model": "deepseek-v4-flash"},
     "qwen":       {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",       "model": "qwen-turbo"},
     "kimi":       {"base_url": "https://api.moonshot.cn/v1",                              "model": "moonshot-v1-8k"},
     "glm":        {"base_url": "https://open.bigmodel.cn/api/paas/v4",                    "model": "glm-4-flash"},
@@ -75,9 +80,15 @@ async def chat_complete(
     proxy_url: Optional[str] = None,
 ) -> str:
     try:
-        if provider == "claude":
-            return await _claude_complete(api_key, model, messages, proxy_url)
-        return await _openai_compat_complete(api_key, base_url, model, messages, proxy_url)
+        async with _provider_slots:
+            runtime_proxy_url = (
+                rewrite_proxy_for_runtime(proxy_url) if proxy_url else None
+            )
+            if provider == "claude":
+                return await _claude_complete(api_key, model, messages, runtime_proxy_url)
+            return await _openai_compat_complete(
+                api_key, base_url, model, messages, runtime_proxy_url
+            )
     except ImportError as exc:
         logger.error("AI provider dependency missing: provider={} dependency={}", provider, exc.name)
         raise AIProviderError(

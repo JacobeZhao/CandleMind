@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.app import proxy
 from backend.app.services import ai_provider
 
 
@@ -26,6 +27,12 @@ def test_provider_error_classification(status, code, retryable):
     error = ai_provider._classify_provider_error(StatusError(status))
     assert error.code == code
     assert error.retryable is retryable
+
+
+def test_deepseek_uses_official_root_base_url():
+    assert ai_provider.PROVIDER_DEFAULTS["deepseek"]["base_url"] == (
+        "https://api.deepseek.com"
+    )
 
 
 def test_missing_dependency_has_stable_error(monkeypatch):
@@ -108,20 +115,30 @@ def test_chat_complete_redacts_provider_error(monkeypatch):
     assert "secret" not in caught.value.message
 
 
-def test_claude_receives_configured_proxy(monkeypatch):
+@pytest.mark.parametrize(
+    ("provider", "completion_name"),
+    [
+        ("openai", "_openai_compat_complete"),
+        ("claude", "_claude_complete"),
+    ],
+)
+def test_chat_complete_rewrites_loopback_proxy_inside_docker(
+    monkeypatch, provider, completion_name
+):
     captured = {}
 
-    async def complete(api_key, model, messages, proxy_url):
-        captured["proxy_url"] = proxy_url
+    async def complete(*args):
+        captured["proxy_url"] = args[-1]
         return "ok"
 
-    monkeypatch.setattr(ai_provider, "_claude_complete", complete)
+    monkeypatch.setenv("DOCKER_CONTAINER", "1")
+    monkeypatch.setattr(ai_provider, completion_name, complete)
 
     result = asyncio.run(
         ai_provider.chat_complete(
-            "claude",
+            provider,
             "key",
-            None,
+            "https://api.example.com" if provider != "claude" else None,
             "model",
             [{"role": "user", "content": "test"}],
             "socks5://127.0.0.1:1080",
@@ -129,4 +146,39 @@ def test_claude_receives_configured_proxy(monkeypatch):
     )
 
     assert result == "ok"
-    assert captured["proxy_url"] == "socks5://127.0.0.1:1080"
+    assert captured["proxy_url"] == "socks5://host.docker.internal:1080"
+
+
+@pytest.mark.parametrize(
+    ("provider", "completion_name"),
+    [
+        ("openai", "_openai_compat_complete"),
+        ("claude", "_claude_complete"),
+    ],
+)
+def test_chat_complete_keeps_proxy_unchanged_outside_docker(
+    monkeypatch, provider, completion_name
+):
+    captured = {}
+
+    async def complete(*args):
+        captured["proxy_url"] = args[-1]
+        return "ok"
+
+    monkeypatch.setattr(proxy.os.path, "exists", lambda path: False)
+    monkeypatch.delenv("DOCKER_CONTAINER", raising=False)
+    monkeypatch.setattr(ai_provider, completion_name, complete)
+
+    result = asyncio.run(
+        ai_provider.chat_complete(
+            provider,
+            "key",
+            "https://api.example.com" if provider != "claude" else None,
+            "model",
+            [],
+            "http://localhost:7897",
+        )
+    )
+
+    assert result == "ok"
+    assert captured["proxy_url"] == "http://localhost:7897"

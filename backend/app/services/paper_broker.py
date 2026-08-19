@@ -46,7 +46,12 @@ class PaperBroker:
         self.funding_pnl = 0.0
         self.position = PaperPosition()
         self.processed_decisions: set[str] = set()
+        self.paper_fill_count_complete = True
         self.processed_funding: set[str] = set()
+
+    @property
+    def paper_fill_count(self) -> int:
+        return len(self.processed_decisions)
 
     def snapshot(self) -> PositionSnapshot:
         return PositionSnapshot(
@@ -124,6 +129,7 @@ class PaperBroker:
             "funding_pnl": self.funding_pnl,
             "position": asdict(self.position),
             "processed_decisions": sorted(self.processed_decisions),
+            "paper_fill_count_complete": self.paper_fill_count_complete,
             "processed_funding": sorted(self.processed_funding),
         }
 
@@ -140,7 +146,15 @@ class PaperBroker:
             layer_quantity=float(position["layer_quantity"]),
             entries=[dict(item) for item in position["entries"]],
         )
+        decisions_present = "processed_decisions" in payload
         broker.processed_decisions = set(payload.get("processed_decisions", []))
+        fill_count_complete = payload.get(
+            "paper_fill_count_complete",
+            decisions_present,
+        )
+        if not isinstance(fill_count_complete, bool):
+            raise ValueError("invalid paper fill count completeness")
+        broker.paper_fill_count_complete = fill_count_complete
         broker.processed_funding = set(payload.get("processed_funding", []))
         broker._validate()
         return broker

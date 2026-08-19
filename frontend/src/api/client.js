@@ -39,3 +39,10 @@ export const activateAIConfig = (id) => api.post(`/ai/${id}/activate`);
 export const testAIConfig = (id) => apiAI.post(`/ai/${id}/test`);
 export const testAIConfigDraft = (data) => apiAI.post("/ai/test-draft", data);
 export const marketChat = (data, signal) => apiAI.post("/ai/market-chat", data, { signal });
+export const getMarketAgentStatus = () => api.get("/ai/market-agent/status");
+export const getMarketAgentEvents = (afterSequence = 0, limit = 100) =>
+  api.get("/ai/market-agent/events", { params: { after_sequence: afterSequence, limit } });
+export const startMarketAgent = (data) => api.post("/ai/market-agent/start", data);
+export const stopMarketAgent = () => api.post("/ai/market-agent/stop");
+export const sendMarketAgentMessage = (data, signal) =>
+  apiAI.post("/ai/market-agent/messages", data, { signal });

@@ -244,6 +244,7 @@ def update_config(cfg_id: int, body: AIConfigIn, db: Session = Depends(get_db)):
     config = db.query(AIConfig).filter(AIConfig.id == cfg_id).first()
     if not config:
         _error("config_not_found", "AI 配置不存在", status=404)
+    provider_changed = config.provider.strip().lower() != body.provider.strip().lower()
     validated = _validate(body, config)
     config.name = validated.name
     config.provider = validated.provider
@@ -251,6 +252,8 @@ def update_config(cfg_id: int, body: AIConfigIn, db: Session = Depends(get_db)):
     config.model_name = validated.model_name
     if (body.api_key or "").strip() not in {"", "_keep_"}:
         config.api_key_enc = encrypt(validated.api_key)
+    elif provider_changed:
+        config.api_key_enc = None
     db.commit()
     return {"ok": True}
 

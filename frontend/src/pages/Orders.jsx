@@ -11,7 +11,16 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 
-const TABS = ["挂单", "成交记录", "历史订单"];
+const TABS = ["挂单", "交易所成交记录", "历史订单"];
+const ENGINE_STATE_VIEWS = {
+  loading: { label: "加载中", tone: "text-muted" },
+  stopped: { label: "未运行", tone: "text-muted" },
+  running: { label: "运行中", tone: "text-green" },
+  retrying: { label: "网络重试中", tone: "text-accent" },
+  network_halted: { label: "网络故障", tone: "text-red" },
+  halted: { label: "已安全停止", tone: "text-red" },
+  recovery_required: { label: "需要恢复", tone: "text-red" },
+};
 
 // ── 订单表格辅助 ──────────────────────────────────────────────────────────────
 
@@ -41,7 +50,7 @@ function StatusBadge({ status }) {
 
 function EnginePanel() {
   const { networkTab, symbol } = useApp();
-  const [engine, setEngine] = useState({ running: false, circuit_open: false });
+  const [engine, setEngine] = useState({ running: false, circuit_open: false, engine_state: "loading" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -82,22 +91,28 @@ function EnginePanel() {
 
   const isTestnet = networkTab === "test";
   const boundSymbol = engine.symbol || engine.strategy_symbol || symbol;
+  const fillCount = engine.paper_fill_count ?? engine.trade_count;
+  const fillCountComplete = engine.paper_fill_count_complete !== false;
+  const fillCountLabel = fillCountComplete && fillCount != null && Number.isFinite(Number(fillCount)) ? `${fillCount} 笔` : "--";
+  const strategyAction = engine.last_action
+    && !/(halted|recovery|required|network|connection|error|retry|连接|网络|重试|恢复)/i.test(engine.last_action)
+    ? engine.last_action
+    : null;
+  const engineState = engine.engine_state || (engine.running ? "running" : "stopped");
+  const engineView = ENGINE_STATE_VIEWS[engineState] || ENGINE_STATE_VIEWS.halted;
 
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden mb-4">
 
       {/* ── 顶栏 ─────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
           <Zap size={15} className={engine.running ? "text-green" : "text-muted"} />
-          <div className="flex items-center gap-2">
-            {engine.running ? (
-              <span className="flex items-center gap-1.5 text-green text-xs font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-green animate-pulse" /> 运行中
-              </span>
-            ) : (
-              <span className="text-muted text-xs">未运行</span>
-            )}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className={clsx("flex items-center gap-1.5 text-xs font-medium", engineView.tone)}>
+              {engine.running && <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />}
+              {engineView.label}
+            </span>
             <span className={clsx("text-xs px-1.5 py-0.5 rounded border font-mono",
               isTestnet
                 ? "border-accent/40 text-accent bg-accent/5"
@@ -144,12 +159,12 @@ function EnginePanel() {
           熔断器触发：日内回撤超限，新入场已暂停。明日 UTC 0 点自动重置。
         </div>
       )}
-      {engine.running && engine.last_action && (
+      {(strategyAction || fillCount !== undefined || engine.paper_fill_count_complete === false) && (
         <div className="px-4 py-2 bg-surface/40 border-b border-border/40 text-xs text-muted truncate">
-          {engine.last_action}
-          {engine.trade_count > 0 && (
-            <span className="ml-3 text-accent">共成交 {engine.trade_count} 次</span>
-          )}
+          {strategyAction && <span>上次操作：{strategyAction}</span>}
+          <span className={clsx("text-accent", strategyAction && "ml-3")}>
+            策略纸面成交：{fillCountLabel}
+          </span>
         </div>
       )}
 
@@ -247,7 +262,7 @@ export default function Orders() {
             </table>
           )}
 
-          {/* 成交记录 */}
+          {/* 交易所成交记录 */}
           {tab === 1 && (
             <table className="w-full text-xs">
               <thead>
@@ -259,7 +274,7 @@ export default function Orders() {
               </thead>
               <tbody>
                 {trades.length === 0 ? (
-                  <tr><td colSpan={7} className="text-center text-muted py-10">暂无成交记录</td></tr>
+                  <tr><td colSpan={7} className="text-center text-muted py-10">暂无交易所成交记录</td></tr>
                 ) : trades.map((t, i) => {
                   const pnl = parseFloat(t.realizedPnl || 0);
                   return (

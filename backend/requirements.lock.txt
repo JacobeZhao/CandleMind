@@ -15,6 +15,8 @@ aiohttp-socks==0.12.0
     # via -r requirements.txt
 aiosignal==1.4.0
     # via aiohttp
+aiosqlite==0.22.1
+    # via langgraph-checkpoint-sqlite
 annotated-doc==0.0.5
     # via typer
 annotated-types==0.8.0
@@ -25,6 +27,7 @@ anyio==4.14.2
     # via
     #   anthropic
     #   httpx
+    #   langsmith
     #   openai
     #   starlette
     #   watchfiles
@@ -59,6 +62,7 @@ dateparser==1.4.2
 distro==1.9.0
     # via
     #   anthropic
+    #   langsmith
     #   openai
 dnspython==2.8.0
     # via email-validator
@@ -89,6 +93,9 @@ httpx==0.28.1
     #   -r requirements.txt
     #   anthropic
     #   fastapi
+    #   langchain-core
+    #   langgraph-sdk
+    #   langsmith
     #   openai
 idna==3.18
     # via
@@ -103,6 +110,36 @@ jiter==0.16.0
     # via
     #   anthropic
     #   openai
+jsonpatch==1.33
+    # via langchain-core
+jsonpointer==3.1.1
+    # via jsonpatch
+langchain-core==1.5.6
+    # via
+    #   langgraph
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+    #   langgraph-sdk
+langchain-protocol==0.0.18
+    # via
+    #   langchain-core
+    #   langgraph-sdk
+langgraph==1.2.11
+    # via -r requirements.txt
+langgraph-checkpoint==4.2.0
+    # via
+    #   -r requirements.txt
+    #   langgraph
+    #   langgraph-checkpoint-sqlite
+    #   langgraph-prebuilt
+langgraph-checkpoint-sqlite==3.1.1
+    # via -r requirements.txt
+langgraph-prebuilt==1.1.0
+    # via langgraph
+langgraph-sdk==0.4.2
+    # via langgraph
+langsmith==0.11.0
+    # via langchain-core
 loguru==0.7.2
     # via -r requirements.txt
 markdown-it-py==4.2.0
@@ -122,7 +159,16 @@ numpy==2.5.2
 openai==2.54.0
     # via -r requirements.txt
 orjson==3.12.0
-    # via fastapi
+    # via
+    #   fastapi
+    #   langgraph-sdk
+    #   langsmith
+ormsgpack==1.12.2
+    # via langgraph-checkpoint
+packaging==26.3
+    # via
+    #   langchain-core
+    #   langsmith
 pandas==2.3.3
     # via -r requirements.txt
 propcache==0.5.2
@@ -140,6 +186,9 @@ pydantic==2.13.4
     #   -r requirements.txt
     #   anthropic
     #   fastapi
+    #   langchain-core
+    #   langgraph
+    #   langsmith
     #   openai
 pydantic-core==2.46.4
     # via pydantic
@@ -166,13 +215,19 @@ pytz==2026.3.post1
     #   dateparser
     #   pandas
 pyyaml==6.0.3
-    # via uvicorn
+    # via
+    #   langchain-core
+    #   uvicorn
 regex==2026.7.19
     # via dateparser
 requests==2.34.2
     # via
     #   -r requirements.txt
+    #   langsmith
     #   python-binance
+    #   requests-toolbelt
+requests-toolbelt==1.0.0
+    # via langsmith
 rich==15.0.0
     # via
     #   rich-toolkit
@@ -188,13 +243,18 @@ six==1.17.0
 sniffio==1.3.1
     # via
     #   anthropic
+    #   langsmith
     #   openai
 socksio==1.0.0
     # via httpx
 sqlalchemy==2.0.30
     # via -r requirements.txt
+sqlite-vec==0.1.9
+    # via langgraph-checkpoint-sqlite
 starlette==0.37.2
     # via fastapi
+tenacity==9.1.4
+    # via langchain-core
 tqdm==4.70.0
     # via openai
 typer==0.27.1
@@ -206,6 +266,9 @@ typing-extensions==4.16.0
     #   anthropic
     #   anyio
     #   fastapi
+    #   langchain-core
+    #   langchain-protocol
+    #   langsmith
     #   openai
     #   pydantic
     #   pydantic-core
@@ -226,6 +289,10 @@ ujson==5.13.0
     #   python-binance
 urllib3==2.7.0
     # via requests
+uuid-utils==0.17.0
+    # via
+    #   langchain-core
+    #   langsmith
 uvicorn==0.30.1
     # via
     #   -r requirements.txt
@@ -233,11 +300,19 @@ uvicorn==0.30.1
     #   fastapi-cli
 watchfiles==1.2.0
     # via uvicorn
-websockets==17.0.1
+websockets==15.0.1
     # via
+    #   langgraph-sdk
+    #   langsmith
     #   python-binance
     #   uvicorn
 win32-setctime==1.2.0
     # via loguru
+xxhash==4.0.1
+    # via
+    #   langgraph
+    #   langsmith
 yarl==1.24.5
     # via aiohttp
+zstandard==0.25.0
+    # via langsmith

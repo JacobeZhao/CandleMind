@@ -37,7 +37,13 @@ vi.mock("../api/client", () => ({
 describe("Orders", () => {
   beforeEach(() => {
     getEngineStatus.mockResolvedValue({
-      data: { running: false, circuit_open: false },
+      data: {
+        running: false,
+        engine_state: "stopped",
+        circuit_open: false,
+        paper_fill_count: 0,
+        paper_fill_count_complete: true,
+      },
     });
     startEngine.mockResolvedValue({ data: { message: "已启动" } });
   });
@@ -70,5 +76,43 @@ describe("Orders", () => {
         initial_capital: 10000,
       });
     });
+  });
+
+  it("distinguishes paper fills from exchange trade records", async () => {
+    render(<Orders />);
+
+    await waitFor(() => expect(screen.getByText("策略纸面成交：0 笔")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "交易所成交记录" }));
+    expect(await screen.findByText("暂无交易所成交记录")).toBeTruthy();
+  });
+
+  it("shows an unknown paper fill count as unavailable", async () => {
+    getEngineStatus.mockResolvedValue({
+      data: {
+        running: false,
+        engine_state: "stopped",
+        paper_fill_count: null,
+        paper_fill_count_complete: false,
+      },
+    });
+
+    render(<Orders />);
+    await waitFor(() => expect(screen.getByText("策略纸面成交：--")).toBeTruthy());
+  });
+
+  it("shows recovery-required as a distinct engine state", async () => {
+    getEngineStatus.mockResolvedValue({
+      data: {
+        running: false,
+        engine_state: "recovery_required",
+        paper_fill_count: 2,
+        paper_fill_count_complete: true,
+      },
+    });
+
+    render(<Orders />);
+
+    await waitFor(() => expect(screen.getByText("需要恢复")).toBeTruthy());
+    expect(screen.queryByText("未运行")).toBeNull();
   });
 });

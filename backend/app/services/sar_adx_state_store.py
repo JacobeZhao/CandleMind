@@ -30,6 +30,16 @@ class SarAdxStateStore:
         return self.root / f"sar_adx_paper_{symbol}.json"
 
     def load(self, symbol: str, *, config_version: str, config_hash: str) -> dict | None:
+        payload = self.load_summary(symbol, config_version=config_version)
+        if payload is None:
+            return None
+        if payload.get("config_hash") != config_hash:
+            raise SarAdxStateError("paper state config_hash is incompatible")
+        return payload
+
+    def load_summary(self, symbol: str, *, config_version: str) -> dict | None:
+        """Load a validated state document without requiring its strategy config hash."""
+
         path = self.path_for(symbol)
         if not path.exists():
             return None
@@ -40,7 +50,6 @@ class SarAdxStateStore:
         expected = {
             "schema_version": SCHEMA_VERSION,
             "config_version": config_version,
-            "config_hash": config_hash,
             "symbol": symbol,
         }
         for key, value in expected.items():
@@ -48,6 +57,8 @@ class SarAdxStateStore:
                 raise SarAdxStateError(f"paper state {key} is incompatible")
         if not isinstance(payload.get("strategy"), dict) or not isinstance(payload.get("broker"), dict):
             raise SarAdxStateError("paper state payload is incomplete")
+        if not isinstance(payload.get("config_hash"), str) or not payload["config_hash"]:
+            raise SarAdxStateError("paper state config_hash is invalid")
         return payload
 
     def save(self, symbol: str, payload: dict) -> Path:

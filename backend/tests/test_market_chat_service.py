@@ -49,6 +49,28 @@ def test_snapshot_drops_unfinished_bars_and_computes_indicators():
     assert len(snapshot["recent_normalized_bars"]) == 24
 
 
+def test_large_candle_uses_previous_bar_atr_without_current_bar_leakage():
+    rows = _klines()
+    rows[-1][1] = "100.0"
+    rows[-1][2] = "106.0"
+    rows[-1][3] = "99.5"
+    rows[-1][4] = "105.0"
+    server_time = rows[-1][6] + 1
+
+    snapshot = market_chat.build_market_snapshot(
+        symbol="SOLUSDT",
+        interval="1h",
+        server_time_ms=server_time,
+        current_raw=rows,
+        hourly_raw=rows,
+    )
+    frame = market_chat._closed_frame(rows, server_time)
+    expected_ratio = 5.0 / market_chat._wilder_atr(frame).shift(1).iloc[-1]
+
+    assert snapshot["candle"]["body_atr_ratio"] == round(expected_ratio, 6)
+    assert snapshot["candle"]["large_body"] is True
+
+
 def test_snapshot_rejects_insufficient_completed_bars():
     rows = _klines(count=30)
     with pytest.raises(market_chat.MarketDataError, match="completed"):

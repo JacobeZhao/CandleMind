@@ -13,6 +13,12 @@ import clsx from "clsx";
 
 const inp = "w-full bg-surface border border-border rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-accent transition-colors";
 const lbl = "text-xs text-muted mb-1 block";
+const AI_PROVIDER_FALLBACKS = {
+  deepseek: {
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+  },
+};
 
 export default function Settings() {
   const { setConnected } = useApp();
@@ -105,7 +111,8 @@ export default function Settings() {
   };
   const openAiForm = (cfg = null) => {
     setEditingAi(cfg);
-    const def = providers.find(p => p.id === (cfg?.provider || "deepseek")) || {};
+    const provider = cfg?.provider || "deepseek";
+    const def = providers.find(p => p.id === provider) || AI_PROVIDER_FALLBACKS[provider] || {};
     setAiForm(cfg
       ? { name: cfg.name, provider: cfg.provider, api_key: "",
           base_url: cfg.base_url || def.base_url || "",
@@ -115,7 +122,7 @@ export default function Settings() {
     setAiTestResult(null); setAiView("form");
   };
   const onProviderChange = (pid) => {
-    const def = providers.find(p => p.id === pid) || {};
+    const def = providers.find(p => p.id === pid) || AI_PROVIDER_FALLBACKS[pid] || {};
     setAiForm(f => ({ ...f, provider: pid, base_url: def.base_url || "", model_name: def.model || "" }));
     setAiTestResult(null);
   };

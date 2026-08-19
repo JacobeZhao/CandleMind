@@ -26,10 +26,13 @@ python -m backend.scripts.evaluation.run_backtrader_sar_pyramid --help
 python -m backend.scripts.evaluation.sweep_sol_adx_sar --help
 python -m backend.scripts.evaluation.sweep_sol_adx_sar_v2 --help
 python -m backend.scripts.evaluation.sweep_sol_adx_sar_v3 --help
+python -m backend.scripts.evaluation.sweep_multi_symbol_sar_market_gate --help
+python -m backend.scripts.evaluation.sweep_multi_symbol_sar_staged_risk --help
 ```
 
 确定性账本与 Backtrader runner 使用已验证 OHLCV 和实际观测资金费率。参数扫描
-仅适用于 SOL SAR+ADX 研究；结果不能直接作为生产准入证据。每次运行必须使用
+仅适用于 SAR+ADX 研究；多币种 runner 使用月度 PIT 资格和固定等权子账户。
+扫描结果不能直接作为生产准入证据。每次运行必须使用
 新的 `--output`，并记录时间范围、成本、参数、输入 release 和代码 revision。
 
 ## 安全规则
