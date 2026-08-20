@@ -21,7 +21,7 @@ const AI_PROVIDER_FALLBACKS = {
 };
 
 export default function Settings() {
-  const { setConnected } = useApp();
+  const { refreshRevision, setConnected } = useApp();
 
   const [form, setForm] = useState({
     api_key_test: "", api_secret_test: "", api_key_main: "", api_secret_main: "",
@@ -62,6 +62,17 @@ export default function Settings() {
     listAIProviders().then(({ data }) => setProviders(data)).catch(() => {});
     listAIConfigs().then(({ data }) => setAiConfigs(data)).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!refreshRevision) return;
+    getSettings().then(({ data }) => {
+      setTestKeySet(data.test_key_set);
+      setMainKeySet(data.main_key_set);
+      if (typeof data.connected === "boolean") setConnected(data.connected);
+    }).catch(() => {});
+    listAIProviders().then(({ data }) => setProviders(data)).catch(() => {});
+    listAIConfigs().then(({ data }) => setAiConfigs(data)).catch(() => {});
+  }, [refreshRevision]);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 

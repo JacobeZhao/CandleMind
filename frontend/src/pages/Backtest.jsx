@@ -175,7 +175,7 @@ function DetailTable({ type, rows }) {
 }
 
 export default function Backtest() {
-  const { symbol: headerSymbol } = useApp();
+  const { refreshRevision, symbol: headerSymbol } = useApp();
   const [form, setForm] = useState({
     symbol: headerSymbol || "SOLUSDT",
     start_date: "2025-01-01",
@@ -209,7 +209,7 @@ export default function Backtest() {
         if (active) setCapabilityWarning("无法读取数据能力清单，当前显示已验证发布的 30 个品种；运行时仍以后端校验为准。");
       });
     return () => { active = false; };
-  }, []);
+  }, [refreshRevision]);
 
   useEffect(() => {
     if (headerSymbol && symbols.includes(headerSymbol)) update("symbol", headerSymbol);

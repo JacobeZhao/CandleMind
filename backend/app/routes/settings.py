@@ -173,18 +173,20 @@ async def _restore_runtime(snapshot: dict) -> None:
         app_state.symbol = snapshot["app_symbol"]
 
 
-async def _connect_active(s) -> None:
-    """用当前激活(testnet/main)的 key 建连并等待行情流就绪。"""
+async def _connect_active(s) -> dict:
+    """Validate private account access before activating one exchange session."""
     key_enc, sec_enc = active_keys(s)
     if not key_enc:
         raise HTTPException(400, f"当前为{'测试网' if s.testnet else '真实网'}模式，但未配置对应 API Key")
     client = await asyncio.to_thread(
         _build_client, decrypt(key_enc), decrypt(sec_enc), s.testnet, s.proxy_url
     )
+    account = await asyncio.to_thread(client.futures_account)
     snapshot = _runtime_snapshot()
     try:
         await _start_ws_and_wait(s.symbol, s.testnet, s.proxy_url)
         app_state.set_client(client, s.symbol)
+        return await app_state.publish_account(account)
     except (Exception, asyncio.CancelledError):
         if _runtime_changed(snapshot):
             await _restore_runtime(snapshot)
@@ -220,8 +222,9 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
 
         try:
             key_enc, _ = active_keys(s)
+            account = None
             if key_enc:
-                await _connect_active(s)
+                account = await _connect_active(s)
             elif runtime["ws_running"] and _ws_target_changed(
                 runtime, s.symbol, s.testnet, s.proxy_url
             ):
@@ -235,7 +238,7 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
                 else "配置已保存（当前模式未配置 API Key，暂未连接）"
             )
             authoritative = _settings_out(s).model_dump()
-            return {"ok": True, "message": message, **authoritative}
+            return {"ok": True, "message": message, "account": account, **authoritative}
         except (Exception, asyncio.CancelledError) as exc:
             db.rollback()
             try:
@@ -269,9 +272,10 @@ async def test_connection(testnet: bool = True, db: Session = Depends(get_db)):
     if not key_enc:
         raise HTTPException(400, f"{net_name} API Key 未配置")
     try:
-        await asyncio.to_thread(
+        client = await asyncio.to_thread(
             _build_client, decrypt(key_enc), decrypt(sec_enc), testnet, s.proxy_url
         )
+        await asyncio.to_thread(client.futures_account)
         return {"ok": True, "message": f"{net_name} 连接成功"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"{net_name} 连接失败: {e}")

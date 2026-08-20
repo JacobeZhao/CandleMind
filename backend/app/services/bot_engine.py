@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Callable
+from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
@@ -28,6 +29,7 @@ from .exchange_executor import (
     UnsupportedAccountError,
 )
 from .execution_store import ExecutionStore, ExecutionStoreError
+from .strategy_analytics import StrategyAnalyticsService, account_fingerprint
 from .live_strategy_runtime import (
     DecisionPlan,
     LiveStrategyRuntime,
@@ -114,6 +116,9 @@ class BotEngine:
         self._cached_fill_count_complete = False
         self.no_action_reason: str | None = None
         self.last_exchange_order_id: str | None = None
+        self._analytics_service: StrategyAnalyticsService | None = None
+        self._analytics_scope_id: int | None = None
+        self._analytics_run_id: str | None = None
 
     @property
     def status(self) -> dict:
@@ -213,6 +218,10 @@ class BotEngine:
                 raise UnsupportedAccountError("existing open orders require reconciliation")
             if await asyncio.to_thread(executor.available_balance) <= 0:
                 raise UnsupportedAccountError("available USDT balance is zero")
+            self._capture_analytics_run(
+                client, store, network, symbol, run_id, capital_limit,
+                resume_existing=journal_position.direction != 0,
+            )
             first_cycle = await self._cycle(
                 client,
                 symbol,
@@ -800,6 +809,62 @@ class BotEngine:
             filled_quantity=str(result.executed_quantity),
             details={"average_price": str(result.average_price)},
         )
+        self._capture_analytics_order(decision_id, ordinal, result)
+
+    def _capture_analytics_run(
+        self,
+        client: Any,
+        store: ExecutionStore,
+        network: str,
+        symbol: str,
+        run_id: str,
+        capital_limit: float,
+        *,
+        resume_existing: bool = False,
+    ) -> None:
+        """Persist run ownership after validation and before any order can be sent."""
+        try:
+            api_key = getattr(client, "API_KEY", None)
+            if not isinstance(api_key, str) or not api_key:
+                return
+            service = StrategyAnalyticsService()
+            analytics_run_id = f"{run_id}:{uuid4().hex}"
+            scope_id, analytics_run_id = service.capture_run(
+                account_fingerprint(api_key),
+                network,
+                symbol,
+                run_id=analytics_run_id,
+                strategy_type=STRATEGY_TYPE,
+                config_version=CONFIG_VERSION,
+                allocation_equity=capital_limit,
+                execution_store=store,
+                resume_existing=resume_existing,
+            )
+            self._analytics_service = service
+            self._analytics_scope_id = scope_id
+            self._analytics_run_id = analytics_run_id
+        except Exception as exc:
+            self._analytics_service = None
+            self._analytics_scope_id = None
+            self._analytics_run_id = None
+            raise ExecutionStoreError(
+                "analytics run identity could not be persisted before execution"
+            ) from exc
+
+    def _capture_analytics_order(self, decision_id: str, ordinal: int, result: Any) -> None:
+        if self._analytics_service is None or self._analytics_scope_id is None or self._analytics_run_id is None:
+            return
+        try:
+            self._analytics_service.capture_order(
+                self._analytics_scope_id,
+                self._analytics_run_id,
+                decision_id,
+                ordinal,
+                exchange_order_id=result.order_id,
+                client_order_id=result.client_order_id,
+            )
+        except Exception:
+            pass
 
     def _clear_failure_state(self) -> None:
         self.failure_count = 0
@@ -969,6 +1034,9 @@ class BotEngine:
         self._strategy_type = ""
         self._config_version = ""
         self._symbol = ""
+        self._analytics_service = None
+        self._analytics_scope_id = None
+        self._analytics_run_id = None
 
     @staticmethod
     async def _await_terminal(task: asyncio.Task[None]) -> None:

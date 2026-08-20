@@ -9,6 +9,11 @@ FastAPI + React 构建。项目聚焦 **CandleMind 趋势策略**，提供实时
   <tr>
     <td>
       <h2>特别致谢：NetAPI</h2>
+      <p align="center">
+        <a href="https://netapi.cc/">
+          <img src="docs/assets/netapi-logo.png" alt="NetAPI Logo" width="360">
+        </a>
+      </p>
       <p>
         感谢 <a href="https://netapi.cc/"><strong>NetAPI.cc</strong></a>
         为 CandleMind 提供 Token 支持，帮助项目持续完善 AI 行情分析与智能助手能力。
@@ -31,53 +36,14 @@ FastAPI + React 构建。项目聚焦 **CandleMind 趋势策略**，提供实时
 > 本项目仅用于技术研究与教育，不构成投资建议。订单页启动的策略会向当前选择的
 > Binance Futures 测试网或真实网发送订单；真实网默认由服务端禁用。历史回测结果不代表未来收益。
 
-## 最新策略表现展示（模拟）
-
-> [!IMPORTANT]
-> 以下曲线和 `+306%`、`-8.9%` 等指标是用于展示 README 报告样式的**人工模拟
-> 数据**，不是事实业绩，不是由真实历史 K 线、实盘订单或本项目回测引擎生成，
-> 也不能作为策略盈利能力证明。项目中冻结的真实研究证据仍表明当前策略
-> 尚未盈利。
-
-```mermaid
-xychart-beta
-    title "CandleMind Illustrative Net Equity (Synthetic)"
-    x-axis ["2025-08", "09", "10", "11", "12", "2026-01", "02", "03", "04", "05", "06", "07", "08"]
-    y-axis "Net equity (USD)" 10000 --> 41000
-    line [10000, 12200, 11813, 17000, 22000, 24000, 28000, 25508, 29500, 31500, 30240, 36000, 40600]
-```
-
-```mermaid
-xychart-beta
-    title "Illustrative Drawdown (Synthetic)"
-    x-axis ["2025-08", "09", "10", "11", "12", "2026-01", "02", "03", "04", "05", "06", "07", "08"]
-    y-axis "Drawdown (%)" -10 --> 0
-    line [0, 0, -5.5, 0, 0, 0, 0, -8.9, 0, 0, -4.0, 0, 0]
-```
-
-[Mermaid 无法渲染时查看 PNG 版本](docs/assets/candlemind-illustrative-backtest.png)
-
-### 模拟报告
-
-| 指标 | 展示值 |
-| --- | ---: |
-| 策略 | CandleMind 趋势策略 |
-| 展示周期 | 过去 12 个月 |
-| 初始资金 | $10,000 |
-| 期末权益 | $40,600 |
-| 累计收益率 | +306.0% |
-| 最大回撤 | -8.9% |
-| 成本口径 | 假设已计入手续费、滑点和资金费率 |
-
-模拟净值路径采用确定性人工曲线，仅用于视觉演示。报告没有虚构胜率、夏普比率、
-交易次数或盈亏比；这些指标必须由真实、可复现的回测结果计算。
-
 ## 主要功能
 
 - 五个核心页面：概览、行情、订单、回测和设置。
 - K 线工作区固定展示趋势方向、趋势强度与方向性指标。
 - Binance WebSocket 行情以最新值优先的方式每约 500ms 更新。
 - CandleMind 趋势策略绑定前端当前选择的交易品种和 Binance 网络。
+- 订单页提供本周与本月收益及收益率、多空交易数、胜率和盈亏比；
+  指标仅统计 CandleMind 策略订单，覆盖不足时不会伪造结果。
 - 基于 Backtrader 的离线回测，计入手续费、滑点和已观测资金费率。
 - 可配置 LiteLLM/Ollama 兼容服务，用于人工问答和基于已收盘 K 线的持续 AI 行情分析。
 - 使用校验和与冻结清单验证 K 线及衍生品数据来源。
@@ -130,8 +96,8 @@ CANDLEMIND_DATA_ROOT=D:/CandleMind/data
 CANDLEMIND_RUNTIME_ROOT=D:/CandleMind/runtime/app
 ```
 
-行情数据在容器内以只读方式挂载，数据库、加密密钥和执行日志写入独立的
-runtime 目录。
+行情数据在容器内以只读方式挂载，数据库、加密密钥、执行日志和策略分析账本
+写入独立的 runtime 目录。
 
 ### 本地开发
 

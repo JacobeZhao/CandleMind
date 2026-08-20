@@ -46,4 +46,15 @@ describe("MarketSummary", () => {
     expect(screen.getByText("24H高").nextElementSibling.textContent).toContain("$147.00");
     expect(screen.getByText("24H低").nextElementSibling.textContent).toContain("$138.00");
   });
+
+  it("reloads the REST snapshot when the global refresh revision changes", async () => {
+    const view = render(<MarketSummary symbol="SOLUSDT" refreshRevision={0} />);
+    await act(async () => Promise.resolve());
+    expect(getTicker).toHaveBeenCalledTimes(1);
+
+    view.rerender(<MarketSummary symbol="SOLUSDT" refreshRevision={1} />);
+    await act(async () => Promise.resolve());
+
+    expect(getTicker).toHaveBeenCalledTimes(2);
+  });
 });

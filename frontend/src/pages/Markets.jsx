@@ -25,7 +25,7 @@ function clamp(value, min, max) {
 }
 
 export default function Markets() {
-  const { symbol } = useApp();
+  const { refreshRevision, symbol } = useApp();
   const workspaceRef = useRef(null);
   const [interval, setInterval] = useState("5m");
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -99,7 +99,8 @@ export default function Markets() {
           onIntervalChange={setInterval}
           onOpenAssistant={toggleAssistant}
           assistantOpen={assistantOpen}
-          headerLeading={<MarketSummary symbol={symbol} />}
+          refreshRevision={refreshRevision}
+          headerLeading={<MarketSummary symbol={symbol} refreshRevision={refreshRevision} />}
         />
       </div>
       {assistantOpen && (

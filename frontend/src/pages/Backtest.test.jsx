@@ -4,13 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Backtest from "./Backtest";
 import { getSarAdxBacktestCapabilities, runSarAdxBacktest } from "../api/client";
 
+const appState = { refreshRevision: 0, symbol: "SOLUSDT" };
+
 vi.mock("../api/client", () => ({
   getSarAdxBacktestCapabilities: vi.fn(),
   runSarAdxBacktest: vi.fn(),
 }));
 
 vi.mock("../context/AppContext", () => ({
-  useApp: () => ({ symbol: "SOLUSDT" }),
+  useApp: () => appState,
 }));
 
 vi.mock("recharts", () => ({
@@ -28,10 +30,22 @@ describe("Backtest", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
+    appState.refreshRevision = 0;
     getSarAdxBacktestCapabilities.mockResolvedValue({
       data: { symbols: ["BTCUSDT", "SOLUSDT"], coverage: [] },
     });
     runSarAdxBacktest.mockResolvedValue({ data: {} });
+  });
+
+  it("refreshes capabilities without rerunning a backtest", async () => {
+    const view = render(<Backtest />);
+    await waitFor(() => expect(getSarAdxBacktestCapabilities).toHaveBeenCalledOnce());
+
+    appState.refreshRevision = 1;
+    view.rerender(<Backtest />);
+
+    await waitFor(() => expect(getSarAdxBacktestCapabilities).toHaveBeenCalledTimes(2));
+    expect(runSarAdxBacktest).not.toHaveBeenCalled();
   });
 
   it("submits normalized strategy parameters for the selected symbol", async () => {

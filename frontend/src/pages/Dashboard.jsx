@@ -40,7 +40,7 @@ function isStrategyAction(value) {
 }
 
 export default function Dashboard() {
-  const { account, positions, botStatus, botStatusLoaded, connected } = useApp();
+  const { account, accountError, positions, botStatus, botStatusLoaded, connected } = useApp();
   const ticker = useTicker();
   const navigate = useNavigate();
 
@@ -63,6 +63,9 @@ export default function Dashboard() {
     : "--";
   const lastAction = isStrategyAction(botStatus?.last_action) ? botStatus.last_action : "—";
   const runtimeMessage = botStatusLoaded ? ERROR_MESSAGES[engineState] : null;
+  const accountValue = (value, prefix = "$") => account
+    ? `${prefix}${value.toFixed(2)}`
+    : "--";
 
   return (
     <div className="space-y-4">
@@ -77,15 +80,26 @@ export default function Dashboard() {
           </button>
         </div>
       )}
+      {accountError && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border border-red/20 bg-red/5 px-4 py-3 text-sm text-red">
+          <span className="flex items-center gap-2">
+            <AlertCircle size={16} /> {accountError}
+          </span>
+          <button onClick={() => navigate("/settings")}
+            className="text-xs font-medium text-accent hover:text-accent/80">
+            检查 API 配置
+          </button>
+        </div>
+      )}
 
       {/* 账户总览 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard icon={Wallet} label="账户净值" value={`$${totalBalance.toFixed(2)}`} />
-        <StatCard icon={BarChart3} label="可用余额" value={`$${available.toFixed(2)}`} sub="USDT" />
+        <StatCard icon={Wallet} label="账户净值" value={accountValue(totalBalance)} />
+        <StatCard icon={BarChart3} label="可用余额" value={accountValue(available)} sub="USDT" />
         <StatCard icon={TrendingUp} label="未实现盈亏"
-          value={`${unrealized >= 0 ? "+" : ""}$${unrealized.toFixed(2)}`}
+          value={account ? `${unrealized >= 0 ? "+" : ""}$${unrealized.toFixed(2)}` : "--"}
           color={unrealized >= 0 ? "text-green" : "text-red"} />
-        <StatCard icon={Activity} label="保证金余额" value={`$${margin.toFixed(2)}`} />
+        <StatCard icon={Activity} label="保证金余额" value={accountValue(margin)} />
       </div>
 
       {/* 机器人状态 */}

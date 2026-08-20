@@ -29,6 +29,24 @@ class AppState:
         except Exception:
             pass
 
+    @staticmethod
+    def account_payload(account: dict) -> dict:
+        usdt = next(
+            (asset for asset in account.get("assets", []) if asset.get("asset") == "USDT"),
+            {},
+        )
+        return {
+            "totalWalletBalance": account.get("totalWalletBalance", "0"),
+            "totalUnrealizedProfit": account.get("totalUnrealizedProfit", "0"),
+            "totalMarginBalance": account.get("totalMarginBalance", "0"),
+            "availableBalance": usdt.get("availableBalance", "0"),
+        }
+
+    async def publish_account(self, account: dict) -> dict:
+        payload = self.account_payload(account)
+        await manager.broadcast({"type": "account", "data": payload})
+        return payload
+
     async def broadcast_loop(self):
         """启动账户/仓位/订单/状态的后台推送任务。Ticker 由 WS 单独处理。"""
         async with asyncio.TaskGroup() as task_group:
@@ -58,18 +76,13 @@ class AppState:
     async def _push_account(self):
         try:
             account = await asyncio.to_thread(self.client.futures_account)
-            usdt    = next((a for a in account.get("assets", []) if a["asset"] == "USDT"), {})
-            await manager.broadcast({
-                "type": "account",
-                "data": {
-                    "totalWalletBalance":    account.get("totalWalletBalance", "0"),
-                    "totalUnrealizedProfit": account.get("totalUnrealizedProfit", "0"),
-                    "totalMarginBalance":    account.get("totalMarginBalance", "0"),
-                    "availableBalance":      usdt.get("availableBalance", "0"),
-                },
-            })
+            await self.publish_account(account)
         except Exception as e:
             logger.debug(f"Account push error: {e}")
+            await manager.broadcast({
+                "type": "account_error",
+                "data": {"message": "Binance 账户读取失败，请检查 API Key、合约权限和出口 IP 白名单。"},
+            })
 
     async def _push_positions(self):
         try:

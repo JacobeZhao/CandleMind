@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Settings from "./Settings";
 import * as client from "../api/client";
 
+const appState = { refreshRevision: 0, setConnected: vi.fn() };
+
 vi.mock("../context/AppContext", () => ({
-  useApp: () => ({ setConnected: vi.fn() }),
+  useApp: () => appState,
 }));
 
 vi.mock("../api/client", () => ({
@@ -28,12 +30,26 @@ describe("Settings", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    appState.refreshRevision = 0;
     client.getSettings.mockResolvedValue({
       data: { test_key_set: false, main_key_set: false, proxy_url: "", connected: false },
     });
     client.saveSettings.mockResolvedValue({ data: { message: "保存成功" } });
     client.listAIProviders.mockResolvedValue({ data: [] });
     client.listAIConfigs.mockResolvedValue({ data: [] });
+  });
+
+  it("refreshes read-only settings without clearing unsaved secret input", async () => {
+    const view = render(<Settings />);
+    await waitFor(() => expect(client.getSettings).toHaveBeenCalledOnce());
+    const keyInput = screen.getAllByPlaceholderText("输入 API Key")[0];
+    fireEvent.change(keyInput, { target: { value: "unsaved-key" } });
+
+    appState.refreshRevision = 1;
+    view.rerender(<Settings />);
+
+    await waitFor(() => expect(client.getSettings).toHaveBeenCalledTimes(2));
+    expect(keyInput.value).toBe("unsaved-key");
   });
 
   it("sends secrets once and clears them after a successful save", async () => {

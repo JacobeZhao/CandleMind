@@ -8,6 +8,7 @@ export const getSettings = () => api.get("/settings");
 export const saveSettings = (data) => api.post("/settings", data);
 export const testConnection = (testnet) => api.post("/settings/test-connection", null, { params: { testnet } });
 export const getMyIp = () => api.get("/settings/myip");
+export const getAccountBalance = () => api.get("/account/balance");
 
 export const getTicker = (sym) => api.get(`/market/ticker/${sym}`);
 export const getKlines = (sym, interval, limit, inds = "psar", indParams = {}, signal) =>
@@ -21,8 +22,15 @@ export const getKlines = (sym, interval, limit, inds = "psar", indParams = {}, s
     },
   });
 export const getSymbols = () => api.get("/market/symbols");
-export const getOrderHistory = (sym, limit) => api.get("/orders/history", { params: { symbol: sym, limit } });
-export const getRecentTrades = (sym) => api.get("/orders/trades", { params: { symbol: sym } });
+export const getOrderHistory = (sym, limit, signal) => api.get("/orders/history", {
+  signal,
+  params: { symbol: sym, limit },
+});
+export const getRecentTrades = (sym, signal) => api.get("/orders/trades", {
+  signal,
+  params: { symbol: sym },
+});
+export const getStrategyAnalytics = (signal) => api.get("/strategy/analytics", { signal });
 
 export const startEngine = ({
   strategy_type,

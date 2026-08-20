@@ -6,13 +6,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from .database import init_db, get_db, Settings, active_keys
-from .security import decrypt
 from .state import app_state
 from .binance_ws import binance_ws_client
 from .ws_manager import manager
-from .routes import settings, account, market, orders, backtest, ai_config, health, market_agent
+from .routes import (
+    account,
+    ai_config,
+    backtest,
+    health,
+    market,
+    market_agent,
+    orders,
+    settings,
+    strategy_analytics,
+)
 from .routes import strategy as strategy_route
-from .routes.settings import _build_client
 from .services.market_agent import market_agent_manager
 from .services.market_agent_state_store import MarketAgentStateError
 
@@ -42,16 +50,12 @@ async def lifespan(app: FastAPI):
     db = next(get_db())
     try:
         s = db.query(Settings).first()
-        key_enc, sec_enc = active_keys(s) if s else (None, None)
+        key_enc, _ = active_keys(s) if s else (None, None)
         if key_enc:
             try:
-                api_key = decrypt(key_enc)
-                api_secret = decrypt(sec_enc)
-                client = await asyncio.to_thread(
-                    _build_client, api_key, api_secret, s.testnet, s.proxy_url
-                )
-                app_state.set_client(client, s.symbol)
-                await binance_ws_client.start(s.symbol, s.testnet, s.proxy_url)
+                from .routes.settings import _connect_active
+
+                await _connect_active(s)
                 logger.info("Auto-reconnected to Binance on startup")
             except Exception as e:
                 logger.warning(f"Auto-connect failed: {e}")
@@ -121,6 +125,7 @@ app.include_router(account.router,         prefix="/api/account",   tags=["accou
 app.include_router(market.router,          prefix="/api/market",    tags=["market"])
 app.include_router(orders.router,          prefix="/api/orders",    tags=["orders"])
 app.include_router(strategy_route.router,  prefix="/api/strategy",  tags=["strategy"])
+app.include_router(strategy_analytics.router)
 app.include_router(backtest.router,        prefix="/api/backtest",  tags=["backtest"])
 app.include_router(ai_config.router,       prefix="/api/ai",        tags=["ai"])
 app.include_router(market_agent.router,     prefix="/api/ai",        tags=["ai"])

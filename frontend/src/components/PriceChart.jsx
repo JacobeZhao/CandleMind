@@ -101,6 +101,7 @@ export default function PriceChart({
   onOpenAssistant,
   assistantOpen = false,
   headerLeading = null,
+  refreshRevision = 0,
 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -325,7 +326,7 @@ export default function PriceChart({
     resetBoundaryRefresh();
     const request = loadData(true);
     return () => request?.controller.abort();
-  }, [loadData, resetBoundaryRefresh]);
+  }, [loadData, refreshRevision, resetBoundaryRefresh]);
 
   useEffect(() => () => {
     resetBoundaryRefresh();

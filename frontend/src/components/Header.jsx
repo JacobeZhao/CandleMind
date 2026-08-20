@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { getSymbols } from "../api/client";
-import { Activity, AlertCircle, ChevronDown, Loader, Search, Wifi, WifiOff } from "lucide-react";
+import { Activity, AlertCircle, ChevronDown, Loader, RefreshCw, Search, Wifi, WifiOff } from "lucide-react";
 import clsx from "clsx";
+import StrategyEngineControl from "./StrategyEngineControl";
 
-function SymbolDropdown({ symbol, symbols, onSelect }) {
+function SymbolDropdown({ symbol, symbols, onSelect, disabled = false }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef(null);
@@ -28,7 +29,8 @@ function SymbolDropdown({ symbol, symbols, onSelect }) {
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex max-w-full items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs text-muted transition-colors hover:border-accent/50 hover:text-white"
+        disabled={disabled}
+        className="flex max-w-full items-center gap-1 rounded-lg border border-border px-2 py-1 text-base font-semibold text-muted transition-colors hover:border-accent/50 hover:text-white disabled:cursor-wait disabled:opacity-50"
       >
         <span className="truncate">{symbol}</span>
         <ChevronDown
@@ -60,6 +62,7 @@ function SymbolDropdown({ symbol, symbols, onSelect }) {
                   setOpen(false);
                   setQuery("");
                 }}
+                disabled={disabled}
                 className={clsx(
                   "w-full px-3 py-1.5 text-left text-xs transition-colors hover:bg-surface",
                   symbol === item ? "bg-accent/5 font-bold text-accent" : "text-muted",
@@ -80,7 +83,16 @@ function SymbolDropdown({ symbol, symbols, onSelect }) {
 }
 
 function NetworkTabs() {
-  const { networkTab, networkSwitching, networkError, switchNetwork } = useApp();
+  const {
+    networkTab,
+    networkSwitching,
+    networkError,
+    strategyCommandPending,
+    symbolSwitching,
+    strategyStatusUncertain,
+    refreshPending,
+    switchNetwork,
+  } = useApp();
 
   return (
     <div className="relative shrink-0">
@@ -90,7 +102,7 @@ function NetworkTabs() {
             type="button"
             key={tab}
             onClick={() => switchNetwork(tab)}
-            disabled={networkSwitching}
+            disabled={networkSwitching || strategyCommandPending || refreshPending || symbolSwitching || strategyStatusUncertain}
             aria-pressed={networkTab === tab}
             className={clsx(
               "flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:cursor-wait disabled:opacity-60 sm:px-3",
@@ -117,7 +129,21 @@ function NetworkTabs() {
 }
 
 export default function Header() {
-  const { botStatus, botStatusLoaded, connected, symbol, setSymbol } = useApp();
+  const {
+    botStatus,
+    botStatusLoaded,
+    connected,
+    symbol,
+    setSymbol,
+    refreshAll,
+    refreshPending,
+    refreshError,
+    refreshRevision,
+    networkSwitching,
+    strategyCommandPending,
+    symbolSwitching,
+    strategyStatusUncertain,
+  } = useApp();
   const [symbols, setSymbols] = useState([]);
   const direction = botStatus?.position_direction ?? botStatus?.last_signal;
   const fillCount = botStatus?.filled_order_count;
@@ -126,13 +152,37 @@ export default function Header() {
 
   useEffect(() => {
     getSymbols().then(({ data }) => setSymbols(data)).catch(() => {});
-  }, []);
+  }, [refreshRevision]);
 
   return (
-    <header className="flex h-16 shrink-0 items-center justify-between gap-2 border-b border-border bg-card px-3 sm:px-4">
-      <SymbolDropdown symbol={symbol} symbols={symbols} onSelect={setSymbol} />
+    <header className="flex min-h-16 shrink-0 items-center justify-between gap-2 border-b border-border bg-card px-2 py-2 sm:px-4">
+      <div className="relative flex min-w-0 items-center gap-1.5">
+        <SymbolDropdown
+          symbol={symbol}
+          symbols={symbols}
+          onSelect={setSymbol}
+          disabled={refreshPending || networkSwitching || strategyCommandPending || symbolSwitching || strategyStatusUncertain}
+        />
+        <button
+          type="button"
+          aria-label="刷新当前数据"
+          title="刷新当前数据"
+          onClick={refreshAll}
+          disabled={refreshPending || networkSwitching || strategyCommandPending || symbolSwitching}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted transition-colors hover:border-accent/50 hover:text-white disabled:cursor-wait disabled:opacity-50"
+        >
+          <RefreshCw size={15} className={clsx(refreshPending && "animate-spin")} />
+        </button>
+        {refreshError && (
+          <div role="alert" className="absolute left-0 top-full z-50 mt-2 flex w-72 max-w-[calc(100vw-1rem)] items-start gap-2 rounded-md border border-red/40 bg-card px-3 py-2 text-xs text-red shadow-xl">
+            <AlertCircle size={14} className="mt-0.5 shrink-0" />
+            <span>{refreshError}</span>
+          </div>
+        )}
+      </div>
 
       <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
+        <StrategyEngineControl />
         <NetworkTabs />
 
         {botStatusLoaded && direction && direction !== "NONE" && (

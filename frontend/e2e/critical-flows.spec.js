@@ -8,6 +8,8 @@ const json = (route, body) => route.fulfill({
 
 let agentRunning;
 let networkTestnet;
+let strategyRunning;
+let strategyStartCount;
 
 const marketRows = Array.from({ length: 120 }, (_, index) => {
   const open = 140 + index * 0.08;
@@ -30,6 +32,8 @@ const marketRows = Array.from({ length: 120 }, (_, index) => {
 test.beforeEach(async ({ page }) => {
   agentRunning = false;
   networkTestnet = true;
+  strategyRunning = false;
+  strategyStartCount = 0;
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
@@ -82,6 +86,60 @@ test.beforeEach(async ({ page }) => {
     }
     if (url.pathname === "/api/market/symbols") return json(route, ["SOLUSDT"]);
     if (url.pathname.includes("/api/market/klines/")) return json(route, marketRows);
+    if (url.pathname === "/api/account/balance") {
+      return json(route, { totalWalletBalance: "1000", totalMarginBalance: "1000" });
+    }
+    if (url.pathname === "/api/strategy/engine/status") {
+      return json(route, {
+        running: strategyRunning,
+        engine_state: strategyRunning ? "running" : "stopped",
+        symbol: "SOLUSDT",
+        network: networkTestnet ? "testnet" : "mainnet",
+      });
+    }
+    if (url.pathname === "/api/strategy/engine/start") {
+      strategyStartCount += 1;
+      strategyRunning = true;
+      return json(route, { ok: true, message: "策略已启动" });
+    }
+    if (url.pathname === "/api/strategy/engine/stop") {
+      strategyRunning = false;
+      return json(route, { ok: true, message: "策略已停止" });
+    }
+    if (url.pathname === "/api/strategy/analytics") {
+      return json(route, {
+        schema_version: 1,
+        scope: { network: networkTestnet ? "testnet" : "mainnet", symbol: "SOLUSDT" },
+        as_of: "2026-08-20T08:00:00Z",
+        coverage: {
+          status: "complete",
+          from: "2026-08-01T00:00:00Z",
+          through: "2026-08-20T08:00:00Z",
+          sync_state: "synced",
+          reasons: [],
+        },
+        counts: { status: "complete", completed_total: 12, long: 7, short: 5 },
+        week: { status: "complete", net_pnl_usdt: "25.5", net_return_pct: "1.25" },
+        month: {
+          status: "complete",
+          net_pnl_usdt: "40",
+          net_return_pct: "4",
+        },
+        overall: {
+          status: "complete",
+          completed_count: 12,
+          long: 7,
+          short: 5,
+          win_rate_pct: "60",
+          payoff_ratio: "2.1",
+        },
+        costs: { complete: true, commission_usdt: "2", funding_net_usdt: "-0.5" },
+        equity_curve: [
+          { time: "2026-08-01T00:00:00Z", equity_usdt: "1000" },
+          { time: "2026-08-20T08:00:00Z", equity_usdt: "1040" },
+        ],
+      });
+    }
     if (url.pathname === "/api/ai/providers" || url.pathname === "/api/ai/list") {
       return json(route, []);
     }
@@ -126,7 +184,7 @@ test("opens the inline assistant, narrows the chart, and resizes it", async ({ p
   await divider.press("ArrowLeft");
   await expect.poll(async () => (await chart.boundingBox()).width).toBeLessThan(narrowed.width);
 
-  await page.getByRole("button", { name: "启动" }).click();
+  await page.getByRole("button", { name: "启动", exact: true }).click();
   await expect(page.getByText("运行中")).toBeVisible();
 });
 
@@ -183,5 +241,40 @@ for (const viewport of [
     }));
     expect(hasVisiblePixels).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`markets-${viewport.width}x${viewport.height}.png`), fullPage: true });
+  });
+}
+
+test("keeps the strategy command global and enforces mainnet confirmation", async ({ page }) => {
+  await page.goto("/markets");
+  await expect(page.getByRole("button", { name: "启动策略" })).toBeVisible();
+  await page.getByRole("button", { name: "真实网" }).click();
+  await page.getByRole("button", { name: "启动策略" }).click();
+  await expect(page.getByRole("dialog", { name: "确认启动策略" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "确认真实网启动" })).toBeDisabled();
+  expect(strategyStartCount).toBe(0);
+
+  await page.getByLabel("真实网确认文本").fill("MAINNET:SOLUSDT");
+  await page.getByRole("button", { name: "确认真实网启动" }).click();
+  await expect.poll(() => strategyStartCount).toBe(1);
+});
+
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 899, height: 900 },
+  { width: 768, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`renders Orders analytics without page overflow at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/orders");
+
+    await expect(page.getByLabel("策略分析").locator("article")).toHaveCount(8);
+    await expect(page.getByText("资金曲线")).toHaveCount(0);
+    await expect(page.getByText("+1.25%")).toBeVisible();
+    await expect(page.getByRole("button", { name: "启动策略" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "刷新当前数据" })).toBeVisible();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    await page.screenshot({ path: testInfo.outputPath(`orders-${viewport.width}x${viewport.height}.png`), fullPage: true });
   });
 }

@@ -219,6 +219,23 @@ describe("PriceChart", () => {
     }));
   });
 
+  it("reloads K lines when the global refresh revision changes", async () => {
+    const props = {
+      symbol: "SOLUSDT",
+      interval: "5m",
+      onIntervalChange: vi.fn(),
+      onOpenAssistant: vi.fn(),
+    };
+    const view = render(<PriceChart {...props} refreshRevision={0} />);
+    await act(async () => Promise.resolve());
+    expect(getKlines).toHaveBeenCalledTimes(1);
+
+    view.rerender(<PriceChart {...props} refreshRevision={1} />);
+    await act(async () => Promise.resolve());
+
+    expect(getKlines).toHaveBeenCalledTimes(2);
+  });
+
   it("ignores ResizeObserver notifications until dimensions change", async () => {
     const view = render(<PriceChart symbol="SOLUSDT" interval="5m" onIntervalChange={vi.fn()} onOpenAssistant={vi.fn()} />);
     await act(async () => Promise.resolve());

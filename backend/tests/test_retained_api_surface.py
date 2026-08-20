@@ -32,6 +32,8 @@ def test_strategy_api_retains_only_sar_engine_endpoints() -> None:
         ("/api/strategy/engine/status", frozenset({"GET"})),
         ("/api/strategy/engine/start", frozenset({"POST"})),
         ("/api/strategy/engine/stop", frozenset({"POST"})),
+        ("/api/strategy/analytics", frozenset({"GET"})),
+        ("/api/strategy/analytics/sync", frozenset({"POST"})),
     }
 
 

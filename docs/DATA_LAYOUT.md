@@ -51,6 +51,10 @@ release。`DATA_DIR` 独占运行状态，包括：
 - `trader.db`
 - `secret.key`
 - `strategies/execution_<network>_<symbol>.json`
+- `analytics/strategy_analytics.sqlite3`
+
+分析账本按账户、网络和品种隔离保存 CandleMind 策略订单、成交、手续费、资金费
+与同步覆盖范围。它不替代执行日志，也不得用于恢复或决定是否重复下单。
 
 数据库和密钥是不可拆分的加密配置对。执行日志与交易所持仓不一致时，策略
 运行时允许无历史成交地重新对齐；若恢复状态仍持仓，则拒绝跳过历史执行并要求
@@ -63,4 +67,6 @@ SAR+ADX 回测必须绑定 OHLCV、资金费率、参数、成本和代码 revis
 仍使用 SOL 调优参数，只能作为诊断结果。
 
 移动或删除外部数据前，必须先清点路径与校验和、验证目标包含关系、保留 raw
-数据，并成对备份 runtime 数据库和密钥。备份只保留经过验证且可恢复的版本。
+数据，并将 `trader.db`、`secret.key`、执行日志和分析账本作为同一 runtime 快照
+备份。SQLite 运行中备份必须使用一致性快照，不能只复制主文件而忽略 WAL。
+备份只保留经过验证且可恢复的版本。

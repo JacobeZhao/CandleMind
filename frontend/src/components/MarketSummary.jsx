@@ -31,7 +31,7 @@ function Quote({ label, value }) {
   );
 }
 
-export default function MarketSummary({ symbol }) {
+export default function MarketSummary({ symbol, refreshRevision = 0 }) {
   const tickerValue = useTicker();
   const ticker = tickerValue?.ticker ?? tickerValue;
   const [restTicker, setRestTicker] = useState(null);
@@ -54,7 +54,7 @@ export default function MarketSummary({ symbol }) {
     return () => {
       cancelled = true;
     };
-  }, [symbol]);
+  }, [refreshRevision, symbol]);
 
   const display = useMemo(() => {
     const matchingRest = restTicker?.symbol === symbol ? restTicker : null;

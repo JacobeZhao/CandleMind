@@ -240,6 +240,29 @@ def test_signal_executes_through_executor_and_updates_journal_counters(tmp_path)
     assert summary["unknown_order_count"] == 0
 
 
+def test_post_journal_analytics_failure_does_not_repeat_or_block_order(tmp_path):
+    engine = BotEngine()
+    runtime = _Runtime(_plan(SarPyramidAction(SarPyramidActionType.OPEN, 1)))
+    executor = _Executor()
+    store = _store(tmp_path)
+
+    class FailingAnalytics:
+        def capture_order(self, *_args, **_kwargs):
+            raise RuntimeError("analytics unavailable")
+
+    engine._analytics_service = FailingAnalytics()
+    engine._analytics_scope_id = 1
+    engine._analytics_run_id = "run"
+
+    result = engine._process_snapshot(
+        _snapshot(), "SOLUSDT", runtime, executor, store, "testnet", 250.0
+    )
+
+    assert result.last_exchange_order_id == "123"
+    assert len(executor.intents) == 1
+    assert store.status_summary("testnet", "SOLUSDT")["filled_order_count"] == 1
+
+
 def test_ambiguous_order_is_recorded_unknown_without_blind_resubmit(tmp_path):
     engine = BotEngine()
     runtime = _Runtime(_plan(SarPyramidAction(SarPyramidActionType.OPEN, 1)))

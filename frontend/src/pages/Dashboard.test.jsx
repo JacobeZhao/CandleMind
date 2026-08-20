@@ -22,6 +22,7 @@ function renderDashboard(botStatus, botStatusLoaded = true, ticker = null) {
   tickerState = ticker;
   appState = {
     account: {},
+    accountError: null,
     positions: [],
     connected: true,
     botStatus,
@@ -52,6 +53,23 @@ describe("Dashboard strategy status", () => {
 
     expect(screen.getByText(/SOLUSDT/)).toBeTruthy();
     expect(screen.getByText("$150.00")).toBeTruthy();
+  });
+
+  it("does not display a stale balance after account authentication fails", () => {
+    appState = {
+      account: null,
+      accountError: "Binance 账户读取失败，请检查 API Key、合约权限和出口 IP 白名单。",
+      positions: [],
+      connected: true,
+      botStatus: null,
+      botStatusLoaded: false,
+    };
+
+    render(<Dashboard />);
+
+    expect(screen.getByRole("alert").textContent).toContain("Binance 账户读取失败");
+    expect(screen.getAllByText("--").length).toBeGreaterThanOrEqual(4);
+    expect(screen.queryByText("$0.00")).toBeNull();
   });
 
   it("shows the current exchange position and filled order count", () => {
@@ -90,6 +108,7 @@ describe("Dashboard strategy status", () => {
   it("keeps strategy failure status visible when market data is disconnected", () => {
     appState = {
       account: {},
+      accountError: null,
       positions: [],
       connected: false,
       botStatusLoaded: true,

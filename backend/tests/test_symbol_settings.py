@@ -104,6 +104,75 @@ def test_futures_client_skips_spot_ping_and_validates_selected_endpoint(monkeypa
     ]
 
 
+def test_connect_active_requires_private_account_access_before_switch(monkeypatch):
+    original_client = _set_runtime(monkeypatch, running=True)
+    current = _settings(
+        api_key_main_enc="encrypted-key",
+        api_secret_main_enc="encrypted-secret",
+        testnet=False,
+    )
+    events = []
+
+    class Client:
+        def futures_account(self):
+            events.append("private-account")
+            raise RuntimeError("Invalid API-key, IP, or permissions")
+
+    monkeypatch.setattr(settings_routes, "decrypt", lambda value: value)
+    monkeypatch.setattr(settings_routes, "_build_client", lambda *_args: Client())
+
+    async def must_not_start(*_args):
+        raise AssertionError("market stream must not switch after private auth failure")
+
+    monkeypatch.setattr(settings_routes, "_start_ws_and_wait", must_not_start)
+
+    with pytest.raises(RuntimeError, match="Invalid API-key"):
+        asyncio.run(settings_routes._connect_active(current))
+
+    assert events == ["private-account"]
+    assert settings_routes.app_state.client is original_client
+    assert settings_routes.binance_ws_client.testnet is True
+
+
+def test_connect_active_returns_and_publishes_validated_account(monkeypatch):
+    _set_runtime(monkeypatch)
+    current = _settings(
+        api_key_main_enc="encrypted-key",
+        api_secret_main_enc="encrypted-secret",
+        testnet=False,
+        symbol="SOLUSDT",
+    )
+    account = {
+        "totalWalletBalance": "123.45",
+        "assets": [{"asset": "USDT", "availableBalance": "100.00"}],
+    }
+    client = SimpleNamespace(futures_account=lambda: account)
+    published = []
+
+    monkeypatch.setattr(settings_routes, "decrypt", lambda value: value)
+    monkeypatch.setattr(settings_routes, "_build_client", lambda *_args: client)
+
+    async def start(symbol, testnet, proxy):
+        settings_routes.binance_ws_client.symbol = symbol
+        settings_routes.binance_ws_client.testnet = testnet
+        settings_routes.binance_ws_client.proxy = proxy
+
+    async def publish(value):
+        published.append(value)
+        return {"totalWalletBalance": value["totalWalletBalance"]}
+
+    monkeypatch.setattr(settings_routes, "_start_ws_and_wait", start)
+    monkeypatch.setattr(settings_routes.app_state, "set_client", lambda value, symbol: events.append((value, symbol)))
+    monkeypatch.setattr(settings_routes.app_state, "publish_account", publish)
+    events = []
+
+    result = asyncio.run(settings_routes._connect_active(current))
+
+    assert events == [(client, "SOLUSDT")]
+    assert published == [account]
+    assert result == {"totalWalletBalance": "123.45"}
+
+
 def test_save_without_api_key_commits_normalized_symbol_to_app_state(monkeypatch):
     original_client = _set_runtime(monkeypatch)
     current = _settings()
