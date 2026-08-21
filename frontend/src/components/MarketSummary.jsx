@@ -13,13 +13,17 @@ function normalizeTicker(data, fallbackSymbol) {
 }
 
 function formatPrice(value) {
+  if (value == null || value === "") return "--";
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   const digits = number >= 1000 ? 2 : number >= 1 ? 4 : 6;
-  return number.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: digits,
-  });
+  return number.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: digits });
+}
+
+function formatIndicator(value, digits = 2) {
+  if (value == null || value === "") return "--";
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "--";
 }
 
 function Quote({ label, value }) {
@@ -31,7 +35,7 @@ function Quote({ label, value }) {
   );
 }
 
-export default function MarketSummary({ symbol, refreshRevision = 0 }) {
+export default function MarketSummary({ symbol, indicators = null, refreshRevision = 0 }) {
   const tickerValue = useTicker();
   const ticker = tickerValue?.ticker ?? tickerValue;
   const [restTicker, setRestTicker] = useState(null);
@@ -41,7 +45,6 @@ export default function MarketSummary({ symbol, refreshRevision = 0 }) {
       setRestTicker(null);
       return undefined;
     }
-
     let cancelled = false;
     setRestTicker(null);
     getTicker(symbol)
@@ -50,7 +53,6 @@ export default function MarketSummary({ symbol, refreshRevision = 0 }) {
         setRestTicker(normalizeTicker(data, symbol));
       })
       .catch(() => {});
-
     return () => {
       cancelled = true;
     };
@@ -64,13 +66,13 @@ export default function MarketSummary({ symbol, refreshRevision = 0 }) {
   }, [restTicker, ticker, symbol]);
 
   return (
-    <section
-      className="flex min-w-max flex-nowrap items-center gap-5"
-      aria-label={`${symbol || "当前品种"} 行情摘要`}
-    >
+    <section className="flex min-w-max flex-nowrap items-center gap-5" aria-label={`${symbol || "当前品种"} 行情摘要`}>
       <Quote label="当前价格" value={display?.price != null ? `$${formatPrice(display.price)}` : "--"} />
       <Quote label="24H高" value={display?.high != null ? `$${formatPrice(display.high)}` : "--"} />
       <Quote label="24H低" value={display?.low != null ? `$${formatPrice(display.low)}` : "--"} />
+      <Quote label="ADX(14)" value={formatIndicator(indicators?.adx)} />
+      <Quote label="ATR(14)" value={formatPrice(indicators?.atr)} />
+      <Quote label="RSI(14)" value={formatIndicator(indicators?.rsi)} />
     </section>
   );
 }

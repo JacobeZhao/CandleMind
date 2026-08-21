@@ -2,40 +2,62 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Orders from "./Orders";
-import { getOrderHistory, getRecentTrades, getStrategyAnalytics } from "../api/client";
+import {
+  getAccountTradingAnalytics,
+  getCombinedOpenOrders,
+  getOrderHistory,
+  getRecentTrades,
+} from "../api/client";
 
-const appState = {
-  networkTab: "test",
-  refreshRevision: 0,
-  symbol: "SOLUSDT",
-  strategyCapitalLimit: "1000",
-  setStrategyCapitalLimit: vi.fn(),
-  openOrders: [{ orderId: 42, time: 1_700_000_000_000, symbol: "SOLUSDT", side: "BUY", type: "LIMIT", origQty: "1", price: "100", stopPrice: "0", status: "NEW" }],
-};
+const appState = { networkTab: "test", refreshRevision: 0, symbol: "SOLUSDT" };
 
 const completeAnalytics = {
   schema_version: "1",
-  scope: { network: "test", symbol: "SOLUSDT", strategy_type: "internal" },
+  scope: { network: "testnet", symbol: "SOLUSDT" },
   as_of: "2026-08-20T08:00:00Z",
   coverage: { status: "complete", from: "2026-08-01T00:00:00Z", through: "2026-08-20T08:00:00Z", reasons: [], sync_state: "synced" },
   counts: { status: "complete", completed_total: 12, long: 7, short: 5 },
-  week: { net_pnl_usdt: 25.5, net_return_pct: 1.25, status: "complete", reason: null },
-  month: { net_pnl_usdt: -10, net_return_pct: -0.5, status: "complete", reason: null },
+  week: { net_pnl_usdt: 25.5, net_return_pct: 1.25, status: "complete" },
+  month: { net_pnl_usdt: -10, net_return_pct: -0.5, status: "complete" },
   overall: { completed_count: 12, long: 7, short: 5, win_count: 7, loss_count: 5, win_rate_pct: 58.333, payoff_ratio: 1.75, status: "complete", reasons: [] },
-  costs: { commission_usdt: 2, funding_net_usdt: 1, total_cost_usdt: 3, complete: true },
-  equity_curve: [{ time: "2026-08-01T00:00:00Z", equity_usdt: 1000, equity_index: 1 }, { time: "2026-08-20T08:00:00Z", equity_usdt: 1015.5, equity_index: 1.0155 }],
+};
+
+const combinedOrders = {
+  scope: { network: "testnet", symbol: "SOLUSDT" },
+  as_of: "2026-08-20T08:00:00Z",
+  status: "complete",
+  reasons: [],
+  orders: [
+    { id: "regular-1", source: "regular", time: 1_700_000_000_000, symbol: "SOLUSDT", side: "BUY", type: "LIMIT", origQty: "1", price: "100", stopPrice: "0", status: "NEW" },
+    { id: "algo-1", source: "algo", createTime: 1_700_000_001_000, symbol: "SOLUSDT", side: "SELL", orderType: "STOP_MARKET", quantity: "2", price: "0", triggerPrice: "90", status: "NEW" },
+  ],
 };
 
 vi.mock("../context/AppContext", () => ({ useApp: () => appState }));
-vi.mock("../api/client", () => ({ getOrderHistory: vi.fn(), getRecentTrades: vi.fn(), getStrategyAnalytics: vi.fn() }));
+vi.mock("../api/client", () => ({
+  getAccountTradingAnalytics: vi.fn(),
+  getCombinedOpenOrders: vi.fn(),
+  getOrderHistory: vi.fn(),
+  getRecentTrades: vi.fn(),
+}));
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, reject, resolve };
+}
 
 describe("Orders", () => {
   beforeEach(() => {
     appState.networkTab = "test";
     appState.refreshRevision = 0;
     appState.symbol = "SOLUSDT";
-    appState.strategyCapitalLimit = "1000";
-    getStrategyAnalytics.mockResolvedValue({ data: completeAnalytics });
+    getAccountTradingAnalytics.mockResolvedValue({ data: completeAnalytics });
+    getCombinedOpenOrders.mockResolvedValue({ data: combinedOrders });
     getRecentTrades.mockResolvedValue({ data: [] });
     getOrderHistory.mockResolvedValue({ data: [] });
   });
@@ -45,125 +67,137 @@ describe("Orders", () => {
     vi.clearAllMocks();
   });
 
-  it("renders analytics formatting and the read-only open-orders tab", async () => {
+  it("loads combined regular and Algo orders immediately and renders account statistics", async () => {
     render(<Orders />);
 
-    expect(screen.getByText("SOLUSDT")).toBeTruthy();
-    expect(screen.queryByText("操作")).toBeNull();
-    expect(screen.queryByText("撤单")).toBeNull();
-    expect(await screen.findByText("+1.25%")).toBeTruthy();
-    expect(screen.getByText("-0.50%")).toBeTruthy();
+    expect(getCombinedOpenOrders).toHaveBeenCalledWith("SOLUSDT", expect.any(AbortSignal));
+    expect(getAccountTradingAnalytics).toHaveBeenCalledWith("SOLUSDT", expect.any(AbortSignal));
+    expect(await screen.findByText("Algo")).toBeTruthy();
+    expect(screen.getByText("普通")).toBeTruthy();
+    expect(screen.getByText("90.00")).toBeTruthy();
+    expect(screen.getByText("账户交易统计")).toBeTruthy();
     expect(screen.getByText("+25.50 USDT")).toBeTruthy();
-    expect(screen.getByText("-10.00 USDT")).toBeTruthy();
-    expect(screen.getByText("多头交易")).toBeTruthy();
-    expect(screen.getByText("空头交易")).toBeTruthy();
     expect(screen.getByText("58.33%")).toBeTruthy();
-    expect(screen.getByText("1.75")).toBeTruthy();
-    expect(screen.queryByText("资金曲线")).toBeNull();
-    expect(screen.queryByText("完成交易")).toBeNull();
-    expect(screen.getAllByText("SOLUSDT · 测试网").length).toBe(2);
-    expect(document.body.textContent).not.toMatch(/SAR|ADX|V3/i);
-    expect(getStrategyAnalytics).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(screen.queryByText("资金上限")).toBeNull();
+    expect(screen.queryByText("策略分析")).toBeNull();
   });
 
-  it("shows partial sample values while keeping unavailable returns explicit", async () => {
-    getStrategyAnalytics.mockResolvedValue({ data: {
-      ...completeAnalytics,
-      coverage: { ...completeAnalytics.coverage, status: "partial" },
-      counts: { status: "partial", completed_total: 3, long: 2, short: 1 },
-      week: { status: "partial", return_status: "unavailable", net_return_pct: null, net_pnl_usdt: 12.5 },
-      month: { status: "partial", return_status: "unavailable", net_return_pct: null, net_pnl_usdt: -4 },
-      overall: { status: "partial", completed_count: 3, long: 2, short: 1, win_count: 2, loss_count: 1, win_rate_pct: 66.667, payoff_ratio: 2.5 },
-      equity_curve: [],
+  it("reloads open orders for symbol, network, and global refresh changes", async () => {
+    const view = render(<Orders />);
+    await screen.findByText("Algo");
+    const firstSignal = getCombinedOpenOrders.mock.calls[0][1];
+
+    getCombinedOpenOrders.mockResolvedValueOnce({ data: {
+      ...combinedOrders,
+      scope: { network: "testnet", symbol: "BTCUSDT" },
+      orders: [{ ...combinedOrders.orders[0], id: "btc", symbol: "BTCUSDT", price: "200" }],
     } });
-    render(<Orders />);
-
-    expect(await screen.findByText("+12.50 USDT")).toBeTruthy();
-    expect(screen.getByText("-4.00 USDT")).toBeTruthy();
-    expect(screen.getByText("66.67%")).toBeTruthy();
-    expect(screen.getByText("2.50")).toBeTruthy();
-    expect(screen.getAllByText("部分数据").length).toBeGreaterThanOrEqual(7);
-    expect(screen.getAllByText("暂不可用")).toHaveLength(2);
-    expect(document.body.textContent).not.toContain("Infinity");
-    expect(screen.queryByText("+0.00%")).toBeNull();
-  });
-
-  it("refreshes analytics and the active lower tab when the global revision changes", async () => {
-    const view = render(<Orders />);
-    await screen.findByText("+1.25%");
-    fireEvent.click(screen.getByRole("button", { name: "交易所成交记录" }));
-    await screen.findByText("暂无交易所成交记录");
-    expect(getStrategyAnalytics).toHaveBeenCalledTimes(1);
-    expect(getRecentTrades).toHaveBeenCalledTimes(1);
-
-    appState.refreshRevision = 1;
-    view.rerender(<Orders />);
-
-    await waitFor(() => expect(getStrategyAnalytics).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(getRecentTrades).toHaveBeenCalledTimes(2));
-  });
-
-  it("shows analytics loading and backend error states", async () => {
-    let rejectAnalytics;
-    getStrategyAnalytics.mockReturnValue(new Promise((_, reject) => { rejectAnalytics = reject; }));
-    render(<Orders />);
-    expect(screen.getByRole("status").textContent).toContain("正在加载策略分析");
-
-    rejectAnalytics({ response: { data: { detail: "分析数据暂不可用" } } });
-    expect((await screen.findByRole("alert")).textContent).toContain("分析数据暂不可用");
-  });
-
-  it("ignores a stale analytics response after the symbol changes", async () => {
-    let resolveOld;
-    getStrategyAnalytics
-      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
-      .mockResolvedValueOnce({ data: { ...completeAnalytics, scope: { ...completeAnalytics.scope, symbol: "BTCUSDT" }, counts: { status: "complete", completed_total: 99, long: 60, short: 39 } } });
-    const view = render(<Orders />);
+    getAccountTradingAnalytics.mockResolvedValueOnce({ data: { ...completeAnalytics, scope: { network: "testnet", symbol: "BTCUSDT" } } });
     appState.symbol = "BTCUSDT";
     view.rerender(<Orders />);
+    expect(await screen.findByText("200.00")).toBeTruthy();
+    expect(firstSignal.aborted).toBe(true);
 
-    expect(await screen.findByText("60")).toBeTruthy();
-    resolveOld({ data: completeAnalytics });
-    await Promise.resolve();
-    expect(screen.queryByText("7")).toBeNull();
-  });
-
-  it("provides loading, empty, error, and populated states for lower tabs", async () => {
-    let resolveTrades;
-    getRecentTrades.mockReturnValueOnce(new Promise((resolve) => { resolveTrades = resolve; }));
-    render(<Orders />);
-    await screen.findByText("+1.25%");
-
-    fireEvent.click(screen.getByRole("button", { name: "交易所成交记录" }));
-    expect(screen.getByRole("status").textContent).toContain("正在加载");
-    resolveTrades({ data: [] });
-    expect(await screen.findByText("暂无交易所成交记录")).toBeTruthy();
-
-    getOrderHistory.mockRejectedValueOnce({ response: { data: { detail: "历史订单读取失败" } } });
-    fireEvent.click(screen.getByRole("button", { name: "历史订单" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("历史订单读取失败");
-
-    getOrderHistory.mockResolvedValueOnce({ data: [{ orderId: 7, time: 1_700_000_000_000, symbol: "SOLUSDT", side: "SELL", type: "MARKET", price: "0", avgPrice: "98.5", origQty: "2", status: "FILLED" }] });
-    fireEvent.click(screen.getByRole("button", { name: "刷新订单数据" }));
-    expect(await screen.findByText("98.50")).toBeTruthy();
-  });
-
-  it("aborts and ignores stale lower-tab responses on network change", async () => {
-    let resolveOld;
-    getRecentTrades
-      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
-      .mockResolvedValueOnce({ data: [{ id: 2, time: 1_700_000_000_100, symbol: "SOLUSDT", side: "BUY", price: "222", qty: "1", commission: "0.1", commissionAsset: "USDT", realizedPnl: "2" }] });
-    const view = render(<Orders />);
-    fireEvent.click(screen.getByRole("button", { name: "交易所成交记录" }));
-    const oldSignal = getRecentTrades.mock.calls[0][1];
-
+    getCombinedOpenOrders.mockResolvedValueOnce({ data: { ...combinedOrders, scope: { network: "mainnet", symbol: "BTCUSDT" }, orders: [] } });
+    getAccountTradingAnalytics.mockResolvedValueOnce({ data: { ...completeAnalytics, scope: { network: "mainnet", symbol: "BTCUSDT" } } });
     appState.networkTab = "main";
+    view.rerender(<Orders />);
+    expect(await screen.findByText("暂无挂单")).toBeTruthy();
+
+    getCombinedOpenOrders.mockResolvedValueOnce({ data: { ...combinedOrders, scope: { network: "mainnet", symbol: "BTCUSDT" }, orders: [] } });
+    getAccountTradingAnalytics.mockResolvedValueOnce({ data: { ...completeAnalytics, scope: { network: "mainnet", symbol: "BTCUSDT" } } });
+    appState.refreshRevision = 1;
+    view.rerender(<Orders />);
+    await waitFor(() => expect(getCombinedOpenOrders).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(getAccountTradingAnalytics).toHaveBeenCalledTimes(4));
+  });
+
+  it("ignores a late open-order response from the previous scope", async () => {
+    const oldRequest = deferred();
+    getCombinedOpenOrders
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockResolvedValueOnce({ data: {
+        ...combinedOrders,
+        scope: { network: "testnet", symbol: "BTCUSDT" },
+        orders: [{ ...combinedOrders.orders[0], id: "new", symbol: "BTCUSDT", price: "222" }],
+      } });
+    const view = render(<Orders />);
+    const oldSignal = getCombinedOpenOrders.mock.calls[0][1];
+
+    appState.symbol = "BTCUSDT";
+    getAccountTradingAnalytics.mockResolvedValueOnce({ data: { ...completeAnalytics, scope: { network: "testnet", symbol: "BTCUSDT" } } });
     view.rerender(<Orders />);
     expect(await screen.findByText("222.00")).toBeTruthy();
     expect(oldSignal.aborted).toBe(true);
 
-    resolveOld({ data: [{ id: 1, time: 1_700_000_000_000, symbol: "SOLUSDT", side: "BUY", price: "111", qty: "1", commission: "0.1", commissionAsset: "USDT", realizedPnl: "1" }] });
+    oldRequest.resolve({ data: combinedOrders });
     await Promise.resolve();
-    expect(screen.queryByText("111.00")).toBeNull();
+    expect(screen.queryByText("100.00")).toBeNull();
+  });
+
+  it("distinguishes loading, partial, empty, error, and stale open-order states", async () => {
+    const initial = deferred();
+    getCombinedOpenOrders.mockReturnValueOnce(initial.promise);
+    const view = render(<Orders />);
+    expect(screen.getByText("正在加载挂单")).toBeTruthy();
+
+    initial.resolve({ data: { ...combinedOrders, status: "partial", reasons: ["algo_sync_failed"], orders: [combinedOrders.orders[0]] } });
+    expect(await screen.findByText("部分数据")).toBeTruthy();
+    expect(screen.getByText("普通")).toBeTruthy();
+
+    getCombinedOpenOrders.mockRejectedValueOnce({ response: { data: { detail: "挂单接口暂不可用" } } });
+    fireEvent.click(screen.getByRole("button", { name: "刷新订单数据" }));
+    expect(await screen.findByText("数据可能已过期")).toBeTruthy();
+    expect(screen.getByText("普通")).toBeTruthy();
+
+    getCombinedOpenOrders.mockResolvedValueOnce({ data: { ...combinedOrders, orders: [] } });
+    fireEvent.click(screen.getByRole("button", { name: "刷新订单数据" }));
+    expect(await screen.findByText("暂无挂单")).toBeTruthy();
+
+    getCombinedOpenOrders.mockRejectedValueOnce({ response: { data: { detail: "挂单读取失败" } } });
+    appState.refreshRevision = 1;
+    view.rerender(<Orders />);
+    expect((await screen.findByRole("alert")).textContent).toContain("挂单读取失败");
+  });
+
+  it("keeps zero account metrics valid and labels missing closed-cycle metrics", async () => {
+    getAccountTradingAnalytics.mockResolvedValue({ data: {
+      ...completeAnalytics,
+      coverage: { ...completeAnalytics.coverage, status: "partial", reasons: ["history_retention_limit"] },
+      counts: { status: "partial", completed_total: 0, long: 0, short: 0 },
+      week: { status: "partial", return_status: "partial", net_pnl_usdt: 0, net_return_pct: 0 },
+      month: { status: "partial", return_status: "partial", net_pnl_usdt: 0, net_return_pct: 0 },
+      overall: { status: "partial", completed_count: 0, long: 0, short: 0, win_count: 0, loss_count: 0, win_rate_pct: null, payoff_ratio: null },
+    } });
+    render(<Orders />);
+
+    expect(await screen.findAllByText("+0.00 USDT")).toHaveLength(2);
+    expect(screen.getAllByText("+0.00%")).toHaveLength(2);
+    expect(screen.getAllByText("0")).toHaveLength(2);
+    expect(screen.getAllByText("暂无样本")).toHaveLength(2);
+    expect(screen.getByText("数据覆盖不足")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("Infinity");
+  });
+
+  it("rejects an analytics response for another account scope", async () => {
+    getAccountTradingAnalytics.mockResolvedValue({ data: {
+      ...completeAnalytics,
+      scope: { network: "mainnet", symbol: "SOLUSDT" },
+    } });
+    render(<Orders />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("账户交易统计范围不一致");
+  });
+
+  it("keeps history and trade tabs working with independent requests", async () => {
+    getRecentTrades.mockResolvedValueOnce({ data: [{ id: 2, time: 1_700_000_000_100, symbol: "SOLUSDT", side: "BUY", price: "222", qty: "1", commission: "0.1", commissionAsset: "USDT", realizedPnl: "2" }] });
+    getOrderHistory.mockResolvedValueOnce({ data: [{ orderId: 7, time: 1_700_000_000_000, symbol: "SOLUSDT", side: "SELL", type: "MARKET", price: "0", avgPrice: "98.5", origQty: "2", status: "FILLED" }] });
+    render(<Orders />);
+    await screen.findByText("Algo");
+
+    fireEvent.click(screen.getByRole("button", { name: "交易所成交记录" }));
+    expect(await screen.findByText("222.00")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "历史订单" }));
+    expect(await screen.findByText("98.50")).toBeTruthy();
   });
 });

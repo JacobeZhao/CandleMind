@@ -30,6 +30,11 @@ from backend.app.strategies.sar_pyramid import (
     SarPyramidActionType,
     SarPyramidState,
 )
+from backend.app.strategies.sar_layered import (
+    SarLayeredAction,
+    SarLayeredActionType,
+    SarLayeredState,
+)
 
 
 def _engine_config(**overrides):
@@ -132,6 +137,7 @@ class _Executor:
         self.position = position or _position()
         self.error = error
         self.intents = []
+        self.weighted_calls = []
 
     def current_position(self, _symbol):
         return self.position
@@ -141,6 +147,10 @@ class _Executor:
 
     def layer_quantity(self, **_kwargs):
         return Decimal("0.5")
+
+    def weighted_layer_quantity(self, **kwargs):
+        self.weighted_calls.append(kwargs)
+        return Decimal("0.25")
 
     def execute(self, intent):
         self.intents.append(intent)
@@ -238,6 +248,30 @@ def test_signal_executes_through_executor_and_updates_journal_counters(tmp_path)
     assert summary["submitted_order_count"] == 1
     assert summary["filled_order_count"] == 1
     assert summary["unknown_order_count"] == 0
+
+
+def test_layered_signal_uses_the_action_capital_weight(tmp_path):
+    engine = BotEngine()
+    plan = DecisionPlan(
+        decision_id="bar-layered",
+        actions=(SarLayeredAction(SarLayeredActionType.OPEN, 1, 1, 0.2),),
+        proposed_state=SarLayeredState(),
+        decision_time=pd.Timestamp("1970-01-01T00:04:59.999Z"),
+        execution_time=pd.Timestamp("1970-01-01T00:05:00Z"),
+        reference_price=100.0,
+        no_action_reason=None,
+    )
+    runtime = _Runtime(plan)
+    runtime.serialize_state = lambda _state: {"last_processed_close_time": None}
+    executor = _Executor()
+    store = _store(tmp_path)
+
+    engine._process_snapshot(
+        _snapshot(), "SOLUSDT", runtime, executor, store, "testnet", 250.0
+    )
+
+    assert executor.weighted_calls[0]["capital_weight"] == 0.2
+    assert executor.intents[0].quantity == Decimal("0.25")
 
 
 def test_post_journal_analytics_failure_does_not_repeat_or_block_order(tmp_path):

@@ -27,7 +27,10 @@ from .market_agent_state_store import (
     MarketAgentStateStore,
 )
 from .market_analysis_graph import MAX_ANSWER_LENGTH, MarketAnalysisGraph
+from .market_agent_contracts import JobLane, MarketAgentEvent, MarketAgentJob
+from .market_agent_queue_store import MarketAgentQueueStore, utc_ms
 from .multi_timeframe_market_snapshot import MultiTimeframeMarketDataError
+from .read_only_market_gateway import ReadOnlyMarketGateway
 
 
 SUPPORTED_INTERVALS = {interval: None for interval in ANALYSIS_INTERVALS}
@@ -82,6 +85,7 @@ class MarketAgentManager:
         daily_limit: int | None = None,
         retry_delays: tuple[float, ...] = (5, 10, 20, 40, 80, 160, 300),
         idle_poll_seconds: float = 5.0,
+        queue_store: MarketAgentQueueStore | None = None,
     ) -> None:
         self.store = state_store or MarketAgentStateStore()
         self.graph = graph or MarketAnalysisGraph(
@@ -93,6 +97,9 @@ class MarketAgentManager:
         self.daily_limit = daily_limit if daily_limit is not None else _daily_limit()
         self.retry_delays = retry_delays or (5, 10, 20, 40, 80, 160, 300)
         self.idle_poll_seconds = max(0.1, idle_poll_seconds)
+        self.queue_store = queue_store
+        self.worker_id = f"market-agent-worker:{uuid4()}"
+        self._inbox_streak = 0
         self._lock = asyncio.Lock()
         self._analysis_lock = asyncio.Lock()
         self._sync_lock = Lock()
@@ -108,6 +115,7 @@ class MarketAgentManager:
             "desired_enabled": False,
             "agent_id": None,
             "symbol": None,
+            "network": None,
             "config_id": None,
             "state": "stopped",
             "trigger_interval": TRIGGER_INTERVAL,
@@ -152,12 +160,13 @@ class MarketAgentManager:
     def status(self) -> dict[str, Any]:
         self._load_once()
         state = self._state
-        return {
+        result = {
             "agent_id": state["agent_id"],
             "state": state["state"],
             "desired_enabled": bool(state["desired_enabled"]),
             "enabled": bool(state["desired_enabled"]),
             "symbol": state["symbol"],
+            "network": state.get("network"),
             "trigger_interval": state["trigger_interval"],
             "interval": state["trigger_interval"],
             "analysis_intervals": list(state["analysis_intervals"]),
@@ -174,9 +183,22 @@ class MarketAgentManager:
             "started_at": state["started_at"],
             "updated_at": state["updated_at"],
         }
+        if self.queue_store is not None and state.get("network") and state.get("symbol"):
+            result.update(self.queue_store.status_summary(state["network"], state["symbol"]))
+        return result
 
     def events(self, *, after_sequence: int = 0, limit: int = MAX_EVENTS) -> list[dict[str, Any]]:
         self._load_once()
+        if self.queue_store is not None and self._state.get("network") and self._state.get("symbol"):
+            return [
+                self._ledger_event_payload(event)
+                for event in self.queue_store.events(
+                    after_sequence=after_sequence,
+                    limit=limit,
+                    network=self._state["network"],
+                    symbol=self._state["symbol"],
+                )
+            ]
         return [
             dict(event)
             for event in self._state["events"]
@@ -220,8 +242,10 @@ class MarketAgentManager:
                 self._state["symbol"] = symbol
             elif not self._state["agent_id"]:
                 self._state["agent_id"] = str(uuid4())
+            client = self.client_getter()
             self._state.update(
                 desired_enabled=True,
+                network="testnet" if bool(getattr(client, "testnet", False)) else "mainnet",
                 config_id=config_id,
                 state="running",
                 retry_attempt=0,
@@ -235,8 +259,9 @@ class MarketAgentManager:
             self._generation += 1
             generation = self._generation
             self._save()
+            runner = self._run_queue if self.queue_store is not None else self._run
             self._task = asyncio.create_task(
-                self._run(generation, immediate=stopped_to_started),
+                runner(generation, immediate=stopped_to_started),
                 name=f"market-agent-{self._state['agent_id']}",
             )
             return self.status()
@@ -264,12 +289,20 @@ class MarketAgentManager:
 
     async def restore(self) -> dict[str, Any]:
         self.store.acquire_worker_lock()
+        if self.queue_store is not None:
+            await asyncio.to_thread(self.queue_store.initialize)
+            await asyncio.to_thread(self.queue_store.recover_expired_leases)
         async with self._lock:
             self._load_once()
             if not self._state["desired_enabled"] or not self._state["symbol"]:
                 self._state["state"] = "stopped"
                 self._save()
                 return self.status()
+            if not self._state.get("network"):
+                client = self.client_getter()
+                self._state["network"] = (
+                    "testnet" if bool(getattr(client, "testnet", False)) else "mainnet"
+                )
             if self._task is not None and not self._task.done():
                 return self.status()
             self._state["state"] = (
@@ -280,8 +313,9 @@ class MarketAgentManager:
             self._generation += 1
             generation = self._generation
             self._save()
+            runner = self._run_queue if self.queue_store is not None else self._run
             self._task = asyncio.create_task(
-                self._run(generation, immediate=False),
+                runner(generation, immediate=False),
                 name=f"market-agent-{self._state['agent_id']}",
             )
             return self.status()
@@ -297,7 +331,9 @@ class MarketAgentManager:
         await self.graph.close()
         self.store.release_worker_lock()
 
-    async def message(self, *, symbol: str, content: str) -> dict[str, Any]:
+    async def message(
+        self, *, symbol: str, content: str, client_message_id: str | None = None
+    ) -> dict[str, Any]:
         message = content.strip()
         if not message or len(message) > MAX_MANUAL_MESSAGE_LENGTH:
             raise MarketAgentError("invalid_message", "Message must contain 1 to 1000 characters")
@@ -309,6 +345,21 @@ class MarketAgentManager:
                     "Start the market agent for this symbol before sending a message",
                     status_code=409,
                 )
+            if self.queue_store is not None:
+                job = await asyncio.to_thread(
+                    self.queue_store.enqueue_inbox_message,
+                    self._state["network"],
+                    symbol,
+                    client_message_id or str(uuid4()),
+                    message,
+                    priority=100,
+                )
+                return {
+                    "accepted": True,
+                    "job_id": job.id,
+                    "state": job.state.value,
+                    "client_message_id": job.payload.get("client_message_id"),
+                }
             generation = self._generation
             user_event = self._append_event(
                 event_type="user_message",
@@ -352,6 +403,234 @@ class MarketAgentManager:
         if event is None:
             raise MarketAgentError("analysis_cancelled", "Market analysis was cancelled", status_code=409)
         return event
+
+    async def on_closed_kline(self, payload: dict[str, Any]) -> None:
+        """Persist one validated 5m close when it matches the active agent scope."""
+        if self.queue_store is None:
+            return
+        self._load_once()
+        symbol = str(payload.get("symbol", "")).upper()
+        network = str(payload.get("network", "")).lower()
+        if (
+            not self._state.get("desired_enabled")
+            or symbol != self._state.get("symbol")
+            or network != self._state.get("network")
+            or payload.get("interval") != TRIGGER_INTERVAL
+        ):
+            return
+        close_time = int(payload["close_time"])
+        await asyncio.to_thread(
+            self.queue_store.enqueue_market_job,
+            network,
+            symbol,
+            f"5m:{close_time}",
+            payload={"cutoff_ms": close_time, "closed_kline": dict(payload)},
+            reasons=("candle_closed",),
+            priority=10,
+        )
+
+    async def _run_queue(self, generation: int, *, immediate: bool = False) -> None:
+        del immediate
+        assert self.queue_store is not None
+        await asyncio.to_thread(self.queue_store.initialize)
+        await asyncio.to_thread(self.queue_store.recover_expired_leases)
+        await self._publish_pending_events()
+        while generation == self._generation and self._state["desired_enabled"]:
+            self._reset_daily_usage_if_needed()
+            if self._state["daily_usage_count"] >= self.daily_limit:
+                self._state.update(state="paused_budget", paused_reason="daily_budget")
+                self._save()
+                await asyncio.sleep(min(60.0, self.idle_poll_seconds))
+                continue
+            job = await asyncio.to_thread(self._claim_fair_job)
+            if job is None:
+                await self._publish_pending_events()
+                await asyncio.sleep(self.idle_poll_seconds)
+                continue
+            try:
+                await self._process_queued_job(job, generation)
+                self._state.update(
+                    state="running", paused_reason=None, retry_attempt=0, retry_not_before=None
+                )
+                self._save()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._release_failed_job(job, exc)
+            await self._publish_pending_events()
+
+    def _claim_fair_job(self) -> MarketAgentJob | None:
+        assert self.queue_store is not None
+        scope = {
+            "network": self._state["network"],
+            "symbol": self._state["symbol"],
+            "lease_ms": 180_000,
+        }
+        lanes = [JobLane.MARKET] if self._inbox_streak >= 2 else [JobLane.INBOX]
+        job = self.queue_store.claim_next(self.worker_id, lanes=lanes, **scope)
+        if job is None:
+            other = [JobLane.INBOX] if lanes == [JobLane.MARKET] else [JobLane.MARKET]
+            job = self.queue_store.claim_next(self.worker_id, lanes=other, **scope)
+        if job is not None:
+            self._inbox_streak = self._inbox_streak + 1 if job.lane is JobLane.INBOX else 0
+        return job
+
+    async def _process_queued_job(self, job: MarketAgentJob, generation: int) -> None:
+        if generation != self._generation or not self._state["desired_enabled"]:
+            raise asyncio.CancelledError
+        client = self.client_getter()
+        if client is None:
+            raise MarketAgentError(
+                "market_unavailable", "Binance market service is unavailable", retryable=True
+            )
+        config_id, provider_config, proxy_url = await asyncio.to_thread(
+            self._resolve_config, None
+        )
+        self._state["config_id"] = config_id
+        self._state["daily_usage_count"] += 1
+        self._state["active_batch_id"] = job.id
+        self._save()
+        manual = job.lane is JobLane.INBOX
+
+        async def on_batch_ready(batch_id: str, thread_id: str, cutoff: str) -> None:
+            self._state.update(
+                active_batch_id=job.id,
+                active_thread_id=thread_id,
+                last_scheduled_cutoff=cutoff,
+            )
+            self._save()
+
+        history = []
+        if manual:
+            history = [
+                item for item in self._state["summaries"] if item.get("role") == "assistant"
+            ][-MAX_SUMMARIES:]
+        heartbeat = asyncio.create_task(
+            self._renew_job_lease(job.id), name=f"market-agent-lease-{job.id}"
+        )
+        try:
+            result = await self.graph.run(
+                symbol=job.symbol,
+                mode="manual" if manual else "automatic",
+                manual_query=job.payload.get("content") if manual else None,
+                history=history,
+                client=ReadOnlyMarketGateway(client),
+                provider_config=provider_config,
+                proxy_url=proxy_url,
+                thread_id=job.id,
+                cutoff_ms=job.payload.get("cutoff_ms"),
+                on_batch_ready=on_batch_ready,
+            )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+        five_minute = result["snapshot"]["intervals"]["5m"]
+        structured = {
+            **dict(result.get("structured") or {}),
+            "bar_closed_at": result["snapshot"]["trigger_cutoff"],
+            "close": five_minute["close"],
+            "sar_direction": five_minute["sar"]["direction"],
+            "adx": five_minute["adx"]["value"],
+            "plus_di": five_minute["adx"]["plus_di"],
+            "minus_di": five_minute["adx"]["minus_di"],
+        }
+        if manual:
+            structured["client_message_id"] = job.payload.get("client_message_id")
+        event = await asyncio.to_thread(
+            self.queue_store.complete_job,
+            job.id,
+            self.worker_id,
+            result={"batch_id": result["batch_id"], "structured": structured},
+            event_type="assistant_message" if manual else "analysis",
+            role="assistant",
+            content=str(result["answer"])[:MAX_ANSWER_LENGTH],
+            structured=structured,
+            reasons=result["reasons"],
+        )
+        self._append_summary(dict(result["summary"]))
+        self._state.update(
+            active_batch_id=None,
+            active_thread_id=None,
+            last_committed_batch_id=job.id,
+        )
+        self._save()
+        await self._publish_ledger_event(event)
+
+    async def _renew_job_lease(self, job_id: str) -> None:
+        assert self.queue_store is not None
+        while True:
+            await asyncio.sleep(60)
+            await asyncio.to_thread(
+                self.queue_store.renew_lease,
+                job_id,
+                self.worker_id,
+                lease_ms=180_000,
+            )
+
+    async def _release_failed_job(self, job: MarketAgentJob, exc: Exception) -> None:
+        assert self.queue_store is not None
+        retryable = not isinstance(exc, MarketAgentError) or exc.retryable
+        code = getattr(exc, "code", "analysis_failed")
+        try:
+            if retryable and job.attempts < len(self.retry_delays):
+                delay = self.retry_delays[min(job.attempts - 1, len(self.retry_delays) - 1)]
+                await asyncio.to_thread(
+                    self.queue_store.retry_job,
+                    job.id,
+                    self.worker_id,
+                    available_at_ms=utc_ms() + int(delay * 1000),
+                    error_code=code,
+                )
+                self._state.update(state="retry_wait", paused_reason=code)
+            else:
+                await asyncio.to_thread(
+                    self.queue_store.fail_job,
+                    job.id,
+                    self.worker_id,
+                    error_code=code,
+                )
+                self._state.update(state="paused_config", paused_reason=code)
+            self._save()
+        except Exception:
+            logger.exception("Market agent failed to release queued job {}", job.id)
+
+    async def _publish_pending_events(self) -> None:
+        if self.queue_store is None:
+            return
+        events = await asyncio.to_thread(
+            self.queue_store.events, after_sequence=0, limit=100, unpublished_only=True
+        )
+        for event in events:
+            await self._publish_ledger_event(event)
+
+    async def _publish_ledger_event(self, event: MarketAgentEvent) -> None:
+        assert self.queue_store is not None
+        payload = self._ledger_event_payload(event)
+        await self.notifier({"type": "market_agent_event", "data": payload})
+        await asyncio.to_thread(self.queue_store.mark_event_published, event.sequence)
+
+    @staticmethod
+    def _ledger_event_payload(event: MarketAgentEvent) -> dict[str, Any]:
+        created_at = datetime.fromtimestamp(
+            event.created_at_ms / 1000, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        return {
+            "sequence": event.sequence,
+            "job_id": event.job_id,
+            "batch_id": event.job_id,
+            "type": event.event_type,
+            "event_type": event.event_type,
+            "role": event.role,
+            "content": event.content,
+            "answer": event.content,
+            "network": event.network,
+            "symbol": event.symbol,
+            "reasons": list(event.reasons),
+            "context": dict(event.structured),
+            "structured": dict(event.structured),
+            "bar_closed_at": event.structured.get("bar_closed_at"),
+            "created_at": created_at,
+        }
 
     def _resolve_config(self, expected_id: int | None) -> tuple[int, dict[str, Any], str | None]:
         session = None
@@ -631,4 +910,4 @@ class MarketAgentManager:
         )
 
 
-market_agent_manager = MarketAgentManager()
+market_agent_manager = MarketAgentManager(queue_store=MarketAgentQueueStore())

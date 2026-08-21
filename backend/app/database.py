@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Integer, String, Text, create_engine
+from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .runtime_paths import RUNTIME_DATA_DIR
@@ -55,6 +55,17 @@ class AIConfig(Base):
     is_active = Column(Boolean, default=False)
 
 
+class StrategyConfiguration(Base):
+    __tablename__ = "strategy_configuration"
+
+    id = Column(Integer, primary_key=True, default=1)
+    strategy_type = Column(String(40), nullable=False)
+    config_version = Column(String(40), nullable=False)
+    parameters_json = Column(Text, nullable=False)
+    config_hash = Column(String(64), nullable=False)
+    updated_at_ms = Column(BigInteger, nullable=False)
+
+
 def _add_col_if_missing(conn, table: str, column: str, definition: str) -> None:
     from sqlalchemy import text
 
@@ -96,6 +107,10 @@ def init_db() -> None:
                 settings.api_key_main_enc = settings.api_key_enc
                 settings.api_secret_main_enc = settings.api_secret_enc
             db.commit()
+
+        from .services.strategy_configuration import ensure_strategy_configuration
+
+        ensure_strategy_configuration(db)
     finally:
         db.close()
 

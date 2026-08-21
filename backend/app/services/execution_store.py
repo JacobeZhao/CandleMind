@@ -174,6 +174,28 @@ class ExecutionStore:
             raise ExecutionStoreError("execution journal is unreadable") from exc
         return self._validate_document(payload, network=network, symbol=symbol)
 
+    def archive(self, network: str, symbol: str) -> Path | None:
+        """Atomically move a reconciled, inactive journal into the archive tree."""
+
+        _validate_identity(network, symbol)
+        with self._lock:
+            document = self.load(network, symbol)
+            if document is None:
+                return None
+            for decision in document["decisions"].values():
+                for order in decision["orders"].values():
+                    if order["result"]["status"] not in TERMINAL_STATUSES:
+                        raise ExecutionStoreConflict(
+                            "execution journal has non-terminal orders and cannot be archived"
+                        )
+            source = self.path_for(network, symbol)
+            archive_dir = self.root / "archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            target = archive_dir / f"{source.stem}_{stamp}{source.suffix}"
+            os.replace(source, target)
+            return target
+
     def record_decision(
         self,
         network: str,

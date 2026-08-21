@@ -3,7 +3,7 @@ import { NavLink } from "react-router-dom";
 import {
   CandlestickChart,
   ClipboardList,
-  FlaskConical,
+  SlidersHorizontal,
   LayoutDashboard,
   LineChart,
   Settings,
@@ -14,7 +14,7 @@ const nav = [
   { to: "/", icon: LayoutDashboard, label: "首页" },
   { to: "/markets", icon: LineChart, label: "行情" },
   { to: "/orders", icon: ClipboardList, label: "订单" },
-  { to: "/backtest", icon: FlaskConical, label: "回测" },
+  { to: "/strategies", icon: SlidersHorizontal, label: "策略" },
   { to: "/settings", icon: Settings, label: "设置" },
 ];
 

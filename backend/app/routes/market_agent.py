@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..services.market_agent import MarketAgentError, market_agent_manager
@@ -66,9 +66,25 @@ async def start_market_agent(body: MarketAgentStartRequest):
 
 
 @router.post("/market-agent/messages")
-async def send_market_agent_message(body: MarketAgentMessageRequest):
+async def send_market_agent_message(
+    body: MarketAgentMessageRequest,
+    response: Response,
+    client_message_id: str | None = Header(default=None, alias="X-Client-Message-Id"),
+):
     try:
-        return await market_agent_manager.message(symbol=body.symbol, content=body.content)
+        if client_message_id is None:
+            result = await market_agent_manager.message(
+                symbol=body.symbol, content=body.content
+            )
+        else:
+            result = await market_agent_manager.message(
+                symbol=body.symbol,
+                content=body.content,
+                client_message_id=client_message_id,
+            )
+        if result.get("accepted"):
+            response.status_code = status.HTTP_202_ACCEPTED
+        return result
     except MarketAgentError as exc:
         _raise_api_error(exc)
 

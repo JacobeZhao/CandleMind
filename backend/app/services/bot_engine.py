@@ -17,7 +17,11 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import SSLError as RequestsSSLError
 from requests.exceptions import Timeout as RequestsTimeout
 
-from backend.app.strategies.sar_pyramid import PositionSnapshot, SarPyramidActionType
+from backend.app.strategies.sar_pyramid import (
+    PositionSnapshot,
+    SarPyramidActionType,
+    SarPyramidConfig,
+)
 
 from .exchange_executor import (
     ExchangeExecutionError,
@@ -35,11 +39,19 @@ from .live_strategy_runtime import (
     LiveStrategyRuntime,
     LiveStrategyRuntimeError,
 )
+from .live_layered_runtime import LiveLayeredStrategyRuntime
+from .strategy_configuration import configuration_hash
 
 
 STRATEGY_TYPE = "sar_adx_pyramid"
 CONFIG_VERSION = "sar_adx_v3"
 BAR_INTERVAL = "5m"
+SUPPORTED_STRATEGY_VERSIONS = {
+    STRATEGY_TYPE: CONFIG_VERSION,
+    "sar_adx_trend": "sar_adx_trend_v1",
+    "sar_martingale": "sar_martingale_v1",
+    "sar_anti_martingale": "sar_anti_martingale_v1",
+}
 
 
 @dataclass(frozen=True)
@@ -99,6 +111,7 @@ class BotEngine:
         self._strategy_name = ""
         self._strategy_type = ""
         self._config_version = ""
+        self._config_hash = ""
         self._symbol = ""
         self.paper = False
         self._capital_limit = 0.0
@@ -139,6 +152,7 @@ class BotEngine:
             "strategy_name": self._strategy_name,
             "strategy_type": self._strategy_type,
             "config_version": self._config_version,
+            "config_hash": self._config_hash or None,
             "symbol": self._symbol,
             "paper": False,
             "network": self._network or None,
@@ -149,6 +163,45 @@ class BotEngine:
             **summary,
         }
         return status
+
+    async def assert_configuration_change_safe(
+        self, client, symbol: str, network: str
+    ) -> None:
+        """Fail closed unless execution is fully stopped, reconciled, and flat."""
+
+        async with self._lifecycle_lock:
+            await self._reap_terminal_task()
+            if self.running or self._task is not None or self.engine_state != "stopped":
+                raise ValueError("strategy execution is not fully stopped")
+            normalized = symbol.strip().upper()
+            exchange_info = await asyncio.to_thread(client.futures_exchange_info)
+            executor = ExchangeExecutor(
+                client, SymbolRules.from_exchange_info(exchange_info, normalized)
+            )
+            store = ExecutionStore()
+            await asyncio.to_thread(
+                self._reconcile_execution_journal,
+                executor,
+                store,
+                network,
+                normalized,
+            )
+            journal_position = self._journal_position(store, network, normalized)
+            validation = await asyncio.to_thread(
+                executor.validate_one_way_account,
+                normalized,
+                allow_existing_position=journal_position.direction != 0,
+            )
+            position = await asyncio.to_thread(
+                executor.validate_symbol_risk, normalized
+            )
+            if validation.open_order_count:
+                raise ValueError("open orders prevent changing strategy configuration")
+            if position.direction or journal_position.direction:
+                raise ValueError("an open position prevents changing strategy configuration")
+
+    def has_execution_journal(self, symbol: str, network: str) -> bool:
+        return ExecutionStore().load(network, symbol.strip().upper()) is not None
 
     def _execution_summary(self) -> dict[str, int]:
         empty = {
@@ -187,12 +240,62 @@ class BotEngine:
 
             executor = ExchangeExecutor(client, SymbolRules.from_exchange_info(exchange_info, symbol))
             store = ExecutionStore()
-            run_id = f"cm-{network}-{symbol}-{CONFIG_VERSION}"
+            strategy_type = str(cfg["strategy_type"])
+            config_version = str(cfg["config_version"])
+            config_hash = str(cfg.get("config_hash") or "legacy")
+            capital_identity = format(capital_limit, ".12g")
+            run_id = (
+                f"cm-{network}-{symbol}-{config_version}-{config_hash[:12]}-"
+                f"cap{capital_identity}"
+            )
+            metadata = {
+                "strategy_type": strategy_type,
+                "config_version": config_version,
+                "config_hash": config_hash,
+                "capital_limit": capital_identity,
+            }
+            existing = store.load(network, symbol)
+            if existing is not None and {
+                "run_id": existing["run"]["run_id"],
+                "metadata": existing["run"]["metadata"],
+            } != {"run_id": run_id, "metadata": metadata}:
+                await asyncio.to_thread(
+                    self._reconcile_execution_journal,
+                    executor,
+                    store,
+                    network,
+                    symbol,
+                )
+                previous_position = self._journal_position(store, network, symbol)
+                previous_validation = await asyncio.to_thread(
+                    executor.validate_one_way_account,
+                    symbol,
+                    allow_existing_position=previous_position.direction != 0,
+                )
+                exchange_position = await asyncio.to_thread(
+                    executor.validate_symbol_risk, symbol
+                )
+                if previous_validation.open_order_count:
+                    raise UnsupportedAccountError(
+                        "existing open orders prevent a strategy configuration switch"
+                    )
+                if (
+                    exchange_position.direction != previous_position.direction
+                    or exchange_position.quantity != previous_position.quantity
+                ):
+                    raise UnsupportedAccountError(
+                        "exchange position does not match the previous execution journal"
+                    )
+                if previous_position.direction:
+                    raise UnsupportedAccountError(
+                        "close the existing position before switching strategy configuration"
+                    )
+                await asyncio.to_thread(store.archive, network, symbol)
             store.initialize(
                 network,
                 symbol,
                 run_id=run_id,
-                metadata={"strategy_type": STRATEGY_TYPE, "config_version": CONFIG_VERSION},
+                metadata=metadata,
             )
             await asyncio.to_thread(
                 self._reconcile_execution_journal,
@@ -202,7 +305,7 @@ class BotEngine:
                 symbol,
             )
             restored = self._restored_strategy_state(store, network, symbol)
-            runtime = LiveStrategyRuntime(symbol, restored_payload=restored)
+            runtime = self._build_runtime(symbol, cfg, restored)
             journal_position = self._journal_position(store, network, symbol)
             validation = await asyncio.to_thread(
                 executor.validate_one_way_account,
@@ -216,10 +319,25 @@ class BotEngine:
                 raise UnsupportedAccountError("exchange position quantity does not match the execution journal")
             if validation.open_order_count:
                 raise UnsupportedAccountError("existing open orders require reconciliation")
-            if await asyncio.to_thread(executor.available_balance) <= 0:
+            available_balance = await asyncio.to_thread(executor.available_balance)
+            if available_balance <= 0:
                 raise UnsupportedAccountError("available USDT balance is zero")
+            if isinstance(runtime, LiveLayeredStrategyRuntime):
+                mark_payload = await asyncio.to_thread(
+                    client.futures_mark_price, symbol=symbol
+                )
+                reference_price = float(mark_payload["markPrice"])
+                for weight in runtime.config.layer_weights:
+                    executor.weighted_layer_quantity(
+                        available_balance=available_balance,
+                        capital_limit=capital_limit,
+                        reference_price=reference_price,
+                        capital_weight=weight,
+                    )
             self._capture_analytics_run(
                 client, store, network, symbol, run_id, capital_limit,
+                strategy_type=strategy_type,
+                config_version=config_version,
                 resume_existing=journal_position.direction != 0,
             )
             first_cycle = await self._cycle(
@@ -243,8 +361,9 @@ class BotEngine:
                 )
                 self.error_msg = ""
                 self._strategy_name = cfg.get("name", "CandleMind Trend Strategy")
-                self._strategy_type = STRATEGY_TYPE
-                self._config_version = CONFIG_VERSION
+                self._strategy_type = strategy_type
+                self._config_version = config_version
+                self._config_hash = config_hash
                 self._symbol = symbol
                 self.paper = False
                 self._capital_limit = capital_limit
@@ -275,7 +394,7 @@ class BotEngine:
                 "Engine started: {} {} [{}] network={}",
                 symbol,
                 BAR_INTERVAL,
-                STRATEGY_TYPE,
+                strategy_type,
                 network,
             )
 
@@ -330,7 +449,7 @@ class BotEngine:
         self,
         client,
         symbol: str,
-        runtime: LiveStrategyRuntime,
+        runtime: Any,
         executor: ExchangeExecutor,
         store: ExecutionStore,
         network: str,
@@ -362,7 +481,7 @@ class BotEngine:
         self,
         client,
         symbol: str,
-        runtime: LiveStrategyRuntime | None = None,
+        runtime: Any | None = None,
         *,
         executor: ExchangeExecutor | None = None,
         store: ExecutionStore | None = None,
@@ -394,7 +513,7 @@ class BotEngine:
         self,
         client,
         symbol: str,
-        runtime: LiveStrategyRuntime,
+        runtime: Any,
         executor: ExchangeExecutor,
         store: ExecutionStore,
         network: str,
@@ -498,7 +617,7 @@ class BotEngine:
         self,
         snapshot: _MarketSnapshot,
         symbol: str,
-        runtime: LiveStrategyRuntime,
+        runtime: Any,
         executor: ExchangeExecutor,
         store: ExecutionStore,
         network: str,
@@ -556,7 +675,11 @@ class BotEngine:
             decision_id=plan.decision_id,
             action=",".join(action.action.value for action in plan.actions) or "HOLD",
             details={
-                "strategy_state": asdict(plan.proposed_state),
+                "strategy_state": (
+                    runtime.serialize_state(plan.proposed_state)
+                    if hasattr(runtime, "serialize_state")
+                    else asdict(plan.proposed_state)
+                ),
                 "decision_time": plan.decision_time.isoformat(),
                 "execution_time": None if plan.execution_time is None else plan.execution_time.isoformat(),
                 "capital_limit": capital_limit,
@@ -568,23 +691,46 @@ class BotEngine:
         filled = 0
         for ordinal, action in enumerate(plan.actions):
             current = executor.current_position(symbol)
-            if action.action in {SarPyramidActionType.OPEN, SarPyramidActionType.ADD}:
+            action_value = action.action.value
+            if action_value in {
+                SarPyramidActionType.OPEN.value,
+                SarPyramidActionType.ADD.value,
+            }:
+                if action_value == SarPyramidActionType.OPEN.value and current.direction:
+                    raise UnsupportedAccountError("open intent requires a flat exchange position")
+                if action_value == SarPyramidActionType.ADD.value and current.direction != action.direction:
+                    raise UnsupportedAccountError(
+                        "add intent direction does not match the exchange position"
+                    )
                 available = executor.available_balance()
-                quantity = executor.layer_quantity(
-                    available_balance=available,
-                    capital_limit=capital_limit,
-                    reference_price=plan.reference_price or mark_price,
-                    layers=runtime.config.layers,
-                    target_fraction=runtime.config.target_notional_fraction,
-                )
+                capital_weight = float(getattr(action, "capital_weight", 0.0))
+                if capital_weight > 0:
+                    quantity = executor.weighted_layer_quantity(
+                        available_balance=available,
+                        capital_limit=capital_limit,
+                        reference_price=plan.reference_price or mark_price,
+                        capital_weight=capital_weight,
+                    )
+                else:
+                    quantity = executor.layer_quantity(
+                        available_balance=available,
+                        capital_limit=capital_limit,
+                        reference_price=plan.reference_price or mark_price,
+                        layers=runtime.config.layers,
+                        target_fraction=runtime.config.target_notional_fraction,
+                    )
                 intent_type = (
                     OrderIntentType.OPEN
-                    if action.action is SarPyramidActionType.OPEN
+                    if action_value == SarPyramidActionType.OPEN.value
                     else OrderIntentType.ADD
                 )
             else:
                 if not current.direction:
                     raise UnsupportedAccountError("close intent has no exchange position")
+                if current.direction != action.direction:
+                    raise UnsupportedAccountError(
+                        "close intent direction does not match the exchange position"
+                    )
                 quantity = current.quantity
                 intent_type = OrderIntentType.CLOSE
             intent = OrderIntent(
@@ -669,10 +815,11 @@ class BotEngine:
             return None
         for decision in reversed(list(document["decisions"].values())):
             orders = list(decision["orders"].values())
-            expected = decision.get("details", {}).get("expected_order_count")
-            if expected is None or len(orders) != int(expected):
-                continue
-            if any(order["result"]["status"] != "filled" for order in orders):
+            if any(
+                order["result"]["status"]
+                not in {"filled", "rejected", "cancelled"}
+                for order in orders
+            ):
                 continue
             details = decision.get("details", {})
             state = details.get("strategy_state")
@@ -820,6 +967,8 @@ class BotEngine:
         run_id: str,
         capital_limit: float,
         *,
+        strategy_type: str,
+        config_version: str,
         resume_existing: bool = False,
     ) -> None:
         """Persist run ownership after validation and before any order can be sent."""
@@ -834,8 +983,8 @@ class BotEngine:
                 network,
                 symbol,
                 run_id=analytics_run_id,
-                strategy_type=STRATEGY_TYPE,
-                config_version=CONFIG_VERSION,
+                strategy_type=strategy_type,
+                config_version=config_version,
                 allocation_equity=capital_limit,
                 execution_store=store,
                 resume_existing=resume_existing,
@@ -970,8 +1119,9 @@ class BotEngine:
 
     def _same_runtime(self, cfg: dict) -> bool:
         return (
-            cfg.get("strategy_type") == STRATEGY_TYPE
-            and cfg.get("config_version") == CONFIG_VERSION
+            cfg.get("strategy_type") == self._strategy_type
+            and cfg.get("config_version") == self._config_version
+            and str(cfg.get("config_hash") or "legacy") == self._config_hash
             and str(cfg.get("symbol", "")).upper() == self._symbol
             and str(cfg.get("network", "")) == self._network
             and float(cfg.get("capital_limit", 0.0)) == self._capital_limit
@@ -980,12 +1130,31 @@ class BotEngine:
 
     @staticmethod
     def _validate_config(cfg: dict) -> tuple[str, float, float, str]:
-        if cfg.get("strategy_type") != STRATEGY_TYPE:
-            raise ValueError(f"unsupported production strategy: {cfg.get('strategy_type')}")
-        if cfg.get("config_version") != CONFIG_VERSION:
-            raise ValueError(f"unsupported SAR/ADX config version: {cfg.get('config_version')}")
+        strategy_type = str(cfg.get("strategy_type", ""))
+        expected_version = SUPPORTED_STRATEGY_VERSIONS.get(strategy_type)
+        if expected_version is None:
+            raise ValueError(f"unsupported production strategy: {strategy_type}")
+        if cfg.get("config_version") != expected_version:
+            raise ValueError(f"unsupported strategy config version: {cfg.get('config_version')}")
         if cfg.get("interval", BAR_INTERVAL) != BAR_INTERVAL:
-            raise ValueError("SAR/ADX runtime requires the 5m interval")
+            raise ValueError("strategy runtime requires the 5m interval")
+        if strategy_type != STRATEGY_TYPE:
+            config_hash = cfg.get("config_hash")
+            if (
+                not isinstance(config_hash, str)
+                or len(config_hash) != 64
+                or any(character not in "0123456789abcdef" for character in config_hash)
+            ):
+                raise ValueError("strategy configuration hash is invalid")
+            if not isinstance(cfg.get("parameters"), dict):
+                raise ValueError("strategy parameters are required")
+            expected_hash = configuration_hash(
+                strategy_type,
+                expected_version,
+                cfg["parameters"],
+            )
+            if config_hash != expected_hash:
+                raise ValueError("strategy configuration hash does not match parameters")
 
         symbol = str(cfg.get("symbol", "")).strip().upper()
         if not symbol:
@@ -1000,6 +1169,46 @@ class BotEngine:
         if not math.isfinite(check_interval) or check_interval <= 0.0:
             raise ValueError("check interval must be positive")
         return symbol, capital_limit, check_interval, network
+
+    @staticmethod
+    def _build_runtime(
+        symbol: str,
+        cfg: dict,
+        restored: dict[str, Any] | None,
+    ) -> Any:
+        strategy_type = str(cfg["strategy_type"])
+        if strategy_type in {"sar_martingale", "sar_anti_martingale"}:
+            return LiveLayeredStrategyRuntime(
+                symbol,
+                strategy_type=strategy_type,
+                config_version=str(cfg["config_version"]),
+                parameters=cfg["parameters"],
+                restored_payload=restored,
+            )
+        if strategy_type == "sar_adx_trend":
+            parameters = cfg["parameters"]
+            config = SarPyramidConfig(
+                target_notional_fraction=1.0,
+                layers=int(parameters["max_layers"]),
+                sar_step=float(parameters["sar_step"]),
+                sar_max=float(parameters["sar_max"]),
+                use_adx_filter=True,
+                adx_timeframe=str(parameters["adx_timeframe"]),
+                adx_period=int(parameters["adx_period"]),
+                adx_threshold=float(parameters["adx_threshold"]),
+                adx_rising_periods=int(parameters["adx_rising_periods"]),
+                entry_confirmation_bars=int(parameters["entry_confirmation_bars"]),
+                recapture_buffer_fraction=float(parameters["recapture_buffer_fraction"]),
+                require_progressive_adds=True,
+                max_entries_per_adx_regime=int(parameters["max_entries_per_adx_regime"]),
+            )
+            return LiveStrategyRuntime(
+                symbol,
+                restored_payload=restored,
+                config=config,
+                config_version=str(cfg["config_version"]),
+            )
+        return LiveStrategyRuntime(symbol, restored_payload=restored)
 
     @staticmethod
     def _is_tradable(exchange_info: dict, symbol: str) -> bool:
@@ -1033,6 +1242,7 @@ class BotEngine:
         self._strategy_name = ""
         self._strategy_type = ""
         self._config_version = ""
+        self._config_hash = ""
         self._symbol = ""
         self._analytics_service = None
         self._analytics_scope_id = None

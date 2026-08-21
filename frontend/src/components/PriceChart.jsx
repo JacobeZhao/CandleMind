@@ -1,19 +1,26 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { MessageSquare } from "lucide-react";
 import { createChart, LineStyle } from "lightweight-charts";
 import { getKlines } from "../api/client";
 import { getTickerSnapshot, subscribeTicker } from "../context/MarketTickerContext";
 
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
+const MAIN_INDICATORS = [
+  { value: "psar", label: "SAR", requestId: "psar", params: { step: 0.02, max: 0.2 } },
+  { value: "ema20", label: "EMA20", requestId: "ema", params: { period: 20 } },
+  { value: "ema100", label: "EMA100", requestId: "ema", params: { period: 100 } },
+  { value: "supertrend", label: "超级趋势", requestId: "supertrend", params: { period: 10, multiplier: 3 } },
+  { value: "bb", label: "布林带", requestId: "bb", params: { period: 20, std_dev: 2 } },
+];
+const SUMMARY_INDICATORS = ["adx", "atr", "rsi"];
+const SUMMARY_PARAMS = {
+  adx: { period: 14 },
+  atr: { period: 14 },
+  rsi: { period: 14 },
+};
 const VISIBLE_BARS = 80;
 const BOUNDARY_REFRESH_DELAY_MS = 250;
 const BOUNDARY_RETRY_DELAY_MS = 500;
 const MAX_BOUNDARY_ATTEMPTS_PER_EVENT = 2;
-const FIXED_INDICATORS = ["psar", "adx"];
-const FIXED_INDICATOR_PARAMS = {
-  psar: { step: 0.02, max: 0.2 },
-  adx: { period: 14 },
-};
 const INTERVAL_MS = {
   "1m": 60_000,
   "5m": 5 * 60_000,
@@ -37,9 +44,9 @@ function toTimestamp(row) {
   return Math.floor(new Date(row.open_time).getTime() / 1000);
 }
 
-function line(chart, scaleId, color, lineWidth = 1) {
+function line(chart, color, lineWidth = 1) {
   return chart.addLineSeries({
-    priceScaleId: scaleId,
+    priceScaleId: "right",
     color,
     lineWidth,
     lineStyle: LineStyle.Solid,
@@ -68,30 +75,64 @@ function safeSet(series, data) {
   }
 }
 
-function clearSeries(series) {
-  Object.values(series).forEach((item) => safeSet(item, []));
+function clearOverlaySeries(series) {
+  [
+    "psarBull",
+    "psarBear",
+    "ema",
+    "supertrendBull",
+    "supertrendBear",
+    "bbUpper",
+    "bbMiddle",
+    "bbLower",
+  ].forEach((key) => safeSet(series[key], []));
 }
 
-function updateFixedIndicators(series, data) {
-  const timestamped = (column) => data
+function values(data, column) {
+  return data
     .filter((row) => row[column] != null)
-    .map((row) => ({ time: toTimestamp(row), value: row[column] }));
+    .map((row) => ({ time: toTimestamp(row), value: Number(row[column]) }));
+}
 
-  safeSet(
-    series.psarBull,
-    data
-      .filter((row) => row.psar != null && row.psar_direction === 1)
-      .map((row) => ({ time: toTimestamp(row), value: row.psar })),
-  );
-  safeSet(
-    series.psarBear,
-    data
-      .filter((row) => row.psar != null && row.psar_direction === -1)
-      .map((row) => ({ time: toTimestamp(row), value: row.psar })),
-  );
-  safeSet(series.adx, timestamped("adx14"));
-  safeSet(series.plusDi, timestamped("pdi"));
-  safeSet(series.minusDi, timestamped("ndi"));
+function segmentedValues(data, column, directionColumn, direction) {
+  return data.map((row) => {
+    const time = toTimestamp(row);
+    if (row[column] == null || Number(row[directionColumn]) !== direction) return { time };
+    return { time, value: Number(row[column]) };
+  });
+}
+
+function updateMainIndicator(series, data, indicator) {
+  clearOverlaySeries(series);
+  if (indicator === "psar") {
+    safeSet(
+      series.psarBull,
+      data
+        .filter((row) => row.psar != null && Number(row.psar_direction) === 1)
+        .map((row) => ({ time: toTimestamp(row), value: Number(row.psar) })),
+    );
+    safeSet(
+      series.psarBear,
+      data
+        .filter((row) => row.psar != null && Number(row.psar_direction) === -1)
+        .map((row) => ({ time: toTimestamp(row), value: Number(row.psar) })),
+    );
+  } else if (indicator === "ema20" || indicator === "ema100") {
+    safeSet(series.ema, values(data, indicator));
+  } else if (indicator === "supertrend") {
+    safeSet(series.supertrendBull, segmentedValues(data, "supertrend", "supertrend_direction", 1));
+    safeSet(series.supertrendBear, segmentedValues(data, "supertrend", "supertrend_direction", -1));
+  } else if (indicator === "bb") {
+    safeSet(series.bbUpper, values(data, "bb_upper"));
+    safeSet(series.bbMiddle, values(data, "bb_middle"));
+    safeSet(series.bbLower, values(data, "bb_lower"));
+  }
+}
+
+function latestIndicatorSnapshot(data) {
+  const latest = [...data].reverse().find((row) => row.is_closed !== false) ?? data.at(-1);
+  if (!latest) return null;
+  return { adx: latest.adx14, atr: latest.atr14, rsi: latest.rsi14 };
 }
 
 export default function PriceChart({
@@ -99,6 +140,7 @@ export default function PriceChart({
   interval,
   onIntervalChange,
   onOpenAssistant,
+  onIndicatorSnapshot,
   assistantOpen = false,
   headerLeading = null,
   refreshRevision = 0,
@@ -119,7 +161,7 @@ export default function PriceChart({
     complete: false,
   });
   const scheduleBoundaryRef = useRef(null);
-
+  const [mainIndicator, setMainIndicator] = useState("psar");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -146,23 +188,23 @@ export default function PriceChart({
       wickUpColor: GREEN,
       wickDownColor: RED,
     });
-    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.03, bottom: 0.35 } });
-
+    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.03, bottom: 0.28 } });
     series.volume = chart.addHistogramSeries({
       priceScaleId: "vol",
       color: "rgba(255,255,255,0.08)",
       lastValueVisible: false,
       priceLineVisible: false,
     });
-    chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.68, bottom: 0.28 } });
+    chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.78, bottom: 0.02 } });
 
-    line(chart, "sub", "transparent", 0);
-    chart.priceScale("sub").applyOptions({ scaleMargins: { top: 0.76, bottom: 0.02 } });
     series.psarBull = points(chart, GREEN);
     series.psarBear = points(chart, RED);
-    series.adx = line(chart, "sub", "#f59e0b", 2);
-    series.plusDi = line(chart, "sub", GREEN);
-    series.minusDi = line(chart, "sub", RED);
+    series.ema = line(chart, "#f59e0b", 2);
+    series.supertrendBull = line(chart, GREEN, 2);
+    series.supertrendBear = line(chart, RED, 2);
+    series.bbUpper = line(chart, "#60a5fa");
+    series.bbMiddle = line(chart, "#f59e0b");
+    series.bbLower = line(chart, "#60a5fa");
 
     chartRef.current = chart;
     resizeRef.current = { width: initialWidth, height: initialHeight };
@@ -196,27 +238,24 @@ export default function PriceChart({
 
     const chart = chartRef.current;
     const series = seriesRef.current;
+    const selected = MAIN_INDICATORS.find((item) => item.value === mainIndicator) ?? MAIN_INDICATORS[0];
     const controller = new AbortController();
     requestRef.current.controller?.abort();
     const generation = requestRef.current.generation + 1;
     requestRef.current = { generation, controller };
 
     if (initialLoad) {
-      clearSeries(series);
+      clearOverlaySeries(series);
       lastBarRef.current = null;
+      onIndicatorSnapshot?.(null);
       setLoading(true);
     }
 
     const timeScale = chart.timeScale();
     const previousRange = initialLoad ? null : timeScale.getVisibleLogicalRange?.();
-    const completion = getKlines(
-      symbol,
-      interval,
-      200,
-      FIXED_INDICATORS,
-      FIXED_INDICATOR_PARAMS,
-      controller.signal,
-    )
+    const indicators = [...SUMMARY_INDICATORS, selected.requestId];
+    const params = { ...SUMMARY_PARAMS, [selected.requestId]: selected.params };
+    const completion = getKlines(symbol, interval, 200, indicators, params, controller.signal)
       .then(({ data }) => {
         if (controller.signal.aborted || requestRef.current.generation !== generation) return null;
 
@@ -236,7 +275,8 @@ export default function PriceChart({
             ? "rgba(14,203,129,0.15)"
             : "rgba(246,70,93,0.15)",
         })));
-        updateFixedIndicators(series, data);
+        updateMainIndicator(series, data, mainIndicator);
+        onIndicatorSnapshot?.(latestIndicatorSnapshot(data));
 
         if (initialLoad) {
           const total = data.length;
@@ -247,33 +287,22 @@ export default function PriceChart({
         return lastBarRef.current?.time ?? null;
       })
       .catch((error) => {
-        if (error?.code !== "ERR_CANCELED") console.error(error);
+        if (error?.code !== "ERR_CANCELED" && error?.name !== "CanceledError") console.error(error);
         return null;
       })
       .finally(() => {
-        if (
-          initialLoad
-          && !controller.signal.aborted
-          && requestRef.current.generation === generation
-        ) {
+        if (initialLoad && !controller.signal.aborted && requestRef.current.generation === generation) {
           setLoading(false);
         }
       });
 
     return { controller, completion };
-  }, [symbol, interval]);
+  }, [symbol, interval, mainIndicator, onIndicatorSnapshot]);
 
   const resetBoundaryRefresh = useCallback(() => {
     const current = boundaryRef.current;
     if (current.timer != null) window.clearTimeout(current.timer);
-    boundaryRef.current = {
-      key: null,
-      targetBucket: null,
-      timer: null,
-      inFlight: false,
-      attempts: 0,
-      complete: false,
-    };
+    boundaryRef.current = { key: null, targetBucket: null, timer: null, inFlight: false, attempts: 0, complete: false };
   }, []);
 
   const scheduleBoundaryRefresh = useCallback((targetBucket, fromTickerEvent) => {
@@ -281,33 +310,20 @@ export default function PriceChart({
     let current = boundaryRef.current;
     if (current.key !== key) {
       if (current.timer != null) window.clearTimeout(current.timer);
-      current = {
-        key,
-        targetBucket,
-        timer: null,
-        inFlight: false,
-        attempts: 0,
-        complete: false,
-      };
+      current = { key, targetBucket, timer: null, inFlight: false, attempts: 0, complete: false };
       boundaryRef.current = current;
     }
     if (current.complete || current.inFlight || current.timer != null) return;
-
-    if (fromTickerEvent && current.attempts >= MAX_BOUNDARY_ATTEMPTS_PER_EVENT) {
-      current.attempts = 0;
-    }
+    if (fromTickerEvent && current.attempts >= MAX_BOUNDARY_ATTEMPTS_PER_EVENT) current.attempts = 0;
     if (!fromTickerEvent && current.attempts >= MAX_BOUNDARY_ATTEMPTS_PER_EVENT) return;
 
-    const delay = current.attempts === 0
-      ? BOUNDARY_REFRESH_DELAY_MS
-      : BOUNDARY_RETRY_DELAY_MS;
+    const delay = current.attempts === 0 ? BOUNDARY_REFRESH_DELAY_MS : BOUNDARY_RETRY_DELAY_MS;
     current.timer = window.setTimeout(async () => {
       const active = boundaryRef.current;
       if (active.key !== key || active.complete) return;
       active.timer = null;
       active.inFlight = true;
       active.attempts += 1;
-
       const request = loadData(false);
       const loadedBucket = request ? await request.completion : null;
       const latest = boundaryRef.current;
@@ -339,17 +355,14 @@ export default function PriceChart({
     const bar = lastBarRef.current;
     const candle = seriesRef.current.candle;
     if (!bar || !candle) return;
-
     const price = Number(ticker.price);
     if (!Number.isFinite(price)) return;
-
     const bucket = intervalBucketStart(ticker.eventTime, interval);
     if (bucket != null && bucket > bar.time) {
       scheduleBoundaryRefresh(bucket, true);
       return;
     }
     if (bucket != null && bucket < bar.time) return;
-
     bar.close = price;
     if (price > bar.high) bar.high = price;
     if (price < bar.low) bar.low = price;
@@ -361,13 +374,21 @@ export default function PriceChart({
   }), [symbol, interval, scheduleBoundaryRefresh]);
 
   return (
-    <div
-      className="price-chart-root relative flex h-full min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card"
-    >
-      <div className="flex shrink-0 flex-nowrap items-center gap-3 border-b border-border px-3 py-2.5 sm:px-4">
+    <div className="price-chart-root relative flex h-full min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
+      <div className="flex shrink-0 flex-nowrap items-center gap-3 overflow-x-auto border-b border-border px-3 py-2.5 sm:px-4">
         <div className="min-w-0 flex-1 overflow-x-auto">
           {headerLeading || <span className="whitespace-nowrap text-sm font-semibold text-white">{symbol}</span>}
         </div>
+        <label className="sr-only" htmlFor="market-chart-indicator">主图指标</label>
+        <select
+          id="market-chart-indicator"
+          aria-label="主图指标"
+          value={mainIndicator}
+          onChange={(event) => setMainIndicator(event.target.value)}
+          className="h-8 shrink-0 border border-border bg-surface px-2 text-xs text-white outline-none focus:border-accent"
+        >
+          {MAIN_INDICATORS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
         <label className="sr-only" htmlFor="market-chart-interval">K线周期</label>
         <select
           id="market-chart-interval"
@@ -383,13 +404,11 @@ export default function PriceChart({
           onClick={onOpenAssistant}
           aria-label={assistantOpen ? "收起 AI 行情分析" : "打开 AI 行情分析"}
           aria-pressed={assistantOpen}
-          title="AI 行情分析"
-          className={`flex h-8 w-8 shrink-0 items-center justify-center border bg-card transition-colors hover:border-accent/60 hover:text-accent ${assistantOpen ? "border-accent/60 text-accent" : "border-border text-muted"}`}
+          className={`h-8 shrink-0 whitespace-nowrap border bg-card px-3 text-xs font-medium transition-colors hover:border-accent/60 hover:text-accent ${assistantOpen ? "border-accent/60 text-accent" : "border-border text-muted"}`}
         >
-          <MessageSquare size={15} />
+          AI行情分析
         </button>
       </div>
-
       <div className="relative min-h-0 flex-1">
         {loading && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-card/60">

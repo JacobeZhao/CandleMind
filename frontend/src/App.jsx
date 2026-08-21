@@ -7,7 +7,7 @@ import Header from "./components/Header";
 const Dashboard = React.lazy(() => import("./pages/Dashboard"));
 const Markets = React.lazy(() => import("./pages/Markets"));
 const Orders = React.lazy(() => import("./pages/Orders"));
-const Backtest = React.lazy(() => import("./pages/Backtest"));
+const Strategies = React.lazy(() => import("./pages/Strategies"));
 const Settings = React.lazy(() => import("./pages/Settings"));
 
 function PageFallback() {
@@ -34,7 +34,8 @@ export default function App() {
               <Route path="/"         element={<Dashboard />} />
               <Route path="/markets"  element={<Markets />} />
               <Route path="/orders"   element={<Orders />} />
-              <Route path="/backtest" element={<Backtest />} />
+              <Route path="/strategies" element={<Strategies />} />
+              <Route path="/backtest" element={<Navigate to="/strategies" replace />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*"         element={<Navigate to="/" replace />} />
             </Routes>

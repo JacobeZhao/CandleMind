@@ -7,21 +7,18 @@ import sys
 from backend.app.main import app
 
 
-def test_backtest_api_retains_only_sar_endpoints() -> None:
+def test_public_backtest_api_is_removed() -> None:
     backtest_routes = {
         (route.path, frozenset(route.methods or set()))
         for route in app.routes
         if route.path.startswith("/api/backtest")
     }
 
-    assert backtest_routes == {
-        ("/api/backtest/sar-adx", frozenset({"POST"})),
-        ("/api/backtest/sar-adx/capabilities", frozenset({"GET"})),
-    }
+    assert backtest_routes == set()
     assert not any(route.path.startswith("/api/research") for route in app.routes)
 
 
-def test_strategy_api_retains_only_sar_engine_endpoints() -> None:
+def test_strategy_api_retains_configuration_and_engine_endpoints() -> None:
     strategy_routes = {
         (route.path, frozenset(route.methods or set()))
         for route in app.routes
@@ -29,6 +26,9 @@ def test_strategy_api_retains_only_sar_engine_endpoints() -> None:
     }
 
     assert strategy_routes == {
+        ("/api/strategy/catalog", frozenset({"GET"})),
+        ("/api/strategy/config", frozenset({"GET"})),
+        ("/api/strategy/config", frozenset({"PUT"})),
         ("/api/strategy/engine/status", frozenset({"GET"})),
         ("/api/strategy/engine/start", frozenset({"POST"})),
         ("/api/strategy/engine/stop", frozenset({"POST"})),
@@ -46,6 +46,8 @@ def test_order_api_retains_only_read_endpoints() -> None:
 
     assert order_routes == {
         ("/api/orders/open", frozenset({"GET"})),
+        ("/api/orders/open/combined", frozenset({"GET"})),
+        ("/api/orders/analytics", frozenset({"GET"})),
         ("/api/orders/history", frozenset({"GET"})),
         ("/api/orders/trades", frozenset({"GET"})),
     }

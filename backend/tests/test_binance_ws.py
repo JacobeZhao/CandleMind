@@ -54,6 +54,37 @@ def _trade(
     )
 
 
+def _closed_kline(
+    symbol="SOLUSDT",
+    event_time=301_000,
+    close_time=299_999,
+    *,
+    interval="5m",
+    closed=True,
+):
+    return _event(
+        e="kline",
+        E=event_time,
+        s=symbol,
+        k={
+            "t": close_time - 299_999,
+            "T": close_time,
+            "s": symbol,
+            "i": interval,
+            "o": "140",
+            "h": "146",
+            "l": "139",
+            "c": "145",
+            "v": "1200",
+            "q": "171000",
+            "n": 321,
+            "x": closed,
+            "V": "700",
+            "Q": "100000",
+        },
+    )
+
+
 async def _publish(client):
     client._running = True
     client._subscription_id = 1
@@ -341,9 +372,105 @@ def test_connect_subscribes_to_all_raw_streams(monkeypatch):
             "solusdt@trade",
             "solusdt@ticker",
             "solusdt@markPrice@1s",
+            "solusdt@kline_5m",
         ],
         "id": 1,
     }]
+
+
+def test_closed_5m_kline_notifies_listener_without_ticker_broadcast(monkeypatch):
+    events = []
+    broadcasts = []
+
+    async def listener(payload):
+        events.append(payload)
+
+    async def capture(payload):
+        broadcasts.append(payload)
+
+    client = BinanceWSClient(closed_kline_listener=listener)
+    client.symbol = "SOLUSDT"
+    client.testnet = False
+    client._running = True
+    client._subscription_id = 4
+    client._ready_subscription_id = 4
+    monkeypatch.setattr(binance_ws.manager, "broadcast", capture)
+
+    asyncio.run(client._handle(_closed_kline(), "SOLUSDT", 4))
+
+    assert events == [{
+        "event_type": "closed_kline",
+        "source": "binance_usdm_websocket",
+        "network": "mainnet",
+        "symbol": "SOLUSDT",
+        "interval": "5m",
+        "subscription_epoch": 4,
+        "event_time": 301_000,
+        "open_time": 0,
+        "close_time": 299_999,
+        "open": "140",
+        "high": "146",
+        "low": "139",
+        "close": "145",
+        "volume": "1200",
+        "quote_volume": "171000",
+        "trade_count": 321,
+        "taker_buy_base_volume": "700",
+        "taker_buy_quote_volume": "100000",
+    }]
+    assert broadcasts == []
+    assert client._stream_cache == {}
+    assert client._cache_revision == 0
+    assert client.is_ready(4)
+
+
+def test_closed_kline_requires_exact_context_and_deduplicates_close_time():
+    events = []
+
+    async def listener(payload):
+        events.append(payload)
+
+    client = BinanceWSClient()
+    client.register_closed_kline_listener(listener)
+    client.symbol = "SOLUSDT"
+    client._subscription_id = 8
+
+    async def scenario():
+        await client._handle(_closed_kline(closed=False), "SOLUSDT", 8)
+        await client._handle(_closed_kline(interval="1m"), "SOLUSDT", 8)
+        await client._handle(_closed_kline(symbol="BTCUSDT"), "SOLUSDT", 8)
+        await client._handle(_closed_kline(), "SOLUSDT", 7)
+        await client._handle(_closed_kline(), "SOLUSDT", 8)
+        await client._handle(_closed_kline(), "SOLUSDT", 8)
+        await client._handle(_closed_kline(close_time=299_998), "SOLUSDT", 8)
+        await client._handle(_closed_kline(close_time=599_999), "SOLUSDT", 8)
+
+    asyncio.run(scenario())
+
+    assert [event["close_time"] for event in events] == [299_999, 599_999]
+
+
+def test_failed_closed_kline_listener_does_not_consume_the_close_time():
+    attempts = 0
+
+    async def listener(_payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("queue unavailable")
+
+    client = BinanceWSClient(closed_kline_listener=listener)
+    client.symbol = "SOLUSDT"
+    client._subscription_id = 2
+
+    async def scenario():
+        await client._handle(_closed_kline(), "SOLUSDT", 2)
+        await client._handle(_closed_kline(), "SOLUSDT", 2)
+
+    asyncio.run(scenario())
+
+    assert attempts == 2
+    assert client._last_closed_kline_time == 299_999
 
 
 def test_publish_loop_coalesces_events_to_latest_every_500ms(monkeypatch):

@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppProvider, useApp } from "./AppContext";
 import { clearTicker, useTicker } from "./MarketTickerContext";
-import { getAccountBalance, getEngineStatus, getSettings, saveSettings, startEngine } from "../api/client";
+import { getAccountBalance, getEngineStatus, getSettings, getStrategyConfig, saveSettings, startEngine } from "../api/client";
 
 let receiveMessage;
 
@@ -17,6 +17,7 @@ vi.mock("../api/client", () => ({
   getSettings: vi.fn(),
   getAccountBalance: vi.fn(),
   getEngineStatus: vi.fn(),
+  getStrategyConfig: vi.fn(),
   saveSettings: vi.fn(),
   startEngine: vi.fn(),
   stopEngine: vi.fn(),
@@ -58,6 +59,14 @@ describe("AppProvider ticker scheduling", () => {
     getSettings.mockResolvedValue({ data: { symbol: "BTCUSDT", testnet: true } });
     getAccountBalance.mockResolvedValue({ data: { totalWalletBalance: "100.00" } });
     getEngineStatus.mockResolvedValue({ data: { engine_state: "stopped", running: false } });
+    getStrategyConfig.mockResolvedValue({
+      data: {
+        strategy_type: "sar_adx_trend",
+        config_version: "sar_adx_trend_v1",
+        config_hash: "trend-config-hash",
+        parameters: { execution_interval: "5m", sar_step: 0.02 },
+      },
+    });
     saveSettings.mockResolvedValue({ data: { symbol: "SOLUSDT" } });
     startEngine.mockResolvedValue({ data: { message: "started" } });
   });
@@ -280,11 +289,25 @@ describe("AppProvider ticker scheduling", () => {
     expect(startEngine).toHaveBeenCalledWith(expect.objectContaining({
       symbol: "BTCUSDT",
       capital_limit: 1000,
+      strategy_type: "sar_adx_trend",
+      config_version: "sar_adx_trend_v1",
+      config_hash: "trend-config-hash",
     }));
     expect(screen.getByTestId("command-pending").textContent).toBe("true");
 
     await act(async () => finishStart({ data: { message: "started" } }));
     expect(screen.getByTestId("command-pending").textContent).toBe("false");
+  });
+
+  it("blocks strategy start when the authoritative configuration cannot be loaded", async () => {
+    getStrategyConfig.mockRejectedValueOnce(new Error("configuration unavailable"));
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByText("start-twice"));
+
+    expect(startEngine).not.toHaveBeenCalled();
+    expect(screen.getByTestId("command-error").textContent).toContain("尚未加载");
   });
 
   it("blocks strategy start until a symbol switch has completed", async () => {

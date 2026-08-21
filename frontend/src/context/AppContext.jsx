@@ -4,10 +4,12 @@ import {
   getAccountBalance,
   getEngineStatus,
   getSettings,
+  getStrategyConfig,
   saveSettings,
   startEngine,
   stopEngine,
 } from "../api/client";
+import { normalizeConfiguration } from "../strategies/catalog";
 import { clearTicker, publishTicker } from "./MarketTickerContext";
 import { publishRealtimeEvent } from "../services/realtimeEvents";
 
@@ -22,6 +24,9 @@ const initial = {
   botStatus:  null,
   botStatusLoaded: false,
   strategyCapitalLimit: "1000",
+  strategyConfiguration: null,
+  strategyConfigurationLoaded: false,
+  strategyConfigurationError: null,
   strategyCommandPending: false,
   strategyCommandError: null,
   strategyStatusUncertain: false,
@@ -60,6 +65,18 @@ function reducer(state, action) {
       strategyStatusUncertain: false,
     };
     case "SET_STRATEGY_CAPITAL_LIMIT": return { ...state, strategyCapitalLimit: action.payload };
+    case "SET_STRATEGY_CONFIGURATION": return {
+      ...state,
+      strategyConfiguration: action.payload,
+      strategyConfigurationLoaded: true,
+      strategyConfigurationError: null,
+    };
+    case "SET_STRATEGY_CONFIGURATION_ERROR": return {
+      ...state,
+      strategyConfiguration: null,
+      strategyConfigurationLoaded: true,
+      strategyConfigurationError: action.payload,
+    };
     case "SET_STRATEGY_COMMAND_PENDING": return { ...state, strategyCommandPending: action.payload };
     case "SET_STRATEGY_COMMAND_ERROR": return { ...state, strategyCommandError: action.payload };
     case "SET_STRATEGY_STATUS_UNCERTAIN": return {
@@ -110,6 +127,28 @@ export function AppProvider({ children }) {
   const accountRevision = useRef(0);
   const refreshInFlight = useRef(null);
 
+  const loadStrategyConfiguration = useCallback(async () => {
+    try {
+      const { data } = await getStrategyConfig();
+      const configuration = normalizeConfiguration(data);
+      if (!configuration) throw new Error("Invalid strategy configuration response");
+      dispatch({ type: "SET_STRATEGY_CONFIGURATION", payload: configuration });
+      return configuration;
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      dispatch({
+        type: "SET_STRATEGY_CONFIGURATION_ERROR",
+        payload: typeof detail === "string" ? detail : "策略配置读取失败，请前往策略页面重试。",
+      });
+      return null;
+    }
+  }, []);
+
+  const setStrategyConfiguration = useCallback((configuration) => {
+    const normalized = normalizeConfiguration(configuration);
+    if (normalized) dispatch({ type: "SET_STRATEGY_CONFIGURATION", payload: normalized });
+  }, []);
+
   useEffect(() => {
     activeSymbol.current = state.symbol;
   }, [state.symbol]);
@@ -126,6 +165,10 @@ export function AppProvider({ children }) {
       pendingTicker.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    loadStrategyConfiguration();
+  }, [loadStrategyConfiguration]);
 
   useEffect(() => {
     const requestedAtRevision = accountRevision.current;
@@ -331,6 +374,10 @@ export function AppProvider({ children }) {
       dispatch({ type: "SET_STRATEGY_COMMAND_ERROR", payload: "资金上限必须大于 0" });
       return false;
     }
+    if (command === "start" && !state.strategyConfiguration) {
+      dispatch({ type: "SET_STRATEGY_COMMAND_ERROR", payload: "策略配置尚未加载，无法启动。" });
+      return false;
+    }
     if (
       command === "start"
       && state.networkTab === "main"
@@ -348,8 +395,9 @@ export function AppProvider({ children }) {
         await stopEngine();
       } else {
         await startEngine({
-          strategy_type: "sar_adx_pyramid",
-          config_version: "sar_adx_v3",
+          strategy_type: state.strategyConfiguration.strategy_type,
+          config_version: state.strategyConfiguration.config_version,
+          config_hash: state.strategyConfiguration.config_hash,
           symbol: state.symbol,
           capital_limit: capitalLimit,
           ...(state.networkTab === "main"
@@ -383,7 +431,13 @@ export function AppProvider({ children }) {
       strategyCommandInFlight.current = false;
       dispatch({ type: "SET_STRATEGY_COMMAND_PENDING", payload: false });
     }
-  }, [refreshBotStatus, state.networkTab, state.strategyCapitalLimit, state.symbol]);
+  }, [
+    refreshBotStatus,
+    state.networkTab,
+    state.strategyCapitalLimit,
+    state.strategyConfiguration,
+    state.symbol,
+  ]);
 
   const startStrategy = useCallback(
     (mainnetConfirmation) => runStrategyCommand("start", mainnetConfirmation),
@@ -430,6 +484,8 @@ export function AppProvider({ children }) {
       setSymbol,
       setConnected,
       setStrategyCapitalLimit,
+      loadStrategyConfiguration,
+      setStrategyConfiguration,
       startStrategy,
       stopStrategy,
       switchNetwork,

@@ -39,6 +39,7 @@ try:
         "tables": sorted(inspect(database.engine).get_table_names()),
         "settings": session.query(database.Settings).count(),
         "ai_configs": session.query(database.AIConfig).count(),
+        "strategy_configuration": session.query(database.StrategyConfiguration).count(),
     }
 finally:
     session.close()
@@ -48,9 +49,10 @@ print(json.dumps(result))
     )
 
     assert result == {
-        "tables": ["ai_configs", "settings"],
+        "tables": ["ai_configs", "settings", "strategy_configuration"],
         "settings": 1,
         "ai_configs": 0,
+        "strategy_configuration": 1,
     }
 
 
@@ -109,4 +111,9 @@ print(json.dumps({"before": before, "after": after, "tables": tables}))
     )
 
     assert result["after"] == result["before"]
-    assert result["tables"] == ["ai_configs", "settings", "strategies"]
+    assert result["tables"] == [
+        "ai_configs",
+        "settings",
+        "strategies",
+        "strategy_configuration",
+    ]

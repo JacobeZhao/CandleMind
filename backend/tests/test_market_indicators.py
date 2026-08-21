@@ -26,4 +26,59 @@ def test_market_psar_matches_strategy_and_exposes_direction() -> None:
     )
     assert set(market["psar_direction"].iloc[1:]) == {-1, 1}
     assert REGISTRY["psar"]["outputs"] == ["psar", "psar_direction"]
-    assert "supertrend" not in REGISTRY
+
+
+def _trend_bars() -> pd.DataFrame:
+    close = np.concatenate(
+        [
+            np.linspace(100, 145, 35),
+            np.linspace(143, 78, 45),
+            np.linspace(80, 132, 40),
+        ]
+    )
+    spread = 1.5 + (np.arange(len(close)) % 4) * 0.2
+    return pd.DataFrame(
+        {
+            "high": close + spread,
+            "low": close - spread,
+            "close": close,
+        }
+    )
+
+
+def test_supertrend_registry_contract_and_default_parameters() -> None:
+    meta = REGISTRY["supertrend"]
+
+    assert meta["category"] == "trend"
+    assert meta["panel"] == "main"
+    assert meta["params"] == {"period": 10, "multiplier": 3.0}
+    assert meta["outputs"] == ["supertrend", "supertrend_direction"]
+
+
+def test_supertrend_tracks_trends_and_reversals_with_finite_values() -> None:
+    bars = _trend_bars()
+    result = compute(bars, "supertrend")
+    line = result["supertrend"]
+    direction = result["supertrend_direction"]
+
+    assert np.isfinite(line.to_numpy()).all()
+    assert set(direction) == {-1, 1}
+    assert (direction.diff().fillna(0) != 0).sum() >= 2
+    assert (line[direction == 1] <= bars.loc[direction == 1, "close"]).all()
+    assert (line[direction == -1] >= bars.loc[direction == -1, "close"]).all()
+
+
+def test_supertrend_is_prefix_invariant() -> None:
+    bars = _trend_bars()
+    complete = compute(bars, "supertrend")
+
+    for prefix_length in (20, 50, 85, len(bars)):
+        prefix = compute(bars.iloc[:prefix_length].copy(), "supertrend")
+        pd.testing.assert_series_equal(
+            prefix["supertrend"],
+            complete["supertrend"].iloc[:prefix_length],
+        )
+        pd.testing.assert_series_equal(
+            prefix["supertrend_direction"],
+            complete["supertrend_direction"].iloc[:prefix_length],
+        )

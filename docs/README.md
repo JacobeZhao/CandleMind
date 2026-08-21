@@ -1,5 +1,12 @@
 # 文档索引
 
+## 项目介绍
+
+- [简体中文](../README.md)
+- [English](../README_EN.md)
+- [日本語](../README_JA.md)
+- [한국어](../README_KO.md)
+
 ## 当前运行文档
 
 - [`DATA_LAYOUT.md`](DATA_LAYOUT.md)：仓库、行情数据和运行状态的归属边界。
@@ -21,8 +28,11 @@
 共同表明现有策略研究结果不是盈利或生产准入
 证明。
 
-强化学习相关代码当前只用于研究兼容和数据契约。在线决策仍由 SAR+ADX V3
-交易所执行链路承担，尚未接入 RL 推理。
+公开产品提供三种自动化策略的配置与执行，不再提供回测页面或 `/api/backtest/*`
+接口。`backend/scripts/evaluation/`、内部 backtest 服务和冻结研究文档继续用于
+离线验证，不属于公开 API 契约。
+
+强化学习相关代码当前只用于研究兼容和数据契约，尚未接入在线推理或订单决策。
 
 生成报告必须写入
 `G:\CandleMind\CandleMind_data\experiments\reports`，不得提交到 `docs/`。

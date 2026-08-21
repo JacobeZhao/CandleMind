@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { AlertCircle, Loader, Play, Square } from "lucide-react";
 import clsx from "clsx";
 import { useApp } from "../context/AppContext";
+import { strategyDefinition, strategySummary } from "../strategies/catalog";
 
 export default function StrategyEngineControl() {
   const {
@@ -18,10 +19,16 @@ export default function StrategyEngineControl() {
     stopStrategy,
     symbol,
     strategyCapitalLimit,
+    strategyConfiguration,
+    strategyConfigurationLoaded,
+    strategyConfigurationError,
   } = useApp();
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [confirmation, setConfirmation] = useState("");
   const running = Boolean(botStatus?.running);
+  const selectedStrategy = strategyConfiguration
+    ? strategyDefinition(strategyConfiguration.strategy_type)
+    : null;
   const disabled = (
     !botStatusLoaded
     || networkSwitching
@@ -29,6 +36,8 @@ export default function StrategyEngineControl() {
     || refreshPending
     || symbolSwitching
     || strategyStatusUncertain
+    || !strategyConfigurationLoaded
+    || !strategyConfiguration
     || !symbol
   );
 
@@ -53,7 +62,7 @@ export default function StrategyEngineControl() {
       <button
         type="button"
         aria-label={label}
-        title={label}
+        title={strategyConfigurationError || label}
         onClick={requestCommand}
         disabled={disabled}
         className={clsx(
@@ -93,6 +102,8 @@ export default function StrategyEngineControl() {
               <dt className="text-muted">品种</dt><dd className="text-right font-mono text-white">{symbol}</dd>
               <dt className="text-muted">网络</dt><dd className="text-right text-white">{networkTab === "main" ? "真实网" : "测试网"}</dd>
               <dt className="text-muted">资金上限</dt><dd className="text-right font-mono text-white">{strategyCapitalLimit} USDT</dd>
+              <dt className="text-muted">策略</dt><dd className="text-right text-white">{strategyConfiguration?.name || selectedStrategy?.name}</dd>
+              <dt className="text-muted">关键参数</dt><dd className="text-right text-xs leading-5 text-white">{strategySummary(strategyConfiguration)}</dd>
             </dl>
             {networkTab === "main" && (
               <>

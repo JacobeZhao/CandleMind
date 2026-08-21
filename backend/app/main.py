@@ -12,7 +12,6 @@ from .ws_manager import manager
 from .routes import (
     account,
     ai_config,
-    backtest,
     health,
     market,
     market_agent,
@@ -47,6 +46,9 @@ async def _reconnect_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    binance_ws_client.register_closed_kline_listener(
+        market_agent_manager.on_closed_kline
+    )
     db = next(get_db())
     try:
         s = db.query(Settings).first()
@@ -83,6 +85,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        binance_ws_client.register_closed_kline_listener(None)
         try:
             await market_agent_manager.shutdown()
         except Exception as exc:
@@ -126,7 +129,6 @@ app.include_router(market.router,          prefix="/api/market",    tags=["marke
 app.include_router(orders.router,          prefix="/api/orders",    tags=["orders"])
 app.include_router(strategy_route.router,  prefix="/api/strategy",  tags=["strategy"])
 app.include_router(strategy_analytics.router)
-app.include_router(backtest.router,        prefix="/api/backtest",  tags=["backtest"])
 app.include_router(ai_config.router,       prefix="/api/ai",        tags=["ai"])
 app.include_router(market_agent.router,     prefix="/api/ai",        tags=["ai"])
 app.include_router(health.router,          prefix="/api/health",    tags=["health"])

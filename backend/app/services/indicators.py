@@ -60,6 +60,57 @@ def _calc_psar(df, p):
         "psar_direction": result["sar_direction"],
     }
 
+def _calc_supertrend(df, p):
+    period = p.get("period", 10)
+    multiplier = p.get("multiplier", 3.0)
+    midpoint = (df["high"] + df["low"]) / 2
+    atr = _atr(df, period)
+    basic_upper = midpoint + multiplier * atr
+    basic_lower = midpoint - multiplier * atr
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    direction = pd.Series(1, index=df.index, dtype="int64")
+    supertrend = pd.Series(np.nan, index=df.index, dtype="float64")
+
+    if df.empty:
+        return {
+            "supertrend": supertrend,
+            "supertrend_direction": direction,
+        }
+
+    supertrend.iloc[0] = final_lower.iloc[0]
+    for i in range(1, len(df)):
+        previous_close = df["close"].iloc[i - 1]
+        if not (
+            basic_upper.iloc[i] < final_upper.iloc[i - 1]
+            or previous_close > final_upper.iloc[i - 1]
+        ):
+            final_upper.iloc[i] = final_upper.iloc[i - 1]
+        if not (
+            basic_lower.iloc[i] > final_lower.iloc[i - 1]
+            or previous_close < final_lower.iloc[i - 1]
+        ):
+            final_lower.iloc[i] = final_lower.iloc[i - 1]
+
+        if df["close"].iloc[i] > final_upper.iloc[i - 1]:
+            direction.iloc[i] = 1
+        elif df["close"].iloc[i] < final_lower.iloc[i - 1]:
+            direction.iloc[i] = -1
+        else:
+            direction.iloc[i] = direction.iloc[i - 1]
+
+        supertrend.iloc[i] = (
+            final_lower.iloc[i]
+            if direction.iloc[i] == 1
+            else final_upper.iloc[i]
+        )
+
+    return {
+        "supertrend": supertrend,
+        "supertrend_direction": direction,
+    }
+
 def _calc_ichimoku(df, p):
     tk = p.get("tenkan", 9)
     kj = p.get("kijun", 26)
@@ -238,6 +289,9 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "psar":       {"name": "Parabolic SAR",   "category": "trend",      "panel": "main",
                    "params": {"step": 0.02, "max": 0.2},
                    "outputs": ["psar", "psar_direction"],   "fn": _calc_psar},
+    "supertrend": {"name": "Supertrend",      "category": "trend",      "panel": "main",
+                   "params": {"period": 10, "multiplier": 3.0},
+                   "outputs": ["supertrend", "supertrend_direction"], "fn": _calc_supertrend},
     "ichimoku":   {"name": "Ichimoku Cloud",  "category": "trend",      "panel": "main",
                    "params": {"tenkan": 9, "kijun": 26, "senkou_b": 52},
                    "outputs": ["ichi_tenkan","ichi_kijun","ichi_senkou_a","ichi_senkou_b","ichi_chikou"],

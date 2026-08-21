@@ -158,7 +158,7 @@ pysocks==1.7.1
     # via requests
 pytest==8.4.2
     # via -r requirements-dev.txt
-python-binance==1.0.19
+python-binance==1.0.37
     # via -r requirements.txt
 python-dateutil==2.9.0.post0
     # via

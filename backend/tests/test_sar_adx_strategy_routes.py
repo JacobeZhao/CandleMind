@@ -15,6 +15,22 @@ from backend.app.services.execution_store import ExecutionStoreError
 from backend.app.services.live_strategy_runtime import LiveStrategyRuntimeError
 
 
+TEST_HASH = "a" * 64
+TEST_PARAMETERS = {
+    "execution_interval": "5m",
+    "sar_step": 0.02,
+    "sar_max": 0.2,
+    "max_layers": 5,
+    "adx_timeframe": "1h",
+    "adx_period": 14,
+    "adx_threshold": 45.0,
+    "adx_rising_periods": 2,
+    "entry_confirmation_bars": 6,
+    "recapture_buffer_fraction": 0.0024,
+    "max_entries_per_adx_regime": 2,
+}
+
+
 class _Query:
     def __init__(self, settings):
         self.settings = settings
@@ -41,8 +57,8 @@ class _Engine:
             "running": True,
             "symbol": "SOLUSDT",
             "network": "testnet",
-            "strategy_type": "sar_adx_pyramid",
-            "config_version": "sar_adx_v3",
+            "strategy_type": "sar_adx_trend",
+            "config_version": "sar_adx_trend_v1",
             "paper": False,
             "decision_count": 0,
             "submitted_order_count": 0,
@@ -54,8 +70,9 @@ class _Engine:
 
 def _request(**overrides):
     values = {
-        "strategy_type": "sar_adx_pyramid",
-        "config_version": "sar_adx_v3",
+        "strategy_type": "sar_adx_trend",
+        "config_version": "sar_adx_trend_v1",
+        "config_hash": TEST_HASH,
         "symbol": "SOLUSDT",
         "capital_limit": 250.0,
     }
@@ -68,6 +85,16 @@ def _install(monkeypatch, *, testnet=True, symbol="SOLUSDT"):
     monkeypatch.setattr(strategy_routes, "bot_engine", engine)
     monkeypatch.setattr(strategy_routes.app_state, "client", object())
     monkeypatch.setattr(strategy_routes.app_state, "symbol", symbol)
+    monkeypatch.setattr(
+        strategy_routes,
+        "get_strategy_configuration",
+        lambda _db: {
+            "strategy_type": "sar_adx_trend",
+            "config_version": "sar_adx_trend_v1",
+            "config_hash": TEST_HASH,
+            "parameters": TEST_PARAMETERS,
+        },
+    )
     return engine, _Db(testnet=testnet, symbol=symbol)
 
 
@@ -91,8 +118,10 @@ def test_testnet_start_binds_server_network_symbol_and_capital(monkeypatch):
         "symbol": "SOLUSDT",
         "interval": "5m",
         "check_interval": 15,
-        "strategy_type": "sar_adx_pyramid",
-        "config_version": "sar_adx_v3",
+        "strategy_type": "sar_adx_trend",
+        "config_version": "sar_adx_trend_v1",
+        "config_hash": TEST_HASH,
+        "parameters": TEST_PARAMETERS,
         "capital_limit": 250.0,
         "network": "testnet",
     }

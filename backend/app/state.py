@@ -95,13 +95,55 @@ class AppState:
             logger.debug(f"Positions push error: {e}")
 
     async def _push_open_orders(self):
+        client = self.client
+        symbol = self.symbol
+        network = "testnet" if bool(getattr(client, "testnet", False)) else "mainnet"
         try:
-            orders = await asyncio.to_thread(
-                self.client.futures_get_open_orders, symbol=self.symbol
+            open_orders, algo_orders = await asyncio.gather(
+                asyncio.to_thread(
+                    client.futures_get_open_orders, symbol=symbol
+                ),
+                asyncio.to_thread(
+                    client.futures_get_open_algo_orders, symbol=symbol
+                ),
             )
-            await manager.broadcast({"type": "open_orders", "data": orders})
+            orders = [
+                {**order, "orderSource": "regular"}
+                for order in list(open_orders or [])
+            ]
+            orders.extend(
+                self._normalize_algo_order(order)
+                for order in list(algo_orders or [])
+            )
+            await manager.broadcast({
+                "type": "open_orders",
+                "symbol": symbol,
+                "network": network,
+                "data": orders,
+            })
         except Exception as e:
             logger.debug(f"Orders push error: {e}")
+            await manager.broadcast({
+                "type": "open_orders_error",
+                "symbol": symbol,
+                "network": network,
+                "data": {"message": "Binance open orders are unavailable."},
+            })
+
+    @staticmethod
+    def _normalize_algo_order(order: dict) -> dict:
+        return {
+            **order,
+            "orderId": order.get("orderId", order.get("algoId")),
+            "clientOrderId": order.get("clientOrderId", order.get("clientAlgoId")),
+            "type": order.get("type", order.get("orderType")),
+            "origQty": order.get("origQty", order.get("quantity", "0")),
+            "price": order.get("price", "0"),
+            "stopPrice": order.get("stopPrice", order.get("triggerPrice", "0")),
+            "status": order.get("status", order.get("algoStatus")),
+            "time": order.get("time", order.get("createTime")),
+            "orderSource": "algo",
+        }
 
     async def _push_bot_status(self):
         await manager.broadcast({"type": "bot_status", "data": bot_engine.status})

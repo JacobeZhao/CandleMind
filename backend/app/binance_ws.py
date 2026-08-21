@@ -1,7 +1,9 @@
-"""Merge Binance Futures trade, ticker, and mark-price WebSocket streams."""
+"""Consume Binance Futures ticker streams and completed 5m candle events."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
+from typing import Any
 import urllib.parse
 
 from loguru import logger
@@ -12,10 +14,18 @@ from .ws_manager import manager
 WS_MAINNET = "wss://fstream.binance.com"
 WS_TESTNET = "wss://stream.binancefuture.com"
 BROADCAST_INTERVAL_SECONDS = 0.5
+KLINE_INTERVAL = "5m"
+
+ClosedKlineListener = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class BinanceWSClient:
-    def __init__(self, broadcast_interval: float = BROADCAST_INTERVAL_SECONDS):
+    def __init__(
+        self,
+        broadcast_interval: float = BROADCAST_INTERVAL_SECONDS,
+        *,
+        closed_kline_listener: ClosedKlineListener | None = None,
+    ):
         self._task: asyncio.Task | None = None
         self._publisher_task: asyncio.Task | None = None
         self._running = False
@@ -27,6 +37,8 @@ class BinanceWSClient:
         self._stream_event_times: dict[str, int] = {}
         self._cache_revision = 0
         self._published_revision = 0
+        self._last_closed_kline_time: int | None = None
+        self._closed_kline_listener = closed_kline_listener
         self.broadcast_interval = broadcast_interval
         self.symbol = "BTCUSDT"
         self.testnet = True
@@ -109,11 +121,18 @@ class BinanceWSClient:
             self.symbol = symbol
             self._reset_stream_state()
 
+    def register_closed_kline_listener(
+        self, listener: ClosedKlineListener | None
+    ) -> None:
+        """Register the durable Harness ingress for completed 5m candles."""
+        self._closed_kline_listener = listener
+
     def _reset_stream_state(self):
         self._stream_cache = {}
         self._stream_event_times = {}
         self._cache_revision = 0
         self._published_revision = 0
+        self._last_closed_kline_time = None
 
     async def _publish_loop(self, subscription_id: int):
         """Publish only the newest merged snapshot at a bounded cadence."""
@@ -205,6 +224,7 @@ class BinanceWSClient:
                         f"{stream}@trade",
                         f"{stream}@ticker",
                         f"{stream}@markPrice@1s",
+                        f"{stream}@kline_{KLINE_INTERVAL}",
                     ],
                     "id": 1,
                 })
@@ -253,6 +273,17 @@ class BinanceWSClient:
             if not symbol or symbol.upper() != expected_symbol:
                 return
 
+            if event_type == "kline":
+                await self._handle_closed_kline(
+                    event,
+                    expected_symbol=expected_symbol,
+                    subscription_id=(
+                        subscription_id
+                        if subscription_id is not None
+                        else self._subscription_id
+                    ),
+                )
+                return
             if event_type == "24hrTicker":
                 stream_name = "ticker"
                 required = ("E", "c", "P", "h", "l", "q")
@@ -311,6 +342,76 @@ class BinanceWSClient:
                 self._ready_event.set()
         except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             logger.debug(f"WS handle error: {exc}")
+
+    async def _handle_closed_kline(
+        self,
+        event: dict[str, Any],
+        *,
+        expected_symbol: str,
+        subscription_id: int,
+    ) -> None:
+        kline = event.get("k")
+        if (
+            subscription_id != self._subscription_id
+            or not isinstance(kline, dict)
+            or kline.get("i") != KLINE_INTERVAL
+            or kline.get("x") is not True
+            or str(kline.get("s", "")).upper() != expected_symbol
+        ):
+            return
+
+        required_kline_fields = ("t", "T", "o", "h", "l", "c", "v", "q", "n", "V", "Q")
+        if "E" not in event or any(field not in kline for field in required_kline_fields):
+            return
+
+        close_time = int(kline["T"])
+        if (
+            self._last_closed_kline_time is not None
+            and close_time <= self._last_closed_kline_time
+        ):
+            return
+
+        payload = {
+            "event_type": "closed_kline",
+            "source": "binance_usdm_websocket",
+            "network": "testnet" if self.testnet else "mainnet",
+            "symbol": expected_symbol,
+            "interval": KLINE_INTERVAL,
+            "subscription_epoch": subscription_id,
+            "event_time": int(event["E"]),
+            "open_time": int(kline["t"]),
+            "close_time": close_time,
+            "open": str(kline["o"]),
+            "high": str(kline["h"]),
+            "low": str(kline["l"]),
+            "close": str(kline["c"]),
+            "volume": str(kline["v"]),
+            "quote_volume": str(kline["q"]),
+            "trade_count": int(kline["n"]),
+            "taker_buy_base_volume": str(kline["V"]),
+            "taker_buy_quote_volume": str(kline["Q"]),
+        }
+        listener = self._closed_kline_listener
+        if listener is not None:
+            try:
+                await listener(payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Closed-kline listener failed: symbol={} close_time={} exception_type={}",
+                    expected_symbol,
+                    close_time,
+                    type(exc).__name__,
+                )
+                return
+        self._last_closed_kline_time = close_time
+
+        if (
+            self._running
+            and subscription_id == self._ready_subscription_id
+        ):
+            self._ready_event.set()
 
 
 binance_ws_client = BinanceWSClient()

@@ -6,6 +6,7 @@ import PriceChart from "../components/PriceChart";
 import WorkspaceDivider from "../components/WorkspaceDivider";
 
 const PANEL_WIDTH_KEY = "candlemind.marketAssistant.width";
+const PANEL_OPEN_KEY = "candlemind.marketAssistant.open";
 const DEFAULT_PANEL_WIDTH = 420;
 const DEFAULT_PANEL_HEIGHT = 320;
 const DESKTOP_BREAKPOINT = 900;
@@ -20,6 +21,25 @@ function storedPanelWidth() {
   return Number.isFinite(value) && value >= MIN_PANEL_WIDTH ? value : DEFAULT_PANEL_WIDTH;
 }
 
+function storedPanelOpen() {
+  try {
+    const value = window.localStorage.getItem(PANEL_OPEN_KEY);
+    if (value === "true") return true;
+    if (value === "false") return false;
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
+  return false;
+}
+
+function persistPanelOpen(open) {
+  try {
+    window.localStorage.setItem(PANEL_OPEN_KEY, String(open));
+  } catch {
+    // The in-memory UI state remains usable when storage is unavailable.
+  }
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -28,7 +48,8 @@ export default function Markets() {
   const { refreshRevision, symbol } = useApp();
   const workspaceRef = useRef(null);
   const [interval, setInterval] = useState("5m");
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(storedPanelOpen);
+  const [indicatorSnapshot, setIndicatorSnapshot] = useState(null);
   const [panelWidth, setPanelWidth] = useState(storedPanelWidth);
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_HEIGHT);
   const [desktop, setDesktop] = useState(() => window.innerWidth >= DESKTOP_BREAKPOINT);
@@ -84,7 +105,16 @@ export default function Markets() {
   }, [desktop]);
 
   const toggleAssistant = useCallback(() => {
-    setAssistantOpen((open) => !open);
+    setAssistantOpen((open) => {
+      const next = !open;
+      persistPanelOpen(next);
+      return next;
+    });
+  }, []);
+
+  const closeAssistant = useCallback(() => {
+    persistPanelOpen(false);
+    setAssistantOpen(false);
   }, []);
 
   return (
@@ -100,7 +130,14 @@ export default function Markets() {
           onOpenAssistant={toggleAssistant}
           assistantOpen={assistantOpen}
           refreshRevision={refreshRevision}
-          headerLeading={<MarketSummary symbol={symbol} refreshRevision={refreshRevision} />}
+          onIndicatorSnapshot={setIndicatorSnapshot}
+          headerLeading={(
+            <MarketSummary
+              symbol={symbol}
+              refreshRevision={refreshRevision}
+              indicators={indicatorSnapshot}
+            />
+          )}
         />
       </div>
       {assistantOpen && (
@@ -119,7 +156,7 @@ export default function Markets() {
           >
             <MarketAiPanel
               symbol={symbol}
-              onClose={() => setAssistantOpen(false)}
+              onClose={closeAssistant}
             />
           </div>
         </>

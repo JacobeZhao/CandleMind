@@ -10,6 +10,37 @@ let agentRunning;
 let networkTestnet;
 let strategyRunning;
 let strategyStartCount;
+let strategyConfiguration;
+
+const strategyDefaults = {
+  sar_adx_trend: {
+    execution_interval: "5m", sar_step: 0.02, sar_max: 0.2, max_layers: 5,
+    adx_timeframe: "1h", adx_period: 14, adx_threshold: 45,
+    adx_rising_periods: 2, entry_confirmation_bars: 6,
+    recapture_buffer_fraction: 0.0024, max_entries_per_adx_regime: 2,
+  },
+  sar_martingale: {
+    execution_interval: "5m", sar_step: 0.02, sar_max: 0.2, max_layers: 4,
+    layer_multiplier: 1.5, add_trigger_fraction: 0.005,
+  },
+  sar_anti_martingale: {
+    execution_interval: "5m", sar_step: 0.02, sar_max: 0.2, max_layers: 4,
+    layer_multiplier: 1.5, add_trigger_fraction: 0.005,
+  },
+};
+
+const strategyVersions = {
+  sar_adx_trend: "sar_adx_trend_v1",
+  sar_martingale: "sar_martingale_v1",
+  sar_anti_martingale: "sar_anti_martingale_v1",
+};
+
+const configuredStrategy = (strategyType, parameters = strategyDefaults[strategyType]) => ({
+  strategy_type: strategyType,
+  config_version: strategyVersions[strategyType],
+  config_hash: strategyType === "sar_adx_trend" ? "a".repeat(64) : "b".repeat(64),
+  parameters,
+});
 
 const marketRows = Array.from({ length: 120 }, (_, index) => {
   const open = 140 + index * 0.08;
@@ -24,8 +55,17 @@ const marketRows = Array.from({ length: 120 }, (_, index) => {
     psar: index % 20 < 12 ? open - 0.8 : open + 0.8,
     psar_direction: index % 20 < 12 ? 1 : -1,
     adx14: 18 + (index % 24),
+    atr14: 1.2 + (index % 8) * 0.05,
+    rsi14: 42 + (index % 20),
     pdi: 20 + (index % 12),
     ndi: 28 - (index % 12),
+    ema20: open - 0.3,
+    ema100: open - 0.9,
+    supertrend: index % 20 < 12 ? open - 1.2 : open + 1.2,
+    supertrend_direction: index % 20 < 12 ? 1 : -1,
+    bb_upper: open + 1.4,
+    bb_middle: open,
+    bb_lower: open - 1.4,
   };
 });
 
@@ -34,6 +74,7 @@ test.beforeEach(async ({ page }) => {
   networkTestnet = true;
   strategyRunning = false;
   strategyStartCount = 0;
+  strategyConfiguration = configuredStrategy("sar_adx_trend");
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
@@ -51,10 +92,23 @@ test.beforeEach(async ({ page }) => {
         main_key_set: false,
       });
     }
-    if (url.pathname === "/api/backtest/sar-adx/capabilities") {
-      return json(route, { symbols: ["SOLUSDT"], coverage: [] });
+    if (url.pathname.startsWith("/api/backtest/")) {
+      return route.fulfill({ status: 404, contentType: "application/json", body: '{"detail":"Not Found"}' });
     }
-    if (url.pathname === "/api/backtest/sar-adx") return json(route, {});
+    if (url.pathname === "/api/strategy/catalog") {
+      return json(route, { strategies: [
+        { strategy_type: "sar_adx_trend", config_version: strategyVersions.sar_adx_trend, name: "CandleMind Trend Strategy", default_parameters: strategyDefaults.sar_adx_trend },
+        { strategy_type: "sar_martingale", config_version: strategyVersions.sar_martingale, name: "SAR Martingale", default_parameters: strategyDefaults.sar_martingale },
+        { strategy_type: "sar_anti_martingale", config_version: strategyVersions.sar_anti_martingale, name: "SAR Anti-Martingale", default_parameters: strategyDefaults.sar_anti_martingale },
+      ] });
+    }
+    if (url.pathname === "/api/strategy/config") {
+      if (route.request().method() === "PUT") {
+        const request = route.request().postDataJSON();
+        strategyConfiguration = configuredStrategy(request.strategy_type, request.parameters);
+      }
+      return json(route, strategyConfiguration);
+    }
     if (url.pathname === "/api/ai/market-chat") {
       return json(route, { answer: "合成行情分析结果" });
     }
@@ -106,7 +160,7 @@ test.beforeEach(async ({ page }) => {
       strategyRunning = false;
       return json(route, { ok: true, message: "策略已停止" });
     }
-    if (url.pathname === "/api/strategy/analytics") {
+    if (url.pathname === "/api/orders/analytics") {
       return json(route, {
         schema_version: 1,
         scope: { network: networkTestnet ? "testnet" : "mainnet", symbol: "SOLUSDT" },
@@ -147,12 +201,17 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("runs a mocked CandleMind trend strategy backtest", async ({ page }) => {
+test("redirects the retired backtest path to three strategy configuration cards", async ({ page }) => {
   await page.goto("/backtest");
-  await expect(page.getByRole("heading", { name: "CandleMind 趋势策略回测" })).toBeVisible();
-  await expect(page.getByText(/SAR|ADX|V3/i)).toHaveCount(0);
-  await page.getByRole("button", { name: "运行回测" }).click();
-  await expect(page.getByRole("status")).toContainText("回测完成");
+  await expect(page).toHaveURL(/\/strategies$/);
+  await expect(page.getByRole("heading", { name: "自动化交易策略" })).toBeVisible();
+  const cards = page.getByLabel("策略选择").getByRole("button");
+  await expect(cards).toHaveCount(3);
+  await page.getByRole("button", { name: /SAR反马丁/ }).click();
+  await page.getByRole("button", { name: "保存策略配置" }).click();
+  await expect(page.getByRole("status")).toContainText("策略配置已保存");
+  expect(strategyConfiguration.strategy_type).toBe("sar_anti_martingale");
+  await expect(page.getByText("运行回测")).toHaveCount(0);
 });
 
 test("switches to mainnet from a mobile viewport", async ({ page }) => {
@@ -172,7 +231,7 @@ test("opens the inline assistant, narrows the chart, and resizes it", async ({ p
 
   await page.getByRole("button", { name: "打开 AI 行情分析" }).click();
 
-  const assistant = page.getByRole("region", { name: /VibeTrading 实时助手/ });
+  const assistant = page.getByRole("region", { name: /实时行情助手/ });
   const divider = page.getByRole("separator", { name: "调整行情图与 AI 助手的大小" });
   await expect(assistant).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -194,7 +253,7 @@ test("uses an in-page vertical split below 900px", async ({ page }) => {
   await page.getByRole("button", { name: "打开 AI 行情分析" }).click();
 
   const chart = page.locator(".price-chart-root");
-  const assistant = page.getByRole("region", { name: /VibeTrading 实时助手/ });
+  const assistant = page.getByRole("region", { name: /实时行情助手/ });
   const divider = page.getByRole("separator", { name: "调整行情图与 AI 助手的大小" });
   await expect(divider).toHaveAttribute("aria-orientation", "horizontal");
   const [chartBox, assistantBox] = await Promise.all([
@@ -203,6 +262,44 @@ test("uses an in-page vertical split below 900px", async ({ page }) => {
   ]);
   expect(assistantBox.y).toBeGreaterThanOrEqual(chartBox.y + chartBox.height);
   await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("persists the assistant only until the user closes it", async ({ page }) => {
+  await page.goto("/markets");
+  const openButton = page.getByRole("button", { name: "打开 AI 行情分析" });
+  await expect(openButton).toContainText("AI行情分析");
+  await openButton.click();
+  await expect(page.getByRole("region", { name: /实时行情助手/ })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("region", { name: /实时行情助手/ })).toBeVisible();
+  await page.goto("/orders");
+  await page.goto("/markets");
+  await expect(page.getByRole("region", { name: /实时行情助手/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "收起实时助手" }).click();
+  await expect(page.getByRole("region", { name: /实时行情助手/ })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("region", { name: /实时行情助手/ })).toHaveCount(0);
+});
+
+test("offers five main-chart indicators and compact market metrics", async ({ page }) => {
+  await page.goto("/markets");
+  const indicator = page.getByRole("combobox", { name: "主图指标" });
+  await expect(indicator).toHaveValue("psar");
+  await expect(indicator.locator("option")).toHaveText([
+    "SAR",
+    "EMA20",
+    "EMA100",
+    "超级趋势",
+    "布林带",
+  ]);
+  await indicator.selectOption("supertrend");
+  await expect(indicator).toHaveValue("supertrend");
+  await expect(page.getByText("ADX(14)", { exact: true })).toBeVisible();
+  await expect(page.getByText("ATR(14)", { exact: true })).toBeVisible();
+  await expect(page.getByText("RSI(14)", { exact: true })).toBeVisible();
+  await expect(page.getByText("ADX / DI")).toHaveCount(0);
 });
 
 for (const viewport of [
@@ -217,7 +314,7 @@ for (const viewport of [
     await page.getByRole("button", { name: "打开 AI 行情分析" }).click();
 
     const chart = page.locator(".price-chart-root");
-    const assistant = page.getByRole("region", { name: /VibeTrading 实时助手/ });
+    const assistant = page.getByRole("region", { name: /实时行情助手/ });
     await expect(chart).toBeVisible();
     await expect(assistant).toBeVisible();
     const [chartBox, assistantBox] = await Promise.all([chart.boundingBox(), assistant.boundingBox()]);
@@ -268,7 +365,7 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await page.goto("/orders");
 
-    await expect(page.getByLabel("策略分析").locator("article")).toHaveCount(8);
+    await expect(page.getByLabel("账户交易统计").locator("article")).toHaveCount(8);
     await expect(page.getByText("资金曲线")).toHaveCount(0);
     await expect(page.getByText("+1.25%")).toBeVisible();
     await expect(page.getByRole("button", { name: "启动策略" })).toBeVisible();

@@ -130,6 +130,7 @@ class FuturesClient(Protocol):
     def futures_get_position_mode(self) -> dict[str, Any]: ...
     def futures_position_information(self, **params: Any) -> list[dict[str, Any]]: ...
     def futures_get_open_orders(self, **params: Any) -> list[dict[str, Any]]: ...
+    def futures_get_open_algo_orders(self, **params: Any) -> list[dict[str, Any]]: ...
     def futures_account_balance(self) -> list[dict[str, Any]]: ...
 
 
@@ -162,6 +163,27 @@ class ExchangeExecutor:
         self.rules.validate_notional(quantity, price)
         return quantity
 
+    def weighted_layer_quantity(
+        self,
+        *,
+        available_balance: Decimal | str | int | float,
+        capital_limit: Decimal | str | int | float,
+        reference_price: Decimal | str | int | float,
+        capital_weight: Decimal | str | int | float,
+    ) -> Decimal:
+        """Size one normalized layer without exceeding its capital allocation."""
+
+        available = _non_negative_decimal(available_balance, "available balance")
+        limit = _positive_decimal(capital_limit, "capital limit")
+        price = _positive_decimal(reference_price, "reference price")
+        weight = _positive_decimal(capital_weight, "capital weight")
+        if weight > 1:
+            raise ExchangeExecutionError("capital weight must not exceed one")
+        budget = min(available, limit * weight)
+        quantity = self.rules.floor_quantity(budget / price)
+        self.rules.validate_notional(quantity, price)
+        return quantity
+
     def validate_one_way_account(
         self,
         symbol: str,
@@ -178,10 +200,14 @@ class ExchangeExecutor:
         quantity = sum((_decimal(item.get("positionAmt", "0"), "position amount") for item in positions), Decimal("0"))
         if quantity and not allow_existing_position:
             raise UnsupportedAccountError("an existing position requires reconciliation")
-        open_orders = self.client.futures_get_open_orders(symbol=normalized)
-        if open_orders and not allow_open_orders:
+        open_orders = list(self.client.futures_get_open_orders(symbol=normalized) or [])
+        algo_orders = list(
+            self.client.futures_get_open_algo_orders(symbol=normalized) or []
+        )
+        open_order_count = len(open_orders) + len(algo_orders)
+        if open_order_count and not allow_open_orders:
             raise UnsupportedAccountError("existing open orders require reconciliation")
-        return AccountValidation(normalized, quantity, len(open_orders))
+        return AccountValidation(normalized, quantity, open_order_count)
 
     def available_balance(self, asset: str = "USDT") -> Decimal:
         balances = self.client.futures_account_balance()

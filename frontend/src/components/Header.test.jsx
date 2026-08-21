@@ -18,6 +18,14 @@ const appState = {
   strategyStatusUncertain: false,
   symbolSwitching: false,
   strategyCapitalLimit: "1000",
+  strategyConfigurationLoaded: true,
+  strategyConfigurationError: null,
+  strategyConfiguration: {
+    strategy_type: "sar_adx_trend",
+    config_version: "sar_adx_trend_v1",
+    config_hash: "trend-config-hash",
+    parameters: { execution_interval: "5m", sar_step: 0.02, sar_max: 0.2, adx_threshold: 45, max_layers: 5 },
+  },
   refreshRevision: 0,
   refreshPending: false,
   refreshError: null,
@@ -80,7 +88,7 @@ describe("Header network controls", () => {
     expect(screen.getByRole("alert").textContent).toContain("目标网络不可用");
   });
 
-  it.each(["/markets", "/orders", "/backtest"])("shows strategy control on %s", (path) => {
+  it.each(["/markets", "/orders", "/strategies"])("shows strategy control on %s", (path) => {
     renderHeader(path);
     expect(screen.getByRole("button", { name: "启动策略" })).toBeTruthy();
   });
@@ -144,6 +152,8 @@ describe("Header network controls", () => {
     expect(dialog.textContent).toContain("SOLUSDT");
     expect(dialog.textContent).toContain("测试网");
     expect(dialog.textContent).toContain("1000 USDT");
+    expect(dialog.textContent).toContain("CandleMind趋势策略");
+    expect(dialog.textContent).toContain("SAR 加速因子 0.02");
     fireEvent.click(screen.getByRole("button", { name: "确认启动" }));
 
     await waitFor(() => expect(appState.startStrategy).toHaveBeenCalledWith(undefined));

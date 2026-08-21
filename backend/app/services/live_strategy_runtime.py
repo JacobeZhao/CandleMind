@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import math
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 import pandas as pd
 
@@ -13,6 +13,7 @@ from backend.app.strategies.sar_adx_config import CONFIG_VERSION, sar_adx_v3_con
 from backend.app.strategies.sar_pyramid import (
     BAR_INTERVAL,
     PositionSnapshot,
+    SarPyramidConfig,
     SarPyramidAction,
     SarPyramidSignal,
     SarPyramidState,
@@ -29,8 +30,8 @@ class LiveStrategyRuntimeError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class DecisionPlan:
     decision_id: str
-    actions: tuple[SarPyramidAction, ...]
-    proposed_state: SarPyramidState
+    actions: tuple[Any, ...]
+    proposed_state: Any
     decision_time: pd.Timestamp
     execution_time: pd.Timestamp | None
     reference_price: float | None
@@ -48,11 +49,15 @@ class LiveStrategyRuntime:
         load_state: Callable[[], Mapping[str, object] | None] | None = None,
         save_state: Callable[[dict[str, object]], None] | None = None,
         now: Callable[[], datetime] | None = None,
+        config: SarPyramidConfig | None = None,
+        config_version: str = CONFIG_VERSION,
     ) -> None:
         if restored_payload is not None and load_state is not None:
             raise ValueError("provide restored_payload or load_state, not both")
         self.symbol = symbol.upper()
-        self.config = sar_adx_v3_config()
+        self.config = config or sar_adx_v3_config()
+        self.config.validate()
+        self.config_version = config_version
         self.now = now or (lambda: datetime.now(timezone.utc))
         self._save_state = save_state
         self.state = SarPyramidState()
@@ -162,7 +167,7 @@ class LiveStrategyRuntime:
             raise LiveStrategyRuntimeError("exchange actions are not fully confirmed")
         pending = self._pending
         payload: dict[str, object] = {
-            "config_version": CONFIG_VERSION,
+            "config_version": self.config_version,
             "symbol": self.symbol,
             "interval": "5m",
             "strategy": asdict(pending.proposed_state),
@@ -254,7 +259,7 @@ class LiveStrategyRuntime:
 
     def _decision_id(self, decision_time: pd.Timestamp) -> str:
         utc = decision_time.tz_convert("UTC")
-        return f"{CONFIG_VERSION}:{self.symbol}:{utc.strftime('%Y%m%dT%H%M%S%fZ')}"
+        return f"{self.config_version}:{self.symbol}:{utc.strftime('%Y%m%dT%H%M%S%fZ')}"
 
     @staticmethod
     def _optional_timestamp(value: object) -> pd.Timestamp | None:

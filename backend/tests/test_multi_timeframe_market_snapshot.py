@@ -11,6 +11,7 @@ from backend.app.services.multi_timeframe_market_snapshot import (
     fetch_multi_timeframe_snapshot,
     latest_completed_cutoff,
 )
+from backend.app.services.read_only_market_gateway import ReadOnlyMarketGateway
 
 
 def _raw_bars(interval, cutoff_ms, count=80, *, include_open_bar=True):
@@ -116,3 +117,89 @@ def test_rejects_a_stale_timeframe_instead_of_mixing_cutoffs():
             server_time_ms=server_time_ms,
             raw_by_interval=rows,
         )
+
+
+def test_explicit_cutoff_is_used_for_every_request_and_retry():
+    first_server_time = int(
+        datetime(2026, 8, 20, 0, 7, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    cutoff = latest_completed_cutoff(first_server_time)
+    rows = _raw_by_interval(first_server_time)
+
+    class Client:
+        def __init__(self):
+            self.server_times = iter((first_server_time, first_server_time + 300_000))
+            self.calls = []
+
+        def futures_time(self):
+            return {"serverTime": next(self.server_times)}
+
+        def futures_klines(self, **parameters):
+            self.calls.append(parameters)
+            return rows[parameters["interval"]]
+
+    client = Client()
+    first = asyncio.run(
+        fetch_multi_timeframe_snapshot(client, "SOLUSDT", cutoff_ms=cutoff)
+    )
+    retried = asyncio.run(
+        fetch_multi_timeframe_snapshot(client, "SOLUSDT", cutoff_ms=cutoff)
+    )
+
+    assert first["trigger_cutoff"] == retried["trigger_cutoff"]
+    assert len(client.calls) == len(ANALYSIS_INTERVALS) * 2
+    assert {call["endTime"] for call in client.calls} == {cutoff}
+
+
+def test_explicit_cutoff_must_be_completed_and_not_in_the_future():
+    server_time_ms = int(
+        datetime(2026, 8, 20, 0, 7, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    rows = _raw_by_interval(server_time_ms)
+
+    with pytest.raises(MultiTimeframeMarketDataError, match="boundary"):
+        build_multi_timeframe_snapshot(
+            symbol="SOLUSDT",
+            server_time_ms=server_time_ms,
+            raw_by_interval=rows,
+            cutoff_ms=latest_completed_cutoff(server_time_ms) - 1,
+        )
+    with pytest.raises(MultiTimeframeMarketDataError, match="later"):
+        build_multi_timeframe_snapshot(
+            symbol="SOLUSDT",
+            server_time_ms=server_time_ms,
+            raw_by_interval=rows,
+            cutoff_ms=latest_completed_cutoff(server_time_ms) + 300_000,
+        )
+
+
+def test_read_only_gateway_exposes_only_public_market_methods():
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def futures_time(self):
+            return {"serverTime": 123}
+
+        def futures_klines(self, **parameters):
+            self.calls.append(parameters)
+            return [[1]]
+
+        def futures_create_order(self, **_parameters):
+            raise AssertionError("must not be reachable")
+
+    client = Client()
+    gateway = ReadOnlyMarketGateway(client)
+
+    assert gateway.server_time() == 123
+    assert gateway.klines(
+        symbol="SOLUSDT", interval="5m", limit=200, end_time=299_999
+    ) == [[1]]
+    assert client.calls == [{
+        "symbol": "SOLUSDT",
+        "interval": "5m",
+        "limit": 200,
+        "endTime": 299_999,
+    }]
+    assert not hasattr(gateway, "futures_create_order")
+    assert not hasattr(gateway, "futures_account")

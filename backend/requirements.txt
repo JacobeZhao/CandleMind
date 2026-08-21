@@ -1,7 +1,7 @@
 fastapi==0.111.0
 pydantic>=2.7,<3.0
 uvicorn[standard]==0.30.1
-python-binance==1.0.19
+python-binance==1.0.37
 aiohttp>=3.9,<4.0
 aiohttp-socks>=0.9,<1.0
 pandas>=2.0,<3.0

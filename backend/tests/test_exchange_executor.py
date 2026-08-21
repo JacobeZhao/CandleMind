@@ -37,6 +37,11 @@ class FakeClient:
         self.dual_side = False
         self.positions = [{"symbol": "SOLUSDT", "positionAmt": "0"}]
         self.open_orders = []
+        self.open_algo_orders = []
+        self.open_orders_error = None
+        self.open_algo_orders_error = None
+        self.read_calls = []
+        self.write_calls = []
         self.balances = [{"asset": "USDT", "availableBalance": "750.25"}]
         self.create_result = {
             "symbol": "SOLUSDT",
@@ -64,16 +69,36 @@ class FakeClient:
         return self.lookup_result
 
     def futures_get_position_mode(self):
+        self.read_calls.append("position_mode")
         return {"dualSidePosition": self.dual_side}
 
     def futures_position_information(self, **_params):
+        self.read_calls.append("positions")
         return self.positions
 
     def futures_get_open_orders(self, **_params):
+        self.read_calls.append("open_orders")
+        if self.open_orders_error:
+            raise self.open_orders_error
         return self.open_orders
+
+    def futures_get_open_algo_orders(self, **_params):
+        self.read_calls.append("open_algo_orders")
+        if self.open_algo_orders_error:
+            raise self.open_algo_orders_error
+        return self.open_algo_orders
 
     def futures_account_balance(self):
         return self.balances
+
+    def futures_cancel_order(self, **params):
+        self.write_calls.append(("cancel", params))
+
+    def futures_change_leverage(self, **params):
+        self.write_calls.append(("leverage", params))
+
+    def futures_change_margin_type(self, **params):
+        self.write_calls.append(("margin", params))
 
 
 @pytest.fixture
@@ -105,6 +130,31 @@ def test_rejects_below_minimum_notional(rules):
             capital_limit="4",
             reference_price="10",
             layers=1,
+        )
+
+
+def test_weighted_layer_quantity_caps_each_layer_to_normalized_budget(rules):
+    executor = ExchangeExecutor(FakeClient(), rules)
+
+    quantity = executor.weighted_layer_quantity(
+        available_balance="1000",
+        capital_limit="600",
+        reference_price="100",
+        capital_weight="0.25",
+    )
+
+    assert quantity == Decimal("1.5")
+
+
+def test_weighted_layer_quantity_rejects_weight_above_total_budget(rules):
+    executor = ExchangeExecutor(FakeClient(), rules)
+
+    with pytest.raises(ExchangeExecutionError, match="weight"):
+        executor.weighted_layer_quantity(
+            available_balance="1000",
+            capital_limit="600",
+            reference_price="100",
+            capital_weight="1.01",
         )
 
 
@@ -229,18 +279,67 @@ def test_account_validation_rejects_unreconciled_position_and_orders(rules):
     with pytest.raises(UnsupportedAccountError, match="open orders"):
         executor.validate_one_way_account("SOLUSDT")
 
+    client.open_orders = []
+    client.open_algo_orders = [{"algoId": 2}]
+    with pytest.raises(UnsupportedAccountError, match="open orders"):
+        executor.validate_one_way_account("SOLUSDT")
+
 
 def test_account_validation_can_return_reconciled_state(rules):
     client = FakeClient()
     client.positions = [{"symbol": "SOLUSDT", "positionAmt": "-2.5"}]
     client.open_orders = [{"orderId": 1}]
+    client.open_algo_orders = [{"algoId": 2}]
 
     result = ExchangeExecutor(client, rules).validate_one_way_account(
         "SOLUSDT", allow_existing_position=True, allow_open_orders=True
     )
 
     assert result.position_quantity == Decimal("-2.5")
-    assert result.open_order_count == 1
+    assert result.open_order_count == 2
+
+
+@pytest.mark.parametrize("failed_query", ["regular", "algo"])
+def test_account_validation_fails_closed_when_any_open_order_query_fails(
+    rules, failed_query
+):
+    client = FakeClient()
+    if failed_query == "regular":
+        client.open_orders_error = TimeoutError("regular orders timed out")
+    else:
+        client.open_algo_orders_error = TimeoutError("algo orders timed out")
+
+    with pytest.raises(TimeoutError):
+        ExchangeExecutor(client, rules).validate_one_way_account(
+            "SOLUSDT", allow_open_orders=True
+        )
+
+    assert client.created == []
+    assert client.lookups == []
+    assert client.write_calls == []
+
+
+def test_cross_30x_position_validation_never_writes_to_exchange(rules):
+    client = FakeClient()
+    client.positions = [{
+        "symbol": "SOLUSDT",
+        "positionAmt": "10",
+        "entryPrice": "88.1085",
+        "isolated": False,
+        "leverage": "30",
+    }]
+    executor = ExchangeExecutor(client, rules)
+
+    account = executor.validate_one_way_account(
+        "SOLUSDT", allow_existing_position=True, allow_open_orders=True
+    )
+    with pytest.raises(UnsupportedAccountError, match="isolated"):
+        executor.validate_symbol_risk("SOLUSDT")
+
+    assert account.position_quantity == Decimal("10")
+    assert client.created == []
+    assert client.lookups == []
+    assert client.write_calls == []
 
 
 def test_reads_available_balance_and_position_risk(rules):

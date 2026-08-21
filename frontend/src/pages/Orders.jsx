@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Loader, RefreshCw } from "lucide-react";
 import clsx from "clsx";
-import { getOrderHistory, getRecentTrades } from "../api/client";
+import { getCombinedOpenOrders, getOrderHistory, getRecentTrades } from "../api/client";
 import StrategyAnalyticsPanel from "../components/StrategyAnalyticsPanel";
 import { useApp } from "../context/AppContext";
 
@@ -21,14 +21,84 @@ const formatNumber = (value, digits = 2) => Number.parseFloat(value || 0).toFixe
 const formatTime = (timestamp) => new Date(timestamp).toLocaleString("zh-CN");
 const EmptyRow = ({ columns, children }) => <tr><td colSpan={columns} className="py-10 text-center text-muted">{children}</td></tr>;
 
+function normalizeOpenOrder(order, index) {
+  const source = String(order.source || order.order_source || "regular").toLowerCase();
+  return {
+    ...order,
+    key: `${source}:${order.id ?? order.orderId ?? order.algoId ?? index}`,
+    source,
+    time: order.time ?? order.createTime ?? order.updateTime,
+    type: order.type ?? order.orderType ?? order.algoType,
+    origQty: order.origQty ?? order.quantity ?? order.qty,
+    stopPrice: order.triggerPrice ?? order.stopPrice,
+  };
+}
+
+function responseMatchesScope(data, networkTab, symbol) {
+  const scope = data?.scope;
+  if (!scope) return true;
+  const responseNetwork = String(scope.network || "").toLowerCase();
+  const expectedNetwork = networkTab === "main" ? "mainnet" : "testnet";
+  const normalizedNetwork = responseNetwork === "main" ? "mainnet" : responseNetwork === "test" ? "testnet" : responseNetwork;
+  return normalizedNetwork === expectedNetwork && scope.symbol === symbol;
+}
+
 export default function Orders() {
-  const { networkTab, openOrders, refreshRevision, symbol } = useApp();
+  const { networkTab, refreshRevision, symbol } = useApp();
   const [tab, setTab] = useState(0);
+  const [openOrderState, setOpenOrderState] = useState({ phase: "loading", orders: [], error: null, asOf: null, scopeKey: null });
   const [history, setHistory] = useState([]);
   const [trades, setTrades] = useState([]);
   const [requestState, setRequestState] = useState({ loading: false, error: null });
   const requestId = useRef(0);
   const activeController = useRef(null);
+  const openOrderRequestId = useRef(0);
+  const openOrderController = useRef(null);
+
+  const fetchOpenOrders = useCallback(async () => {
+    openOrderController.current?.abort();
+    const controller = new AbortController();
+    openOrderController.current = controller;
+    const currentRequest = ++openOrderRequestId.current;
+    const expectedScope = `${networkTab}:${symbol}`;
+    if (!symbol) {
+      setOpenOrderState({ phase: "empty", orders: [], error: null, asOf: null, scopeKey: expectedScope });
+      return;
+    }
+    setOpenOrderState((current) => ({
+      ...(current.scopeKey === expectedScope ? current : { orders: [], asOf: null }),
+      phase: current.scopeKey === expectedScope && current.orders.length ? "refreshing" : "loading",
+      error: null,
+      scopeKey: expectedScope,
+    }));
+    try {
+      const { data } = await getCombinedOpenOrders(symbol, controller.signal);
+      if (
+        controller.signal.aborted
+        || openOrderRequestId.current !== currentRequest
+        || expectedScope !== `${networkTab}:${symbol}`
+        || !responseMatchesScope(data, networkTab, symbol)
+      ) return;
+      const orders = (Array.isArray(data) ? data : data?.orders || []).map(normalizeOpenOrder);
+      const partial = !Array.isArray(data) && String(data?.status || "complete").toLowerCase() !== "complete";
+      setOpenOrderState({
+        phase: partial ? "partial" : orders.length ? "complete" : "empty",
+        orders,
+        error: partial ? (data?.reasons || []).join("、") || "部分挂单来源读取失败" : null,
+        asOf: data?.as_of || new Date().toISOString(),
+        scopeKey: expectedScope,
+      });
+    } catch (error) {
+      if (controller.signal.aborted || openOrderRequestId.current !== currentRequest) return;
+      const detail = error?.response?.data?.detail;
+      const message = typeof detail === "string" ? detail : "挂单数据加载失败";
+      setOpenOrderState((current) => ({
+        ...current,
+        phase: current.orders.length ? "stale" : "error",
+        error: message,
+      }));
+    }
+  }, [networkTab, refreshRevision, symbol]);
 
   const fetchData = useCallback(async () => {
     activeController.current?.abort();
@@ -60,11 +130,29 @@ export default function Orders() {
     return () => activeController.current?.abort();
   }, [fetchData]);
 
+  useEffect(() => {
+    fetchOpenOrders();
+    return () => openOrderController.current?.abort();
+  }, [fetchOpenOrders]);
+
   const tableState = (columns, emptyLabel, rows) => {
     if (requestState.loading) return <EmptyRow columns={columns}><span role="status" className="inline-flex items-center gap-2"><Loader size={14} className="animate-spin" />正在加载</span></EmptyRow>;
     if (requestState.error) return <EmptyRow columns={columns}><span role="alert" className="inline-flex items-center gap-2 text-red"><AlertCircle size={14} />{requestState.error}</span></EmptyRow>;
     if (!rows.length) return <EmptyRow columns={columns}>{emptyLabel}</EmptyRow>;
     return null;
+  };
+
+  const openOrderTableState = () => {
+    if (openOrderState.phase === "loading") return <EmptyRow columns={9}><span role="status" className="inline-flex items-center gap-2"><Loader size={14} className="animate-spin" />正在加载挂单</span></EmptyRow>;
+    if (openOrderState.phase === "error") return <EmptyRow columns={9}><span role="alert" className="inline-flex items-center gap-2 text-red"><AlertCircle size={14} />{openOrderState.error}</span></EmptyRow>;
+    if (openOrderState.phase === "partial" && !openOrderState.orders.length) return <EmptyRow columns={9}><span role="alert" className="inline-flex items-center gap-2 text-accent"><AlertCircle size={14} />{openOrderState.error}</span></EmptyRow>;
+    if (openOrderState.phase === "empty") return <EmptyRow columns={9}>暂无挂单</EmptyRow>;
+    return null;
+  };
+
+  const refreshActiveTab = () => {
+    if (tab === 0) fetchOpenOrders();
+    else fetchData();
   };
 
   return (
@@ -73,14 +161,17 @@ export default function Orders() {
       <section className="overflow-hidden rounded-md border border-border bg-card" aria-label="订单明细">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-3 sm:px-4">
           <div className="flex min-w-0 gap-1 overflow-x-auto">
-            {TABS.map((label, index) => <button type="button" key={label} onClick={() => setTab(index)} className={clsx("whitespace-nowrap rounded-md px-2 py-1.5 text-xs transition-colors sm:px-3 sm:text-sm", tab === index ? "bg-accent font-bold text-black" : "text-muted hover:text-white")}>{label}{index === 0 && openOrders.length > 0 && <span className="ml-1 rounded-full bg-accent/20 px-1.5 text-xs text-accent">{openOrders.length}</span>}</button>)}
+            {TABS.map((label, index) => <button type="button" key={label} onClick={() => setTab(index)} className={clsx("whitespace-nowrap rounded-md px-2 py-1.5 text-xs transition-colors sm:px-3 sm:text-sm", tab === index ? "bg-accent font-bold text-black" : "text-muted hover:text-white")}>{label}{index === 0 && openOrderState.orders.length > 0 && <span className="ml-1 rounded-full bg-accent/20 px-1.5 text-xs text-accent">{openOrderState.orders.length}</span>}</button>)}
           </div>
-          <button type="button" aria-label="刷新订单数据" title="刷新订单数据" onClick={fetchData} disabled={requestState.loading || tab === 0} className="flex h-8 w-8 shrink-0 items-center justify-center text-muted transition-colors hover:text-white disabled:opacity-40"><RefreshCw size={14} className={requestState.loading ? "animate-spin" : ""} /></button>
+          <div className="flex items-center gap-2">
+            {tab === 0 && ["refreshing", "partial", "stale"].includes(openOrderState.phase) && <span className={clsx("text-xs", openOrderState.phase === "refreshing" ? "text-muted" : "text-accent")}>{openOrderState.phase === "refreshing" ? "更新中" : openOrderState.phase === "stale" ? "数据可能已过期" : "部分数据"}</span>}
+            <button type="button" aria-label="刷新订单数据" title="刷新订单数据" onClick={refreshActiveTab} disabled={tab === 0 ? openOrderState.phase === "loading" || openOrderState.phase === "refreshing" : requestState.loading} className="flex h-8 w-8 shrink-0 items-center justify-center text-muted transition-colors hover:text-white disabled:opacity-40"><RefreshCw size={14} className={(tab === 0 ? openOrderState.phase === "loading" || openOrderState.phase === "refreshing" : requestState.loading) ? "animate-spin" : ""} /></button>
+          </div>
         </div>
         <div className="overflow-x-auto">
-          {tab === 0 && <table className="w-full min-w-[760px] text-xs"><thead><tr className="border-b border-border text-muted">{["时间", "品种", "方向", "类型", "数量", "价格", "触发价", "状态"].map((heading) => <th key={heading} className="px-4 py-2.5 text-left">{heading}</th>)}</tr></thead><tbody>
-            {tableState(8, "暂无挂单", openOrders)}
-            {openOrders.map((order) => <tr key={order.orderId} className="border-b border-border/40 hover:bg-surface/30"><td className="px-4 py-2.5 text-muted">{formatTime(order.time)}</td><td className="px-4 py-2.5 font-medium">{order.symbol}</td><td className={clsx("px-4 py-2.5 font-bold", order.side === "BUY" ? "text-green" : "text-red")}>{order.side === "BUY" ? "买/多" : "卖/空"}</td><td className="px-4 py-2.5"><Badge type={order.type} /></td><td className="px-4 py-2.5 font-mono">{formatNumber(order.origQty, 3)}</td><td className="px-4 py-2.5 font-mono">{formatNumber(order.price) === "0.00" ? "市价" : formatNumber(order.price)}</td><td className="px-4 py-2.5 font-mono text-orange-400">{formatNumber(order.stopPrice) !== "0.00" ? formatNumber(order.stopPrice) : "—"}</td><td className="px-4 py-2.5"><StatusBadge status={order.status} /></td></tr>)}
+          {tab === 0 && <table className="w-full min-w-[840px] text-xs"><thead><tr className="border-b border-border text-muted">{["时间", "品种", "来源", "方向", "类型", "数量", "价格", "触发价", "状态"].map((heading) => <th key={heading} className="px-4 py-2.5 text-left">{heading}</th>)}</tr></thead><tbody>
+            {openOrderTableState()}
+            {openOrderState.orders.map((order) => <tr key={order.key} className={clsx("border-b border-border/40 hover:bg-surface/30", openOrderState.phase === "stale" && "opacity-60")}><td className="px-4 py-2.5 text-muted">{formatTime(order.time)}</td><td className="px-4 py-2.5 font-medium">{order.symbol}</td><td className="px-4 py-2.5 text-muted">{order.source === "algo" ? "Algo" : "普通"}</td><td className={clsx("px-4 py-2.5 font-bold", order.side === "BUY" ? "text-green" : "text-red")}>{order.side === "BUY" ? "买/多" : "卖/空"}</td><td className="px-4 py-2.5"><Badge type={order.type} /></td><td className="px-4 py-2.5 font-mono">{formatNumber(order.origQty, 3)}</td><td className="px-4 py-2.5 font-mono">{formatNumber(order.price) === "0.00" ? "市价" : formatNumber(order.price)}</td><td className="px-4 py-2.5 font-mono text-orange-400">{formatNumber(order.stopPrice) !== "0.00" ? formatNumber(order.stopPrice) : "—"}</td><td className="px-4 py-2.5"><StatusBadge status={order.status} /></td></tr>)}
           </tbody></table>}
           {tab === 1 && <table className="w-full min-w-[700px] text-xs"><thead><tr className="border-b border-border text-muted">{["时间", "品种", "方向", "价格", "数量", "手续费", "已实现盈亏"].map((heading) => <th key={heading} className="px-4 py-2.5 text-left">{heading}</th>)}</tr></thead><tbody>
             {tableState(7, "暂无交易所成交记录", trades)}

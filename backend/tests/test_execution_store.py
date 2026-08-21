@@ -211,3 +211,31 @@ def test_initialize_is_bound_to_one_run_and_corruption_is_redacted(tmp_path) -> 
     with pytest.raises(ExecutionStoreError, match="unreadable") as captured:
         store.load("testnet", "SOLUSDT")
     assert str(tmp_path) not in str(captured.value)
+
+
+def test_archive_atomically_releases_a_terminal_journal_identity(tmp_path) -> None:
+    store = _initialized(tmp_path)
+
+    archived = store.archive("testnet", "SOLUSDT")
+
+    assert archived is not None
+    assert archived.exists()
+    assert archived.parent.name == "archive"
+    assert store.load("testnet", "SOLUSDT") is None
+    fresh = store.initialize("testnet", "SOLUSDT", run_id="run-next")
+    assert fresh["run"]["run_id"] == "run-next"
+
+
+def test_archive_rejects_a_non_terminal_order(tmp_path) -> None:
+    store = _initialized(tmp_path)
+    store.record_decision("testnet", "SOLUSDT", decision_id="bar-1", action="OPEN")
+    store.record_order_attempt(
+        "testnet",
+        "SOLUSDT",
+        decision_id="bar-1",
+        ordinal=0,
+        request={"action": "open", "direction": 1, "quantity": "1"},
+    )
+
+    with pytest.raises(ExecutionStoreConflict, match="non-terminal"):
+        store.archive("testnet", "SOLUSDT")

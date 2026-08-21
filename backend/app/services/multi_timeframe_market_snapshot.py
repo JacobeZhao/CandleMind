@@ -234,12 +234,26 @@ def _summarize_interval(frame: pd.DataFrame, interval: str) -> dict[str, Any]:
 
 
 def build_multi_timeframe_snapshot(
-    *, symbol: str, server_time_ms: int, raw_by_interval: dict[str, Sequence[Sequence[Any]]]
+    *,
+    symbol: str,
+    server_time_ms: int,
+    raw_by_interval: dict[str, Sequence[Sequence[Any]]],
+    cutoff_ms: int | None = None,
 ) -> dict[str, Any]:
-    cutoff_ms = latest_completed_cutoff(server_time_ms)
+    effective_cutoff_ms = (
+        latest_completed_cutoff(server_time_ms) if cutoff_ms is None else int(cutoff_ms)
+    )
+    if (effective_cutoff_ms + 1) % INTERVAL_MILLISECONDS[TRIGGER_INTERVAL] != 0:
+        raise MultiTimeframeMarketDataError("Explicit cutoff is not a completed 5m boundary")
+    if effective_cutoff_ms > latest_completed_cutoff(server_time_ms):
+        raise MultiTimeframeMarketDataError("Explicit cutoff is later than exchange time")
     intervals = {
         interval: _summarize_interval(
-            _closed_frame(raw_by_interval.get(interval, ()), cutoff_ms=cutoff_ms, interval=interval),
+            _closed_frame(
+                raw_by_interval.get(interval, ()),
+                cutoff_ms=effective_cutoff_ms,
+                interval=interval,
+            ),
             interval,
         )
         for interval in ANALYSIS_INTERVALS
@@ -255,7 +269,7 @@ def build_multi_timeframe_snapshot(
         "symbol": symbol,
         "snapshot_at": _iso_utc(server_time_ms),
         "trigger_interval": TRIGGER_INTERVAL,
-        "trigger_cutoff": _iso_utc(cutoff_ms),
+        "trigger_cutoff": _iso_utc(effective_cutoff_ms),
         "analysis_intervals": list(ANALYSIS_INTERVALS),
         "reasons": reasons,
         "intervals": intervals,
@@ -265,14 +279,46 @@ def build_multi_timeframe_snapshot(
     return snapshot
 
 
-async def fetch_multi_timeframe_snapshot(client: Any, symbol: str) -> dict[str, Any]:
+def _server_time_ms(client: Any) -> int:
+    if callable(getattr(client, "server_time", None)):
+        value = client.server_time()
+        return int(value.get("serverTime")) if isinstance(value, dict) else int(value)
+    return int(client.futures_time()["serverTime"])
+
+
+def _fetch_klines(
+    client: Any, *, symbol: str, interval: str, cutoff_ms: int | None
+) -> Any:
+    if callable(getattr(client, "klines", None)):
+        return client.klines(
+            symbol=symbol,
+            interval=interval,
+            limit=BAR_LIMIT,
+            end_time=cutoff_ms,
+        )
+    parameters: dict[str, Any] = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": BAR_LIMIT,
+    }
+    if cutoff_ms is not None:
+        parameters["endTime"] = cutoff_ms
+    return client.futures_klines(**parameters)
+
+
+async def fetch_multi_timeframe_snapshot(
+    client: Any, symbol: str, *, cutoff_ms: int | None = None
+) -> dict[str, Any]:
     try:
-        server = await asyncio.to_thread(client.futures_time)
-        server_time_ms = int(server["serverTime"])
+        server_time_ms = await asyncio.to_thread(_server_time_ms, client)
         rows = await asyncio.gather(
             *(
                 asyncio.to_thread(
-                    client.futures_klines, symbol=symbol, interval=interval, limit=BAR_LIMIT
+                    _fetch_klines,
+                    client,
+                    symbol=symbol,
+                    interval=interval,
+                    cutoff_ms=cutoff_ms,
                 )
                 for interval in ANALYSIS_INTERVALS
             )
@@ -286,4 +332,5 @@ async def fetch_multi_timeframe_snapshot(client: Any, symbol: str) -> dict[str, 
         symbol=symbol,
         server_time_ms=server_time_ms,
         raw_by_interval=dict(zip(ANALYSIS_INTERVALS, rows, strict=True)),
+        cutoff_ms=cutoff_ms,
     )
