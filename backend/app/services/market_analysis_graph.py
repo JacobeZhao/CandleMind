@@ -12,6 +12,7 @@ import re
 from typing import Any, TypedDict
 
 import aiosqlite
+from mcp import Client
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -20,6 +21,10 @@ from langgraph.runtime import Runtime
 from ..runtime_paths import RUNTIME_DATA_DIR
 from .ai_provider import chat_complete
 from .multi_timeframe_market_snapshot import fetch_multi_timeframe_snapshot
+from .market_mcp import MarketMCPError, create_market_mcp_server
+from backend.app.exchanges.binance.adapter import BinanceMarketDataAdapter
+from backend.app.exchanges.contracts import ExchangeBinding
+from .read_only_market_gateway import ReadOnlyMarketGateway
 
 
 MAX_PROMPT_BYTES = 28_000
@@ -75,13 +80,9 @@ def _bounded_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
 async def _collect_snapshot(
     state: AnalysisState, runtime: Runtime[AnalysisContext]
 ) -> dict[str, Any]:
-    cutoff_ms = state.get("cutoff_ms")
-    if cutoff_ms is None:
-        snapshot = await fetch_multi_timeframe_snapshot(runtime.context.client, state["symbol"])
-    else:
-        snapshot = await fetch_multi_timeframe_snapshot(
-            runtime.context.client, state["symbol"], cutoff_ms=cutoff_ms
-        )
+    snapshot = await _fetch_snapshot_through_mcp(
+        runtime.context.client, state["symbol"], cutoff_ms=state.get("cutoff_ms")
+    )
     cutoff = str(snapshot["trigger_cutoff"])
     batch_id = f"{state['symbol']}:{cutoff}"
     if state.get("mode") == "manual":
@@ -92,6 +93,47 @@ async def _collect_snapshot(
         "batch_id": batch_id,
         "reasons": list(snapshot["reasons"]),
     }
+
+
+async def _fetch_snapshot_through_mcp(
+    client: Any, symbol: str, *, cutoff_ms: int | None
+) -> dict[str, Any]:
+    gateway = (
+        client if isinstance(client, ReadOnlyMarketGateway) else ReadOnlyMarketGateway(client)
+    )
+    market = BinanceMarketDataAdapter(
+        ExchangeBinding("binance", "testnet", symbol), gateway
+    )
+
+    async def snapshot_reader(requested_symbol: str) -> dict[str, Any]:
+        if cutoff_ms is None:
+            return await fetch_multi_timeframe_snapshot(client, requested_symbol)
+        return await fetch_multi_timeframe_snapshot(
+            client, requested_symbol, cutoff_ms=cutoff_ms
+        )
+
+    def ticker_reader(requested_symbol: str) -> Any:
+        if requested_symbol != symbol:
+            raise MarketMCPError("Market symbol is unavailable")
+        return market.ticker()
+
+    def klines_reader(requested_symbol: str, interval: str, limit: int) -> Any:
+        if requested_symbol != symbol:
+            raise MarketMCPError("Market symbol is unavailable")
+        return market.completed_klines(interval, limit)
+
+    server = create_market_mcp_server(
+        ticker_reader=ticker_reader,
+        completed_klines_reader=klines_reader,
+        multi_timeframe_snapshot_reader=snapshot_reader,
+    )
+    async with Client(server) as mcp_client:
+        result = await mcp_client.call_tool(
+            "get_multi_timeframe_snapshot", {"symbol": symbol}
+        )
+    if result.is_error or not isinstance(result.structured_content, dict):
+        raise MarketMCPError("Market snapshot is unavailable")
+    return dict(result.structured_content)
 
 
 def _build_prompt(state: AnalysisState) -> dict[str, Any]:

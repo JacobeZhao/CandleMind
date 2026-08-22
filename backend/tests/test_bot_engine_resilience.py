@@ -21,6 +21,10 @@ from backend.app.services.exchange_executor import (
     SymbolRules,
 )
 from backend.app.services.execution_store import ExecutionStore
+from backend.app.services.strategy_runtime_intent import (
+    StrategyRuntimeIntentStore,
+    StrategyScope,
+)
 from backend.app.services.live_strategy_runtime import (
     DecisionPlan,
     LiveStrategyRuntimeError,
@@ -315,6 +319,226 @@ def test_ambiguous_order_is_recorded_unknown_without_blind_resubmit(tmp_path):
     assert summary["unknown_order_count"] == 1
 
 
+def test_partial_reversal_never_commits_proposed_strategy_state(tmp_path):
+    class FailSecondExecutor(_Executor):
+        def execute(self, intent):
+            if len(self.intents) == 1:
+                self.intents.append(intent)
+                raise RuntimeError("second reversal leg rejected")
+            return super().execute(intent)
+
+    engine = BotEngine()
+    runtime = _Runtime(
+        _plan(
+            SarPyramidAction(SarPyramidActionType.REVERSE_CLOSE, 1),
+            SarPyramidAction(SarPyramidActionType.OPEN, -1),
+        )
+    )
+    executor = FailSecondExecutor(position=_position(1, "0.5"))
+    store = _store(tmp_path)
+    store.record_decision(
+        "testnet",
+        "SOLUSDT",
+        decision_id="existing-open",
+        action="OPEN",
+        expected_order_count=1,
+    )
+    store.record_order_attempt(
+        "testnet",
+        "SOLUSDT",
+        decision_id="existing-open",
+        ordinal=0,
+        request={"action": "open", "direction": 1, "quantity": "0.5"},
+    )
+    store.record_order_result(
+        "testnet",
+        "SOLUSDT",
+        decision_id="existing-open",
+        ordinal=0,
+        status="filled",
+        filled_quantity="0.5",
+    )
+    store.transition_decision(
+        "testnet", "SOLUSDT", decision_id="existing-open", status="committed"
+    )
+
+    with pytest.raises(RuntimeError, match="second reversal leg rejected"):
+        engine._process_snapshot(
+            _snapshot(), "SOLUSDT", runtime, executor, store, "testnet", 250.0
+        )
+
+    decision = store.load("testnet", "SOLUSDT")["decisions"]["bar-299999"]
+    assert decision["status"] == "recovery_required"
+    assert runtime.committed == []
+    assert executor.position.direction == 0
+
+
+def test_successful_stop_prevents_old_strategy_state_from_being_restored(tmp_path):
+    store = _store(tmp_path)
+    store.record_decision(
+        "testnet",
+        "SOLUSDT",
+        decision_id="state-before-stop",
+        action="HOLD",
+        expected_order_count=0,
+        proposed_state={"armed": True, "regime_direction": 1},
+        details={"decision_time": "2026-08-22T00:04:59.999Z"},
+    )
+    store.record_decision(
+        "testnet",
+        "SOLUSDT",
+        decision_id="operator-stop",
+        action="CLOSE",
+        expected_order_count=1,
+        details={"reason": "strategy_stop"},
+    )
+    store.record_order_attempt(
+        "testnet",
+        "SOLUSDT",
+        decision_id="operator-stop",
+        ordinal=0,
+        request={"action": "close", "direction": 1, "quantity": "0.5"},
+    )
+    store.record_order_result(
+        "testnet",
+        "SOLUSDT",
+        decision_id="operator-stop",
+        ordinal=0,
+        status="filled",
+        filled_quantity="0.5",
+    )
+    store.transition_decision(
+        "testnet", "SOLUSDT", decision_id="operator-stop", status="committed"
+    )
+
+    assert BotEngine._restored_strategy_state(store, "testnet", "SOLUSDT") is None
+
+
+def test_flat_stop_records_barrier_and_prevents_old_state_restoration(tmp_path):
+    engine = BotEngine()
+    store = _store(tmp_path)
+    store.record_decision(
+        "testnet",
+        "SOLUSDT",
+        decision_id="state-before-flat-stop",
+        action="HOLD",
+        expected_order_count=0,
+        proposed_state={"armed": True, "regime_direction": 1},
+        details={"decision_time": "2026-08-22T00:04:59.999Z"},
+    )
+
+    engine._close_position_sync(
+        _Executor(position=_position(0, "0")),
+        store,
+        "testnet",
+        "SOLUSDT",
+        "strategy_stop",
+    )
+
+    decisions = list(store.load("testnet", "SOLUSDT")["decisions"].values())
+    stop_decisions = [
+        decision
+        for decision in decisions
+        if decision["details"].get("reason") == "strategy_stop"
+    ]
+    assert len(stop_decisions) == 1
+    assert stop_decisions[0]["status"] == "committed"
+    assert stop_decisions[0]["expected_order_count"] == 0
+    assert BotEngine._restored_strategy_state(store, "testnet", "SOLUSDT") is None
+
+
+def test_failed_stop_retains_trading_lease_for_recovery(tmp_path):
+    async def scenario():
+        engine = BotEngine()
+        execution_store = _store(tmp_path / "journal")
+        execution_store.record_decision(
+            "testnet",
+            "SOLUSDT",
+            decision_id="existing-open",
+            action="OPEN",
+            expected_order_count=1,
+        )
+        execution_store.record_order_attempt(
+            "testnet",
+            "SOLUSDT",
+            decision_id="existing-open",
+            ordinal=0,
+            request={"action": "open", "direction": 1, "quantity": "0.5"},
+        )
+        execution_store.record_order_result(
+            "testnet",
+            "SOLUSDT",
+            decision_id="existing-open",
+            ordinal=0,
+            status="filled",
+            filled_quantity="0.5",
+        )
+        execution_store.transition_decision(
+            "testnet", "SOLUSDT", decision_id="existing-open", status="committed"
+        )
+        intent_store = StrategyRuntimeIntentStore(tmp_path / "intent")
+        scope = StrategyScope("binance", "testnet", "SOLUSDT")
+        lease = intent_store.acquire_lease(
+            scope, runtime_id="failed-stop", ttl_seconds=60
+        )
+        engine._intent_store = intent_store
+        engine._trading_lease = lease
+        engine._runtime_scope = scope
+        engine._runtime_config = _engine_config()
+        engine._executor = _Executor(
+            position=_position(1, "0.5"),
+            error=RecoveryRequiredError("unknown stop order"),
+        )
+        engine._execution_store = execution_store
+        engine._network = "testnet"
+        engine._symbol = "SOLUSDT"
+        engine.running = True
+        engine._task = asyncio.create_task(asyncio.Event().wait())
+
+        with pytest.raises(RecoveryRequiredError, match="unknown stop order"):
+            await engine.stop()
+
+        assert intent_store.inspect_lease(scope) == lease
+        assert engine.engine_state == "recovery_required"
+
+        await engine.shutdown()
+
+        assert intent_store.inspect_lease(scope) == lease
+        assert engine.engine_state == "recovery_required"
+        intent_store.release_lease(lease)
+
+    asyncio.run(scenario())
+
+
+def test_restart_audit_marks_recovery_without_starting_or_ordering():
+    engine = BotEngine()
+
+    engine.apply_restart_audit(
+        {
+            "intent": {
+                "desired_state": "running",
+                "scope": {
+                    "provider": "binance",
+                    "network": "testnet",
+                    "symbol": "SOLUSDT",
+                },
+                "config": {
+                    "name": "CandleMind Trend Strategy",
+                    "strategy_type": "sar_adx_trend",
+                    "config_version": "sar_adx_trend_v1",
+                    "capital_limit": 250.0,
+                },
+            }
+        }
+    )
+
+    assert engine.running is False
+    assert engine._task is None
+    assert engine.engine_state == "recovery_required"
+    assert engine.error_code == "restart_audit_required"
+    assert engine.status["network"] == "testnet"
+
+
 def test_stop_uses_exchange_executor_reduce_only_close(tmp_path):
     class Client:
         def __init__(self):
@@ -346,7 +570,7 @@ def test_stop_uses_exchange_executor_reduce_only_close(tmp_path):
     client = Client()
     rules = SymbolRules(Decimal("0.1"), Decimal("0.1"), Decimal("100"), Decimal("5"))
     engine = BotEngine()
-    engine._executor = bot_engine_module.ExchangeExecutor(client, rules)
+    engine._executor = bot_engine_module.ExchangeExecutor(client, rules, "testnet")
     engine._execution_store = _store(tmp_path)
     engine._network = "testnet"
     engine._symbol = "SOLUSDT"
@@ -410,11 +634,59 @@ def test_stop_waits_for_inflight_decision_thread_before_closing(tmp_path):
     assert engine._task is None
 
 
+def test_shutdown_retains_lease_when_inflight_execution_requires_recovery(tmp_path):
+    engine = BotEngine()
+    intent_store = StrategyRuntimeIntentStore(tmp_path / "intent")
+    scope = StrategyScope("binance", "testnet", "SOLUSDT")
+    lease = intent_store.acquire_lease(
+        scope, runtime_id="shutdown-race", ttl_seconds=60
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def ambiguous_execution():
+        entered.set()
+        release.wait(timeout=2)
+        raise RecoveryRequiredError("ambiguous order during shutdown")
+
+    engine._intent_store = intent_store
+    engine._trading_lease = lease
+    engine._runtime_scope = scope
+    engine._runtime_config = _engine_config()
+    engine.running = True
+    engine.engine_state = "running"
+
+    async def scenario():
+        worker = asyncio.create_task(
+            engine._run_execution_critical(ambiguous_execution)
+        )
+        engine._task = worker
+        while not entered.is_set():
+            await asyncio.sleep(0)
+
+        shutdown = asyncio.create_task(engine.shutdown())
+        await asyncio.sleep(0.05)
+        assert shutdown.done() is False
+
+        release.set()
+        await shutdown
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2.0))
+
+    assert engine.engine_state == "recovery_required"
+    assert intent_store.inspect_lease(scope) == lease
+    intent_store.release_lease(lease)
+
+
 def test_status_exposes_exchange_execution_fields(tmp_path):
     engine = BotEngine()
     store = _store(tmp_path)
     store.record_decision(
-        "testnet", "SOLUSDT", decision_id="decision-1", action="OPEN"
+        "testnet",
+        "SOLUSDT",
+        decision_id="decision-1",
+        action="OPEN",
+        expected_order_count=1,
     )
     store.record_order_attempt(
         "testnet",
@@ -500,7 +772,7 @@ def test_transient_snapshot_failure_retries_full_snapshot_and_recovers(
         (RequestsConnectionError, "Binance is temporarily unavailable"),
     ],
 )
-def test_retry_exhaustion_halts_with_sanitized_network_state(
+def test_repeated_retry_exhaustion_halts_with_sanitized_network_state(
     monkeypatch, tmp_path, error_type, message
 ):
     engine = BotEngine()
@@ -537,7 +809,7 @@ def test_retry_exhaustion_halts_with_sanitized_network_state(
 
     asyncio.run(scenario())
 
-    assert client.calls.count("klines") == 3
+    assert client.calls.count("klines") == 9
     assert runtime.prepare_calls == 0
     assert engine.running is False
     assert engine.engine_state == "network_halted"
@@ -545,6 +817,46 @@ def test_retry_exhaustion_halts_with_sanitized_network_state(
     assert engine.error_code == "upstream_unavailable"
     assert engine.error_msg == message
     assert "secret" not in engine.error_msg
+
+
+def test_one_exhausted_snapshot_cycle_can_resume_without_restarting_engine(
+    monkeypatch, tmp_path
+):
+    engine = BotEngine()
+    client = _SnapshotClient(failures=3)
+    runtime = _Runtime(None)
+    executor = _Executor()
+    store = _store(tmp_path)
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(bot_engine_module.asyncio, "sleep", immediate_sleep)
+
+    async def scenario():
+        engine.running = True
+        original_apply = engine._apply_cycle
+
+        def apply_and_stop(result):
+            original_apply(result)
+            engine._task = None
+
+        monkeypatch.setattr(engine, "_apply_cycle", apply_and_stop)
+        task = asyncio.create_task(
+            engine._loop(
+                client, "SOLUSDT", runtime, executor, store, "testnet", 250.0, 0
+            )
+        )
+        engine._task = task
+        await task
+
+    asyncio.run(scenario())
+
+    assert client.calls.count("klines") >= 4
+    assert runtime.prepare_calls >= 1
+    assert engine.error_code is None
+    assert engine.last_success_at is not None
 
 
 def test_bot_engine_uses_gateway_retry_contract_without_local_retry_helpers():

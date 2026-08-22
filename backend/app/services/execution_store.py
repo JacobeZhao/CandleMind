@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -20,8 +21,24 @@ from urllib.parse import urlsplit, urlunsplit
 from backend.app.runtime_paths import RUNTIME_DATA_DIR
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 NETWORKS = {"testnet", "mainnet"}
+DECISION_STATUSES = {
+    "prepared",
+    "executing",
+    "committed",
+    "failed",
+    "recovery_required",
+}
+RESOLVED_DECISION_STATUSES = {"committed", "failed"}
+_DECISION_TRANSITIONS = {
+    "prepared": {"executing", "committed", "failed", "recovery_required"},
+    "executing": {"committed", "failed", "recovery_required"},
+    "committed": set(),
+    "failed": set(),
+    "recovery_required": set(),
+}
 RESULT_STATUSES = {
     "pending",
     "submitted",
@@ -172,6 +189,9 @@ class ExecutionStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ExecutionStoreError("execution journal is unreadable") from exc
+        if isinstance(payload, dict) and payload.get("schema_version") == LEGACY_SCHEMA_VERSION:
+            with self._lock:
+                return self._migrate_v1(payload, network=network, symbol=symbol, path=path)
         return self._validate_document(payload, network=network, symbol=symbol)
 
     def archive(self, network: str, symbol: str) -> Path | None:
@@ -183,6 +203,10 @@ class ExecutionStore:
             if document is None:
                 return None
             for decision in document["decisions"].values():
+                if decision["status"] not in RESOLVED_DECISION_STATUSES:
+                    raise ExecutionStoreConflict(
+                        "execution journal has unresolved decisions and cannot be archived"
+                    )
                 for order in decision["orders"].values():
                     if order["result"]["status"] not in TERMINAL_STATUSES:
                         raise ExecutionStoreConflict(
@@ -204,25 +228,52 @@ class ExecutionStore:
         decision_id: str,
         action: str,
         details: dict[str, Any] | None = None,
+        expected_order_count: int | None = None,
+        pre_state: dict[str, Any] | None = None,
+        proposed_state: dict[str, Any] | None = None,
         created_at: str | None = None,
     ) -> dict[str, Any]:
         _validate_identifier(decision_id, "decision_id")
         if not isinstance(action, str) or not action.strip():
             raise ValueError("invalid decision action")
+        safe_details = _safe_payload(details or {}, label="decision details")
+        if expected_order_count is None:
+            expected_order_count = safe_details.get("expected_order_count", 0)
+        if (
+            not isinstance(expected_order_count, int)
+            or isinstance(expected_order_count, bool)
+            or expected_order_count < 0
+        ):
+            raise ValueError("invalid expected order count")
+        if proposed_state is None and isinstance(safe_details.get("strategy_state"), dict):
+            proposed_state = safe_details["strategy_state"]
+        timestamp = created_at or _utc_now()
         candidate = {
             "decision_id": decision_id,
             "action": action.strip().upper(),
-            "created_at": created_at or _utc_now(),
-            "details": _safe_payload(details or {}, label="decision details"),
+            "created_at": timestamp,
+            "status": "committed" if expected_order_count == 0 else "prepared",
+            "status_updated_at": timestamp,
+            "expected_order_count": expected_order_count,
+            "pre_state": _safe_payload(pre_state, label="decision pre-state"),
+            "proposed_state": _safe_payload(proposed_state, label="decision proposed state"),
+            "failure": None,
+            "details": safe_details,
             "orders": {},
         }
         with self._lock:
             document = self._require(network, symbol)
             existing = document["decisions"].get(decision_id)
             if existing is not None:
-                comparable = dict(existing)
-                comparable["orders"] = {}
-                if comparable != candidate:
+                immutable_fields = (
+                    "decision_id",
+                    "action",
+                    "expected_order_count",
+                    "pre_state",
+                    "proposed_state",
+                    "details",
+                )
+                if any(existing[field] != candidate[field] for field in immutable_fields):
                     raise ExecutionStoreConflict(
                         "decision_id was reused with different content"
                     )
@@ -230,6 +281,69 @@ class ExecutionStore:
             document["decisions"][decision_id] = candidate
             self._commit(document)
             return deepcopy(candidate)
+
+    def transition_decision(
+        self,
+        network: str,
+        symbol: str,
+        *,
+        decision_id: str,
+        status: str,
+        error: object | None = None,
+        updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance a decision lifecycle without allowing terminal-state rewrites."""
+
+        if status not in DECISION_STATUSES:
+            raise ValueError("invalid decision status")
+        with self._lock:
+            document = self._require(network, symbol)
+            decision = document["decisions"].get(decision_id)
+            if decision is None:
+                raise ExecutionStoreError("unknown decision cannot be transitioned")
+            current = decision["status"]
+            if current == status:
+                return deepcopy(decision)
+            if status not in _DECISION_TRANSITIONS[current]:
+                raise ExecutionStoreConflict(
+                    f"invalid decision transition from {current} to {status}"
+                )
+            if status == "committed":
+                self._validate_commit_ready(decision)
+            decision["status"] = status
+            decision["status_updated_at"] = updated_at or _utc_now()
+            decision["failure"] = (
+                redact_error(error) if status in {"failed", "recovery_required"} else None
+            )
+            self._commit(document)
+            return deepcopy(decision)
+
+    def committed_decisions(self, network: str, symbol: str) -> list[dict[str, Any]]:
+        """Return only decisions whose proposed state is safe for recovery."""
+
+        document = self.load(network, symbol)
+        if document is None:
+            return []
+        return [
+            deepcopy(decision)
+            for decision in document["decisions"].values()
+            if decision["status"] == "committed"
+        ]
+
+    def require_resolved(self, network: str, symbol: str) -> dict[str, Any] | None:
+        """Load a journal only when no decision needs execution or reconciliation."""
+
+        document = self.load(network, symbol)
+        if document is None:
+            return None
+        unresolved = [
+            decision["decision_id"]
+            for decision in document["decisions"].values()
+            if decision["status"] not in RESOLVED_DECISION_STATUSES
+        ]
+        if unresolved:
+            raise ExecutionStoreError("execution journal contains unresolved decisions")
+        return document
 
     def record_order_attempt(
         self,
@@ -255,6 +369,15 @@ class ExecutionStore:
             decision = document["decisions"].get(decision_id)
             if decision is None:
                 raise ExecutionStoreError("order attempt references an unknown decision")
+            if decision["status"] == "prepared":
+                decision["status"] = "executing"
+                decision["status_updated_at"] = attempted_at or _utc_now()
+            elif decision["status"] != "executing":
+                raise ExecutionStoreConflict(
+                    "orders cannot be added to a resolved decision"
+                )
+            if ordinal >= decision["expected_order_count"]:
+                raise ExecutionStoreConflict("order ordinal exceeds expected order count")
             key = str(ordinal)
             existing = decision["orders"].get(key)
             if existing is not None:
@@ -322,6 +445,35 @@ class ExecutionStore:
             "updated_at": document["updated_at"],
             **document["counters"],
         }
+
+    @staticmethod
+    def _validate_commit_ready(decision: dict[str, Any]) -> None:
+        orders = decision["orders"]
+        if len(orders) != decision["expected_order_count"]:
+            raise ExecutionStoreConflict("decision does not contain every expected order")
+        expected_ordinals = {str(index) for index in range(decision["expected_order_count"])}
+        if set(orders) != expected_ordinals:
+            raise ExecutionStoreConflict("decision order ordinals are incomplete")
+        if any(order["result"]["status"] != "filled" for order in orders.values()):
+            raise ExecutionStoreConflict("decision contains an order that is not fully filled")
+        for order in orders.values():
+            requested = order["request"].get("quantity")
+            filled = order["result"].get("filled_quantity")
+            try:
+                requested_quantity = Decimal(str(requested))
+                filled_quantity = Decimal(str(filled))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ExecutionStoreConflict(
+                    "decision order quantities are incomplete"
+                ) from exc
+            if (
+                not requested_quantity.is_finite()
+                or requested_quantity <= 0
+                or filled_quantity != requested_quantity
+            ):
+                raise ExecutionStoreConflict(
+                    "decision order was not filled for the requested quantity"
+                )
 
     def _require(self, network: str, symbol: str) -> dict[str, Any]:
         document = self.load(network, symbol)
@@ -427,6 +579,89 @@ class ExecutionStore:
             raise ExecutionStoreError("execution journal schema is incompatible")
         return deepcopy(payload)
 
+    def _migrate_v1(
+        self,
+        payload: dict[str, Any],
+        *,
+        network: str,
+        symbol: str,
+        path: Path,
+    ) -> dict[str, Any]:
+        """Migrate a validated v1 journal without treating uncertain work as committed."""
+
+        legacy = deepcopy(payload)
+        legacy["schema_version"] = SCHEMA_VERSION
+        decisions = legacy.get("decisions")
+        if not isinstance(decisions, dict):
+            raise ExecutionStoreError("execution journal decisions are invalid")
+        for decision_id, decision in decisions.items():
+            if not isinstance(decision, dict):
+                raise ExecutionStoreError("execution journal decision is invalid")
+            orders = decision.get("orders")
+            details = decision.get("details")
+            if not isinstance(orders, dict) or not isinstance(details, dict):
+                raise ExecutionStoreError("execution journal decision is invalid")
+            statuses = [
+                order.get("result", {}).get("status")
+                for order in orders.values()
+                if isinstance(order, dict)
+            ]
+            expected = details.get("expected_order_count", len(orders))
+            if not isinstance(expected, int) or isinstance(expected, bool) or expected < len(orders):
+                raise ExecutionStoreError("execution journal expected order count is invalid")
+            if not statuses and expected == 0:
+                status = "committed"
+            elif (
+                len(orders) == expected
+                and statuses
+                and all(item == "filled" for item in statuses)
+                and self._legacy_fills_match(orders)
+            ):
+                status = "committed"
+            elif any(item == "filled" for item in statuses):
+                status = "recovery_required"
+            elif len(orders) == expected and statuses and all(
+                item in {"rejected", "cancelled"} for item in statuses
+            ):
+                status = "failed"
+            else:
+                status = "recovery_required"
+            timestamp = decision.get("created_at") or legacy.get("updated_at") or _utc_now()
+            decision.update(
+                {
+                    "status": status,
+                    "status_updated_at": timestamp,
+                    "expected_order_count": expected,
+                    "pre_state": None,
+                    "proposed_state": details.get("strategy_state"),
+                    "failure": (
+                        "Migrated legacy decision requires reconciliation"
+                        if status == "recovery_required"
+                        else "Migrated legacy decision did not execute"
+                        if status == "failed"
+                        else None
+                    ),
+                }
+            )
+        legacy["counters"] = self._derive_counters(decisions)
+        validated = self._validate_document(legacy, network=network, symbol=symbol)
+        self._save(validated)
+        return self._validate_document(
+            json.loads(path.read_text(encoding="utf-8")), network=network, symbol=symbol
+        )
+
+    @staticmethod
+    def _legacy_fills_match(orders: dict[str, Any]) -> bool:
+        for order in orders.values():
+            try:
+                requested = Decimal(str(order["request"]["quantity"]))
+                filled = Decimal(str(order["result"]["filled_quantity"]))
+            except (KeyError, InvalidOperation, TypeError, ValueError):
+                return False
+            if not requested.is_finite() or requested <= 0 or requested != filled:
+                return False
+        return True
+
     def _validate_decision(self, decision_id: Any, decision: Any) -> None:
         try:
             _validate_identifier(decision_id, "decision_id")
@@ -436,6 +671,12 @@ class ExecutionStore:
             "decision_id",
             "action",
             "created_at",
+            "status",
+            "status_updated_at",
+            "expected_order_count",
+            "pre_state",
+            "proposed_state",
+            "failure",
             "details",
             "orders",
         }:
@@ -446,8 +687,22 @@ class ExecutionStore:
             raise ExecutionStoreError("execution journal decision action is invalid")
         if not isinstance(decision.get("created_at"), str) or not decision["created_at"]:
             raise ExecutionStoreError("execution journal decision timestamp is invalid")
+        if decision.get("status") not in DECISION_STATUSES:
+            raise ExecutionStoreError("execution journal decision status is invalid")
+        if not isinstance(decision.get("status_updated_at"), str) or not decision["status_updated_at"]:
+            raise ExecutionStoreError("execution journal decision status timestamp is invalid")
+        expected_order_count = decision.get("expected_order_count")
+        if (
+            not isinstance(expected_order_count, int)
+            or isinstance(expected_order_count, bool)
+            or expected_order_count < 0
+        ):
+            raise ExecutionStoreError("execution journal expected order count is invalid")
         try:
             _safe_payload(decision.get("details"), label="decision details")
+            _safe_payload(decision.get("pre_state"), label="decision pre-state")
+            _safe_payload(decision.get("proposed_state"), label="decision proposed state")
+            _safe_payload(decision.get("failure"), label="decision failure")
         except ValueError as exc:
             raise ExecutionStoreError("execution journal decision details are invalid") from exc
         orders = decision.get("orders")
@@ -457,6 +712,18 @@ class ExecutionStore:
             if ordinal != str(order.get("ordinal")):
                 raise ExecutionStoreError("execution journal order identity is invalid")
             self._validate_order(order)
+        if len(orders) > expected_order_count:
+            raise ExecutionStoreError("execution journal contains excess orders")
+        status = decision["status"]
+        if status == "prepared" and orders:
+            raise ExecutionStoreError("prepared execution decision already contains orders")
+        if status == "committed":
+            try:
+                self._validate_commit_ready(decision)
+            except ExecutionStoreConflict as exc:
+                raise ExecutionStoreError("committed execution decision is incomplete") from exc
+        if status == "failed" and decision.get("failure") is None:
+            raise ExecutionStoreError("failed execution decision has no failure reason")
 
     def _validate_order(self, order: Any) -> None:
         if not isinstance(order, dict) or set(order) != {

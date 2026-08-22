@@ -74,7 +74,7 @@ Thumbs.db
 # Project tooling
 .gstack/
 .tmp/
-/test-tmp/
+/.test-tmp/
 .harness/
 backups/
 scripts_tmp_*.py

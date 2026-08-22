@@ -57,6 +57,7 @@ class _Db:
 
 class _Engine:
     def __init__(self):
+        self.running = False
         self.start = AsyncMock()
         self.stop = AsyncMock()
         self.hydrate_persisted_status = Mock()
@@ -89,7 +90,10 @@ def _request(**overrides):
 
 def _install(monkeypatch, *, testnet=True, symbol="SOLUSDT"):
     engine = _Engine()
+    intent_store = Mock()
+    intent_store.acquire_lease.return_value = SimpleNamespace(lease_id="test-lease")
     monkeypatch.setattr(strategy_routes, "bot_engine", engine)
+    monkeypatch.setattr(strategy_routes, "runtime_intent_store", intent_store)
     monkeypatch.setattr(strategy_routes.app_state, "client", object())
     monkeypatch.setattr(strategy_routes.app_state, "symbol", symbol)
     monkeypatch.setattr(strategy_routes.app_state, "exchange_provider", "binance")
@@ -121,7 +125,8 @@ def test_testnet_start_binds_server_network_symbol_and_capital(monkeypatch):
     engine.start.assert_awaited_once()
     client, config = engine.start.await_args.args
     assert client is strategy_routes.app_state.client
-    assert config == {
+    public_config = {key: value for key, value in config.items() if not key.startswith("_")}
+    assert public_config == {
         "name": "CandleMind Trend Strategy",
         "symbol": "SOLUSDT",
         "interval": "5m",

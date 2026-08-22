@@ -30,6 +30,7 @@ def _decision(store: ExecutionStore) -> None:
         decision_id="bar-123:OPEN",
         action="open",
         details={"bar_close_time": 123},
+        expected_order_count=4,
         created_at="2026-08-19T00:05:00Z",
     )
 
@@ -67,7 +68,7 @@ def test_journal_round_trips_after_restart_and_contains_no_position(tmp_path) ->
     ] == 42
     assert "position" not in loaded
     assert not list(tmp_path.glob("*.tmp"))
-    assert json.loads(store.path_for("testnet", "SOLUSDT").read_text())["schema_version"] == 1
+    assert json.loads(store.path_for("testnet", "SOLUSDT").read_text())["schema_version"] == 2
 
 
 def test_decision_and_order_keys_are_idempotent_but_conflicts_fail(tmp_path) -> None:
@@ -228,7 +229,9 @@ def test_archive_atomically_releases_a_terminal_journal_identity(tmp_path) -> No
 
 def test_archive_rejects_a_non_terminal_order(tmp_path) -> None:
     store = _initialized(tmp_path)
-    store.record_decision("testnet", "SOLUSDT", decision_id="bar-1", action="OPEN")
+    store.record_decision(
+        "testnet", "SOLUSDT", decision_id="bar-1", action="OPEN", expected_order_count=1
+    )
     store.record_order_attempt(
         "testnet",
         "SOLUSDT",
@@ -237,5 +240,132 @@ def test_archive_rejects_a_non_terminal_order(tmp_path) -> None:
         request={"action": "open", "direction": 1, "quantity": "1"},
     )
 
-    with pytest.raises(ExecutionStoreConflict, match="non-terminal"):
+    with pytest.raises(ExecutionStoreConflict, match="unresolved"):
         store.archive("testnet", "SOLUSDT")
+
+
+def test_decision_commits_only_after_every_expected_order_is_filled(tmp_path) -> None:
+    store = _initialized(tmp_path)
+    store.record_decision(
+        "testnet",
+        "SOLUSDT",
+        decision_id="reverse-1",
+        action="CLOSE,OPEN",
+        expected_order_count=2,
+        pre_state={"direction": 1},
+        proposed_state={"direction": -1},
+    )
+    for ordinal in range(2):
+        store.record_order_attempt(
+            "testnet",
+            "SOLUSDT",
+            decision_id="reverse-1",
+            ordinal=ordinal,
+            request={
+                "action": "close" if ordinal == 0 else "open",
+                "quantity": "1",
+            },
+        )
+        store.record_order_result(
+            "testnet",
+            "SOLUSDT",
+            decision_id="reverse-1",
+            ordinal=ordinal,
+            status="filled",
+            filled_quantity="1",
+        )
+        if ordinal == 0:
+            with pytest.raises(ExecutionStoreConflict, match="every expected order"):
+                store.transition_decision(
+                    "testnet", "SOLUSDT", decision_id="reverse-1", status="committed"
+                )
+    committed = store.transition_decision(
+        "testnet", "SOLUSDT", decision_id="reverse-1", status="committed"
+    )
+    assert committed["proposed_state"] == {"direction": -1}
+    assert store.committed_decisions("testnet", "SOLUSDT")[-1]["decision_id"] == "reverse-1"
+
+
+def test_v1_migration_marks_ambiguous_partial_execution_for_recovery(tmp_path) -> None:
+    store = _initialized(tmp_path)
+    path = store.path_for("testnet", "SOLUSDT")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["schema_version"] = 1
+    document["decisions"] = {
+        "legacy": {
+            "decision_id": "legacy",
+            "action": "CLOSE,OPEN",
+            "created_at": "2026-08-19T00:05:00Z",
+            "details": {"expected_order_count": 2, "strategy_state": {"direction": -1}},
+            "orders": {
+                "0": {
+                    "ordinal": 0,
+                    "attempted_at": "2026-08-19T00:05:01Z",
+                    "request": {"action": "close"},
+                    "result": {
+                        "status": "filled",
+                        "exchange_order_id": 1,
+                        "client_order_id": "legacy-0",
+                        "filled_quantity": "1",
+                        "error": None,
+                        "details": {},
+                        "updated_at": "2026-08-19T00:05:02Z",
+                    },
+                }
+            },
+        }
+    }
+    document["counters"] = ExecutionStore._derive_counters(document["decisions"])
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    migrated = store.load("testnet", "SOLUSDT")
+
+    assert migrated["schema_version"] == 2
+    assert migrated["decisions"]["legacy"]["status"] == "recovery_required"
+    assert store.committed_decisions("testnet", "SOLUSDT") == []
+
+
+def test_commit_rejects_non_contiguous_ordinals_and_quantity_mismatch(tmp_path) -> None:
+    store = _initialized(tmp_path)
+    store.record_decision(
+        "testnet",
+        "SOLUSDT",
+        decision_id="damaged",
+        action="OPEN,ADD",
+        expected_order_count=2,
+    )
+    store.record_order_attempt(
+        "testnet",
+        "SOLUSDT",
+        decision_id="damaged",
+        ordinal=0,
+        request={"action": "open", "quantity": "1"},
+    )
+    store.record_order_result(
+        "testnet",
+        "SOLUSDT",
+        decision_id="damaged",
+        ordinal=0,
+        status="filled",
+        filled_quantity="1",
+    )
+    store.record_order_attempt(
+        "testnet",
+        "SOLUSDT",
+        decision_id="damaged",
+        ordinal=1,
+        request={"action": "add", "quantity": "2"},
+    )
+    store.record_order_result(
+        "testnet",
+        "SOLUSDT",
+        decision_id="damaged",
+        ordinal=1,
+        status="filled",
+        filled_quantity="1",
+    )
+
+    with pytest.raises(ExecutionStoreConflict, match="requested quantity"):
+        store.transition_decision(
+            "testnet", "SOLUSDT", decision_id="damaged", status="committed"
+        )

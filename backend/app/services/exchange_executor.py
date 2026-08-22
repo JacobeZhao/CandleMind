@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from enum import Enum
 import hashlib
+import os
 import time
 from typing import Any, Protocol
 
@@ -140,10 +141,24 @@ class FuturesClient(Protocol):
 class ExchangeExecutor:
     """Submit idempotent market orders for a validated one-way USD-M account."""
 
-    def __init__(self, client: FuturesClient, rules: SymbolRules) -> None:
+    def __init__(
+        self,
+        client: FuturesClient,
+        rules: SymbolRules,
+        network: str | None = None,
+    ) -> None:
+        if network is None:
+            client_network = getattr(client, "testnet", None)
+            if client_network is True:
+                network = "testnet"
+            elif client_network is False:
+                network = "mainnet"
+        if network not in {None, "testnet", "mainnet"}:
+            raise ValueError("invalid execution network")
         self.client = client
         self.gateway = BinanceUsdMGateway(client)
         self.rules = rules
+        self.network = network
 
     def layer_quantity(
         self,
@@ -225,19 +240,45 @@ class ExchangeExecutor:
         normalized = _symbol(symbol)
         rows = self.gateway.reconcile_position_information(symbol=normalized)
         if not rows:
-            raise ExchangeExecutionError(f"position information is unavailable for {normalized}")
+            isolated, leverage = self._symbol_risk_config(normalized)
+            return ExchangePosition(
+                symbol=normalized,
+                direction=0,
+                quantity=Decimal("0"),
+                entry_price=Decimal("0"),
+                isolated=isolated,
+                leverage=leverage,
+            )
         non_flat = [row for row in rows if _decimal(row.get("positionAmt", "0"), "position amount")]
         if len(non_flat) > 1:
             raise UnsupportedAccountError("multiple position rows require reconciliation")
         row = non_flat[0] if non_flat else rows[0]
         quantity = _decimal(row.get("positionAmt", "0"), "position amount")
+        isolated = row.get("isolated")
+        leverage = row.get("leverage")
+        if isolated is None or leverage is None:
+            config_isolated, config_leverage = self._symbol_risk_config(normalized)
+            isolated = config_isolated if isolated is None else isolated
+            leverage = config_leverage if leverage is None else leverage
         return ExchangePosition(
             symbol=normalized,
             direction=1 if quantity > 0 else -1 if quantity < 0 else 0,
             quantity=abs(quantity),
             entry_price=_non_negative_decimal(row.get("entryPrice", "0"), "entry price"),
-            isolated=bool(row.get("isolated", False)),
-            leverage=int(row.get("leverage", 0)),
+            isolated=bool(isolated),
+            leverage=int(leverage),
+        )
+
+    def _symbol_risk_config(self, symbol: str) -> tuple[bool, int]:
+        configs = self.gateway.symbol_config(symbol=symbol)
+        row = next((item for item in configs if item.get("symbol") == symbol), None)
+        if row is None:
+            raise ExchangeExecutionError(
+                f"position information is unavailable for {symbol}"
+            )
+        return (
+            str(row.get("marginType", "")).upper() == "ISOLATED",
+            int(row.get("leverage", 0)),
         )
 
     def validate_symbol_risk(self, symbol: str) -> ExchangePosition:
@@ -249,6 +290,7 @@ class ExchangeExecutor:
         return position
 
     def execute(self, intent: OrderIntent) -> ExecutionResult:
+        self._require_write_authorized()
         symbol = _symbol(intent.symbol)
         if intent.direction not in (-1, 1):
             raise ExchangeExecutionError("direction must be -1 or 1")
@@ -328,6 +370,19 @@ class ExchangeExecutor:
         raise RecoveryRequiredError(
             f"order {client_order_id} did not reach a terminal state"
         )
+
+    def _require_write_authorized(self) -> None:
+        if self.network not in {"testnet", "mainnet"}:
+            raise UnsupportedAccountError(
+                "execution network must be explicitly bound before writing"
+            )
+        if self.network != "mainnet":
+            return
+        enabled = os.environ.get(
+            "CANDLEMIND_MAINNET_TRADING_ENABLED", ""
+        ).strip().lower()
+        if enabled not in {"1", "true", "yes"}:
+            raise UnsupportedAccountError("mainnet execution is disabled by the server")
 
     def lookup(self, intent: OrderIntent) -> ExecutionResult:
         """Resolve a previously journaled intent without creating an order."""

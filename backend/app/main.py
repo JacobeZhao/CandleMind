@@ -72,6 +72,8 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    strategy_route.audit_runtime_intent_on_startup()
+
     try:
         if app_state.exchange_provider == BINANCE_PROVIDER:
             await market_agent_manager.restore()
@@ -109,7 +111,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
         await asyncio.gather(*background_tasks, return_exceptions=True)
         await binance_ws_client.stop()
-        await strategy_route.bot_engine.stop()
+        await strategy_route.bot_engine.shutdown()
 
 
 app = FastAPI(title="CandleMind API", lifespan=lifespan)

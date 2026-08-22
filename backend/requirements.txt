@@ -1,6 +1,7 @@
 fastapi==0.111.0
 pydantic>=2.7,<3.0
-uvicorn[standard]==0.30.1
+uvicorn==0.31.1
+pywin32==312; sys_platform == "win32"
 python-binance==1.0.37
 aiohttp>=3.9,<4.0
 aiohttp-socks>=0.9,<1.0
@@ -19,3 +20,4 @@ httpx[socks]>=0.27,<1.0
 langgraph==1.2.11
 langgraph-checkpoint==4.2.0
 langgraph-checkpoint-sqlite==3.1.1
+mcp==2.0.0

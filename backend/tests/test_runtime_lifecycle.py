@@ -44,7 +44,7 @@ def test_lifespan_cancels_and_awaits_background_tasks(monkeypatch):
         )
         monkeypatch.setattr(main, "_reconnect_loop", lambda: run_until_cancelled(1))
         monkeypatch.setattr(main.binance_ws_client, "stop", stop)
-        monkeypatch.setattr(main.strategy_route.bot_engine, "stop", stop)
+        monkeypatch.setattr(main.strategy_route.bot_engine, "shutdown", stop)
 
         app = SimpleNamespace(state=SimpleNamespace())
         async with main.lifespan(app):
@@ -240,7 +240,7 @@ def test_lifespan_keeps_unavailable_provider_disconnected(monkeypatch):
         monkeypatch.setattr(main.market_agent_manager, "stop", stop_agent)
         monkeypatch.setattr(main.market_agent_manager, "restore", restore_agent)
         monkeypatch.setattr(main.market_agent_manager, "shutdown", no_op)
-        monkeypatch.setattr(main.strategy_route.bot_engine, "stop", no_op)
+        monkeypatch.setattr(main.strategy_route.bot_engine, "shutdown", no_op)
 
         app = SimpleNamespace(state=SimpleNamespace())
         async with main.lifespan(app):

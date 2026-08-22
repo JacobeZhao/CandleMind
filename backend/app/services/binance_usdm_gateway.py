@@ -44,6 +44,7 @@ class BinanceUsdMOperation(str, Enum):
     POSITION_INFORMATION = "position_information"
     POSITION_MODE = "position_mode"
     SERVER_TIME = "server_time"
+    SYMBOL_CONFIG = "symbol_config"
     SYMBOL_TICKER = "symbol_ticker"
     TICKER = "ticker"
 
@@ -111,6 +112,16 @@ class BinanceUsdMGateway:
         return self._call_list(
             BinanceUsdMOperation.POSITION_INFORMATION,
             self.client.futures_position_information,
+            **params,
+        )
+
+    def symbol_config(self, **params: Any) -> list[dict[str, Any]]:
+        method = getattr(self.client, "futures_symbol_config", None)
+        if method is None:
+            raise BinanceGatewayRejected("installed Binance SDK lacks symbol config support")
+        return self._call_list(
+            BinanceUsdMOperation.SYMBOL_CONFIG,
+            method,
             **params,
         )
 

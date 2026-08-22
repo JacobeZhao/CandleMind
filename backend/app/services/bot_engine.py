@@ -19,6 +19,13 @@ from backend.app.strategies.sar_pyramid import (
     SarPyramidActionType,
     SarPyramidConfig,
 )
+from backend.app.exchanges.binance.adapter import build_binance_adapter
+from backend.app.exchanges.contracts import (
+    ExchangeBinding,
+    ExecutionAuthorization,
+    OrderAction,
+    OrderRequest,
+)
 
 from .exchange_executor import (
     ExchangeExecutionError,
@@ -41,6 +48,11 @@ from .live_strategy_runtime import (
 )
 from .live_layered_runtime import LiveLayeredStrategyRuntime
 from .strategy_configuration import configuration_hash
+from .strategy_runtime_intent import (
+    StrategyRuntimeIntentStore,
+    StrategyScope,
+    TradingLease,
+)
 
 
 STRATEGY_TYPE = "sar_adx_pyramid"
@@ -128,6 +140,10 @@ class BotEngine:
         self._analytics_service: StrategyAnalyticsService | None = None
         self._analytics_scope_id: int | None = None
         self._analytics_run_id: str | None = None
+        self._intent_store: StrategyRuntimeIntentStore | None = None
+        self._trading_lease: TradingLease | None = None
+        self._runtime_scope: StrategyScope | None = None
+        self._runtime_config: dict[str, Any] | None = None
 
     @property
     def status(self) -> dict:
@@ -173,7 +189,9 @@ class BotEngine:
             gateway = BinanceUsdMGateway(client)
             exchange_info = await asyncio.to_thread(gateway.exchange_info)
             executor = ExchangeExecutor(
-                client, SymbolRules.from_exchange_info(exchange_info, normalized)
+                client,
+                SymbolRules.from_exchange_info(exchange_info, normalized),
+                network,
             )
             store = ExecutionStore()
             await asyncio.to_thread(
@@ -236,7 +254,11 @@ class BotEngine:
             if not self._is_tradable(exchange_info, symbol):
                 raise ValueError(f"symbol is not currently tradable: {symbol}")
 
-            executor = ExchangeExecutor(client, SymbolRules.from_exchange_info(exchange_info, symbol))
+            executor = ExchangeExecutor(
+                client,
+                SymbolRules.from_exchange_info(exchange_info, symbol),
+                network,
+            )
             store = ExecutionStore()
             strategy_type = str(cfg["strategy_type"])
             config_version = str(cfg["config_version"])
@@ -394,6 +416,12 @@ class BotEngine:
                 self.engine_state = "running"
                 self._clear_failure_state()
                 self._task = task
+                self._intent_store = cfg.get("_intent_store")
+                self._trading_lease = cfg.get("_trading_lease")
+                self._runtime_scope = cfg.get("_runtime_scope")
+                self._runtime_config = {
+                    key: value for key, value in cfg.items() if not key.startswith("_")
+                }
             except BaseException:
                 if task is not None:
                     task.cancel()
@@ -410,6 +438,8 @@ class BotEngine:
             )
 
     async def stop(self) -> None:
+        """Stop by user request and flatten the managed exchange position."""
+
         async with self._lifecycle_lock:
             task = self._task
             if task is None:
@@ -422,18 +452,105 @@ class BotEngine:
             if not task.done():
                 task.cancel()
             cancellation: asyncio.CancelledError | None = None
+            stopped_cleanly = False
             try:
                 try:
                     await self._await_terminal(task)
                 except asyncio.CancelledError as exc:
                     cancellation = exc
                 await self._close_exchange_position("strategy_stop")
+                self._record_stopped_intent()
+                stopped_cleanly = True
             finally:
-                if self._task is task and task.done():
+                if stopped_cleanly:
+                    self._release_trading_lease()
+                else:
+                    self.engine_state = "recovery_required"
+                if stopped_cleanly and self._task is task and task.done():
                     self._clear_runtime()
             if cancellation is not None:
                 raise cancellation
             logger.info("Engine stopped")
+
+    async def stop_persisted(self, client: Any, network: str, symbol: str) -> None:
+        """Reconcile and flatten an audited persisted runtime after restart."""
+
+        normalized = symbol.strip().upper()
+        async with self._lifecycle_lock:
+            if self._task is not None or self.running:
+                raise ValueError("an in-process strategy runtime is already active")
+            gateway = BinanceUsdMGateway(client)
+            exchange_info = await asyncio.to_thread(gateway.exchange_info)
+            executor = ExchangeExecutor(
+                client,
+                SymbolRules.from_exchange_info(exchange_info, normalized),
+                network,
+            )
+            store = ExecutionStore()
+            await asyncio.to_thread(
+                self._reconcile_execution_journal,
+                executor,
+                store,
+                network,
+                normalized,
+            )
+            await self._close_position_context(
+                executor, store, network, normalized, "strategy_stop"
+            )
+            self.running = False
+            self.engine_state = "stopped"
+            self.error_code = None
+            self.error_msg = ""
+
+    def apply_restart_audit(self, audit: dict[str, Any]) -> None:
+        """Expose persisted operator intent without resuming execution."""
+
+        if self._task is not None or self.running:
+            return
+        intent = audit.get("intent")
+        if not isinstance(intent, dict) or intent.get("desired_state") != "running":
+            return
+        scope = intent.get("scope", {})
+        config = intent.get("config", {})
+        self._symbol = str(scope.get("symbol", ""))
+        self._network = str(scope.get("network", ""))
+        self._strategy_name = str(config.get("name", "CandleMind Trend Strategy"))
+        self._strategy_type = str(config.get("strategy_type", ""))
+        self._config_version = str(config.get("config_version", ""))
+        self._config_hash = str(config.get("config_hash", ""))
+        self._capital_limit = float(config.get("capital_limit", 0) or 0)
+        self.engine_state = "recovery_required"
+        self.error_code = "restart_audit_required"
+        self.error_msg = "Persisted strategy requires reconciliation before resume"
+
+    async def shutdown(self) -> None:
+        """Drain the process runtime without creating exchange orders."""
+
+        async with self._lifecycle_lock:
+            task = self._task
+            self.running = False
+            recovery_required = self.engine_state == "recovery_required"
+            if task is None:
+                if not recovery_required:
+                    self.engine_state = "stopped"
+                return
+            if not recovery_required:
+                self.engine_state = "draining"
+            if not task.done():
+                task.cancel()
+            try:
+                await self._await_terminal(task)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                recovery_required = (
+                    recovery_required or self.engine_state == "recovery_required"
+                )
+                if not recovery_required:
+                    self._release_trading_lease()
+                if not recovery_required and self._task is task and task.done():
+                    self._clear_runtime()
+            logger.info("Engine runtime drained without flattening the exchange position")
 
     async def _close_exchange_position(self, reason: str) -> None:
         if not self._executor or not self._execution_store or not self._symbol:
@@ -472,15 +589,24 @@ class BotEngine:
         reason: str,
     ) -> None:
         position = executor.current_position(symbol)
+        decision_id = f"stop:{uuid4().hex}"
         if not position.direction:
+            store.record_decision(
+                network,
+                symbol,
+                decision_id=decision_id,
+                action="CLOSE",
+                details={"reason": reason},
+                expected_order_count=0,
+            )
             return
-        decision_id = f"stop:{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         store.record_decision(
             network,
             symbol,
             decision_id=decision_id,
             action="CLOSE",
             details={"reason": reason},
+            expected_order_count=1,
         )
         intent = OrderIntent(
             symbol=symbol,
@@ -490,7 +616,7 @@ class BotEngine:
             decision_id=decision_id,
         )
         self._record_attempt(intent, store=store, network=network)
-        result = executor.execute(intent)
+        result = self._execute_intent(executor, intent, network)
         self._record_result(
             decision_id,
             0,
@@ -499,7 +625,17 @@ class BotEngine:
             network=network,
         )
         if result.status != "FILLED":
+            store.transition_decision(
+                network,
+                symbol,
+                decision_id=decision_id,
+                status="recovery_required",
+                error="stop order was not confirmed filled",
+            )
             raise RecoveryRequiredError("stop order was not confirmed filled")
+        store.transition_decision(
+            network, symbol, decision_id=decision_id, status="committed"
+        )
 
     async def _loop(
         self,
@@ -513,12 +649,33 @@ class BotEngine:
         check_interval: float,
     ) -> None:
         task = asyncio.current_task()
+        exhausted_snapshot_cycles = 0
         try:
             while True:
                 await asyncio.sleep(check_interval)
-                result = await self._cycle_with_retry(
-                    client, symbol, runtime, executor, store, network, capital_limit
-                )
+                self._renew_trading_lease()
+                try:
+                    result = await self._cycle_with_retry(
+                        client, symbol, runtime, executor, store, network, capital_limit
+                    )
+                except _SnapshotFetchError as exc:
+                    cause = exc.cause
+                    if not (
+                        isinstance(cause, BinanceGatewayError)
+                        and cause.failure
+                        and cause.failure.retryable
+                    ):
+                        raise
+                    exhausted_snapshot_cycles += 1
+                    if exhausted_snapshot_cycles >= 3:
+                        raise
+                    self.engine_state = "retrying"
+                    self.next_retry_at = (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=max(check_interval, 1.0))
+                    ).isoformat()
+                    continue
+                exhausted_snapshot_cycles = 0
                 if self._task is not task:
                     return
                 if result is not None:
@@ -600,6 +757,7 @@ class BotEngine:
                 try:
                     await self._await_terminal(worker)
                 except Exception as exc:
+                    self._set_terminal_error(exc)
                     logger.error(
                         "Cancelled exchange operation finished with error: type={}",
                         type(exc).__name__,
@@ -718,107 +876,141 @@ class BotEngine:
             direction = {1: "LONG", -1: "SHORT"}.get(exchange_position.direction, "NONE")
             return _CycleResult(mark_price, direction, "", 0, "bar_already_processed")
 
+        proposed_state = (
+            runtime.serialize_state(plan.proposed_state)
+            if hasattr(runtime, "serialize_state")
+            else asdict(plan.proposed_state)
+        )
+        runtime_state = getattr(runtime, "state", None)
+        current_state = (
+            runtime.serialize_state(runtime_state)
+            if runtime_state is not None and hasattr(runtime, "serialize_state")
+            else asdict(runtime_state)
+            if runtime_state is not None
+            else None
+        )
         store.record_decision(
             network,
             symbol,
             decision_id=plan.decision_id,
             action=",".join(action.action.value for action in plan.actions) or "HOLD",
             details={
-                "strategy_state": (
-                    runtime.serialize_state(plan.proposed_state)
-                    if hasattr(runtime, "serialize_state")
-                    else asdict(plan.proposed_state)
-                ),
                 "decision_time": plan.decision_time.isoformat(),
                 "execution_time": None if plan.execution_time is None else plan.execution_time.isoformat(),
                 "capital_limit": capital_limit,
-                "expected_order_count": len(plan.actions),
             },
+            expected_order_count=len(plan.actions),
+            pre_state=current_state,
+            proposed_state=proposed_state,
         )
         last_action = ""
         last_order_id: str | None = None
         filled = 0
-        for ordinal, action in enumerate(plan.actions):
-            current = executor.current_position(symbol)
-            action_value = action.action.value
-            if action_value in {
+        try:
+            for ordinal, action in enumerate(plan.actions):
+                current = executor.current_position(symbol)
+                action_value = action.action.value
+                if action_value in {
                 SarPyramidActionType.OPEN.value,
                 SarPyramidActionType.ADD.value,
-            }:
-                if action_value == SarPyramidActionType.OPEN.value and current.direction:
-                    raise UnsupportedAccountError("open intent requires a flat exchange position")
-                if action_value == SarPyramidActionType.ADD.value and current.direction != action.direction:
-                    raise UnsupportedAccountError(
-                        "add intent direction does not match the exchange position"
-                    )
-                available = executor.available_balance()
-                capital_weight = float(getattr(action, "capital_weight", 0.0))
-                if capital_weight > 0:
-                    quantity = executor.weighted_layer_quantity(
-                        available_balance=available,
-                        capital_limit=capital_limit,
-                        reference_price=plan.reference_price or mark_price,
-                        capital_weight=capital_weight,
+                }:
+                    if action_value == SarPyramidActionType.OPEN.value and current.direction:
+                        raise UnsupportedAccountError("open intent requires a flat exchange position")
+                    if action_value == SarPyramidActionType.ADD.value and current.direction != action.direction:
+                        raise UnsupportedAccountError(
+                            "add intent direction does not match the exchange position"
+                        )
+                    available = executor.available_balance()
+                    capital_weight = float(getattr(action, "capital_weight", 0.0))
+                    if capital_weight > 0:
+                        quantity = executor.weighted_layer_quantity(
+                            available_balance=available,
+                            capital_limit=capital_limit,
+                            reference_price=plan.reference_price or mark_price,
+                            capital_weight=capital_weight,
+                        )
+                    else:
+                        quantity = executor.layer_quantity(
+                            available_balance=available,
+                            capital_limit=capital_limit,
+                            reference_price=plan.reference_price or mark_price,
+                            layers=runtime.config.layers,
+                            target_fraction=runtime.config.target_notional_fraction,
+                        )
+                    intent_type = (
+                        OrderIntentType.OPEN
+                        if action_value == SarPyramidActionType.OPEN.value
+                        else OrderIntentType.ADD
                     )
                 else:
-                    quantity = executor.layer_quantity(
-                        available_balance=available,
-                        capital_limit=capital_limit,
-                        reference_price=plan.reference_price or mark_price,
-                        layers=runtime.config.layers,
-                        target_fraction=runtime.config.target_notional_fraction,
-                    )
-                intent_type = (
-                    OrderIntentType.OPEN
-                    if action_value == SarPyramidActionType.OPEN.value
-                    else OrderIntentType.ADD
+                    if not current.direction:
+                        raise UnsupportedAccountError("close intent has no exchange position")
+                    if current.direction != action.direction:
+                        raise UnsupportedAccountError(
+                            "close intent direction does not match the exchange position"
+                        )
+                    quantity = current.quantity
+                    intent_type = OrderIntentType.CLOSE
+                intent = OrderIntent(
+                    symbol=symbol,
+                    action=intent_type,
+                    direction=action.direction,
+                    quantity=quantity,
+                    decision_id=plan.decision_id,
+                    ordinal=ordinal,
                 )
-            else:
-                if not current.direction:
-                    raise UnsupportedAccountError("close intent has no exchange position")
-                if current.direction != action.direction:
-                    raise UnsupportedAccountError(
-                        "close intent direction does not match the exchange position"
+                self._record_attempt(intent, store=store, network=network)
+                try:
+                    result = self._execute_intent(executor, intent, network)
+                except RecoveryRequiredError as exc:
+                    store.record_order_result(
+                        network,
+                        symbol,
+                        decision_id=plan.decision_id,
+                        ordinal=ordinal,
+                        status="unknown",
+                        error=exc,
                     )
-                quantity = current.quantity
-                intent_type = OrderIntentType.CLOSE
-            intent = OrderIntent(
-                symbol=symbol,
-                action=intent_type,
-                direction=action.direction,
-                quantity=quantity,
-                decision_id=plan.decision_id,
-                ordinal=ordinal,
+                    raise
+                except Exception as exc:
+                    store.record_order_result(
+                        network,
+                        symbol,
+                        decision_id=plan.decision_id,
+                        ordinal=ordinal,
+                        status="rejected",
+                        error=exc,
+                    )
+                    raise
+                self._record_result(plan.decision_id, ordinal, result, store=store, network=network)
+                last_order_id = str(result.order_id) if result.order_id is not None else result.client_order_id
+                requested_quantity = getattr(
+                    result, "requested_quantity", getattr(result, "quantity", None)
+                )
+                if result.status != "FILLED" or result.executed_quantity != requested_quantity:
+                    raise RecoveryRequiredError("exchange order was not confirmed fully filled")
+                filled += 1
+                last_action = f"{intent_type.value.upper()} {'LONG' if action.direction > 0 else 'SHORT'}"
+        except Exception as exc:
+            current_decision = store.load(network, symbol)["decisions"][plan.decision_id]
+            has_fill = any(
+                order["result"]["status"] == "filled"
+                for order in current_decision["orders"].values()
             )
-            self._record_attempt(intent, store=store, network=network)
-            try:
-                result = executor.execute(intent)
-            except RecoveryRequiredError as exc:
-                store.record_order_result(
-                    network,
-                    symbol,
-                    decision_id=plan.decision_id,
-                    ordinal=ordinal,
-                    status="unknown",
-                    error=exc,
-                )
-                raise
-            except Exception as exc:
-                store.record_order_result(
-                    network,
-                    symbol,
-                    decision_id=plan.decision_id,
-                    ordinal=ordinal,
-                    status="rejected",
-                    error=exc,
-                )
-                raise
-            self._record_result(plan.decision_id, ordinal, result, store=store, network=network)
-            last_order_id = str(result.order_id) if result.order_id is not None else result.client_order_id
-            if result.status != "FILLED" or result.executed_quantity != result.quantity:
-                raise RecoveryRequiredError("exchange order was not confirmed fully filled")
-            filled += 1
-            last_action = f"{intent_type.value.upper()} {'LONG' if action.direction > 0 else 'SHORT'}"
+            terminal_status = "recovery_required" if has_fill or isinstance(
+                exc, RecoveryRequiredError
+            ) else "failed"
+            store.transition_decision(
+                network,
+                symbol,
+                decision_id=plan.decision_id,
+                status=terminal_status,
+                error=exc,
+            )
+            raise
+        store.transition_decision(
+            network, symbol, decision_id=plan.decision_id, status="committed"
+        )
         runtime.commit(plan)
         final_position = executor.current_position(symbol)
         last_signal = {1: "LONG", -1: "SHORT"}.get(final_position.direction, "NONE")
@@ -862,16 +1054,18 @@ class BotEngine:
         document = store.load(network, symbol)
         if document is None:
             return None
-        for decision in reversed(list(document["decisions"].values())):
-            orders = list(decision["orders"].values())
-            if any(
-                order["result"]["status"]
-                not in {"filled", "rejected", "cancelled"}
-                for order in orders
-            ):
+        ordered_decisions = sorted(
+            document["decisions"].values(),
+            key=lambda item: (item["created_at"], item["decision_id"]),
+            reverse=True,
+        )
+        for decision in ordered_decisions:
+            if decision.get("status") != "committed":
                 continue
             details = decision.get("details", {})
-            state = details.get("strategy_state")
+            if decision.get("action") == "CLOSE" and details.get("reason") == "strategy_stop":
+                return None
+            state = decision.get("proposed_state")
             decision_time = details.get("decision_time")
             if isinstance(state, dict) and decision_time:
                 return {
@@ -893,7 +1087,11 @@ class BotEngine:
         quantity = Decimal("0")
         layers = 0
         anchor: float | None = None
-        for decision in document["decisions"].values():
+        ordered_decisions = sorted(
+            document["decisions"].values(),
+            key=lambda item: (item["created_at"], item["decision_id"]),
+        )
+        for decision in ordered_decisions:
             for order in sorted(decision["orders"].values(), key=lambda item: item["ordinal"]):
                 if order["result"]["status"] != "filled":
                     continue
@@ -925,6 +1123,12 @@ class BotEngine:
         if document is None:
             return
         for decision_id, decision in document["decisions"].items():
+            if decision["status"] in {"committed", "failed"}:
+                continue
+            if decision["status"] == "recovery_required":
+                raise RecoveryRequiredError(
+                    "execution decision requires explicit reconciliation"
+                )
             for order in decision["orders"].values():
                 if order["result"]["status"] in {"filled", "rejected", "cancelled"}:
                     continue
@@ -937,7 +1141,17 @@ class BotEngine:
                     decision_id=decision_id,
                     ordinal=int(order["ordinal"]),
                 )
-                result = executor.lookup(intent)
+                try:
+                    result = self._lookup_intent(executor, intent, network)
+                except Exception as exc:
+                    store.transition_decision(
+                        network,
+                        symbol,
+                        decision_id=decision_id,
+                        status="recovery_required",
+                        error=exc,
+                    )
+                    raise
                 self._record_result(
                     decision_id,
                     intent.ordinal,
@@ -945,10 +1159,44 @@ class BotEngine:
                     store=store,
                     network=network,
                 )
-                if result.status != "FILLED" or result.executed_quantity != result.quantity:
+                requested_quantity = getattr(
+                    result, "requested_quantity", getattr(result, "quantity", None)
+                )
+                if result.status != "FILLED" or result.executed_quantity != requested_quantity:
+                    store.transition_decision(
+                        network,
+                        symbol,
+                        decision_id=decision_id,
+                        status="recovery_required",
+                        error="journaled order was not reconciled as fully filled",
+                    )
                     raise RecoveryRequiredError(
                         "journaled order was not reconciled as fully filled"
                     )
+            refreshed = store.load(network, symbol)["decisions"][decision_id]
+            statuses = [order["result"]["status"] for order in refreshed["orders"].values()]
+            complete = len(statuses) == refreshed["expected_order_count"]
+            if complete and all(status == "filled" for status in statuses):
+                store.transition_decision(
+                    network, symbol, decision_id=decision_id, status="committed"
+                )
+            elif any(status == "filled" for status in statuses):
+                store.transition_decision(
+                    network,
+                    symbol,
+                    decision_id=decision_id,
+                    status="recovery_required",
+                    error="partially executed decision requires reconciliation",
+                )
+                raise RecoveryRequiredError("partially executed decision requires reconciliation")
+            else:
+                store.transition_decision(
+                    network,
+                    symbol,
+                    decision_id=decision_id,
+                    status="failed",
+                    error="unexecuted decision was abandoned during restart audit",
+                )
 
     def _record_attempt(
         self,
@@ -972,6 +1220,46 @@ class BotEngine:
                 "quantity": str(intent.quantity),
             },
         )
+
+    @staticmethod
+    def _execute_intent(
+        executor: ExchangeExecutor, intent: OrderIntent, network: str
+    ) -> Any:
+        if not all(
+            hasattr(executor, attribute) for attribute in ("gateway", "rules", "network")
+        ):
+            return executor.execute(intent)
+        binding = ExchangeBinding("binance", network, intent.symbol)
+        adapter = build_binance_adapter(binding, executor.gateway, executor)
+        request = OrderRequest(
+            intent.symbol,
+            OrderAction(intent.action.value),
+            intent.direction,
+            intent.quantity,
+            intent.decision_id,
+            intent.ordinal,
+        )
+        return adapter.trading.execute(request, ExecutionAuthorization.issue(binding))
+
+    @staticmethod
+    def _lookup_intent(
+        executor: ExchangeExecutor, intent: OrderIntent, network: str
+    ) -> Any:
+        if not all(
+            hasattr(executor, attribute) for attribute in ("gateway", "rules", "network")
+        ):
+            return executor.lookup(intent)
+        binding = ExchangeBinding("binance", network, intent.symbol)
+        adapter = build_binance_adapter(binding, executor.gateway, executor)
+        request = OrderRequest(
+            intent.symbol,
+            OrderAction(intent.action.value),
+            intent.direction,
+            intent.quantity,
+            intent.decision_id,
+            intent.ordinal,
+        )
+        return adapter.trading.lookup(request, ExecutionAuthorization.issue(binding))
 
     def _record_result(
         self,
@@ -1272,6 +1560,34 @@ class BotEngine:
         self._analytics_service = None
         self._analytics_scope_id = None
         self._analytics_run_id = None
+        self._intent_store = None
+        self._trading_lease = None
+        self._runtime_scope = None
+        self._runtime_config = None
+
+    def _renew_trading_lease(self) -> None:
+        if self._intent_store is None or self._trading_lease is None:
+            return
+        self._trading_lease = self._intent_store.renew_lease(
+            self._trading_lease, ttl_seconds=60
+        )
+
+    def _release_trading_lease(self) -> None:
+        if self._intent_store is None or self._trading_lease is None:
+            return
+        try:
+            self._intent_store.release_lease(self._trading_lease)
+        finally:
+            self._trading_lease = None
+
+    def _record_stopped_intent(self) -> None:
+        if (
+            self._intent_store is None
+            or self._runtime_scope is None
+            or self._runtime_config is None
+        ):
+            return
+        self._intent_store.request_stop(self._runtime_scope, self._runtime_config)
 
     @staticmethod
     async def _await_terminal(task: asyncio.Task[None]) -> None:

@@ -36,11 +36,17 @@ EXCHANGE_INFO = {
 
 
 class FakeClient:
+    testnet = True
     def __init__(self) -> None:
         self.created = []
         self.lookups = []
         self.dual_side = False
         self.positions = [{"symbol": "SOLUSDT", "positionAmt": "0"}]
+        self.symbol_configs = [{
+            "symbol": "SOLUSDT",
+            "marginType": "ISOLATED",
+            "leverage": 1,
+        }]
         self.open_orders = []
         self.open_algo_orders = []
         self.open_orders_error = None
@@ -80,6 +86,10 @@ class FakeClient:
     def futures_position_information(self, **_params):
         self.read_calls.append("positions")
         return self.positions
+
+    def futures_symbol_config(self, **_params):
+        self.read_calls.append("symbol_config")
+        return self.symbol_configs
 
     def futures_get_open_orders(self, **_params):
         self.read_calls.append("open_orders")
@@ -173,6 +183,44 @@ def test_client_order_id_is_stable_and_within_binance_limit():
         OrderIntent("SOLUSDT", OrderIntentType.OPEN, 1, Decimal("1"), "bar:123", 3)
     )
     assert len(first) <= 36
+
+
+def test_mainnet_write_is_denied_inside_executor_before_sdk_call(
+    rules, monkeypatch
+):
+    client = FakeClient()
+    monkeypatch.setenv("CANDLEMIND_MAINNET_TRADING_ENABLED", "false")
+    executor = ExchangeExecutor(client, rules, "mainnet")
+
+    with pytest.raises(UnsupportedAccountError, match="disabled"):
+        executor.execute(
+            OrderIntent(
+                "SOLUSDT",
+                OrderIntentType.OPEN,
+                1,
+                Decimal("1.2"),
+                "mainnet-denied",
+            )
+        )
+
+    assert client.created == []
+
+
+def test_unbound_execution_network_is_denied_before_sdk_call(rules):
+    class UnboundClient(FakeClient):
+        testnet = None
+
+    client = UnboundClient()
+    executor = ExchangeExecutor(client, rules)
+
+    with pytest.raises(UnsupportedAccountError, match="explicitly bound"):
+        executor.execute(
+            OrderIntent(
+                "SOLUSDT", OrderIntentType.OPEN, 1, Decimal("1.2"), "unbound"
+            )
+        )
+
+    assert client.created == []
 
 
 @pytest.mark.parametrize(
@@ -429,6 +477,61 @@ def test_reads_available_balance_and_position_risk(rules):
     assert position.direction == -1
     assert position.quantity == Decimal("2.5")
     assert position.entry_price == Decimal("100.2")
+
+
+def test_reads_flat_position_risk_from_symbol_config_when_demo_omits_row(rules):
+    client = FakeClient()
+    client.positions = []
+    executor = ExchangeExecutor(client, rules)
+
+    position = executor.validate_symbol_risk("SOLUSDT")
+
+    assert position.direction == 0
+    assert position.quantity == Decimal("0")
+    assert position.isolated is True
+    assert position.leverage == 1
+    assert client.read_calls == ["positions", "symbol_config"]
+
+
+def test_enriches_demo_open_position_with_missing_risk_fields(rules):
+    client = FakeClient()
+    client.positions = [{
+        "symbol": "SOLUSDT",
+        "positionAmt": "-1.31",
+        "entryPrice": "93.69",
+    }]
+    executor = ExchangeExecutor(client, rules)
+
+    position = executor.validate_symbol_risk("SOLUSDT")
+
+    assert position.direction == -1
+    assert position.quantity == Decimal("1.31")
+    assert position.entry_price == Decimal("93.69")
+    assert position.isolated is True
+    assert position.leverage == 1
+    assert client.read_calls == ["positions", "symbol_config"]
+
+
+def test_flat_symbol_config_still_enforces_margin_and_leverage(rules):
+    client = FakeClient()
+    client.positions = []
+    client.symbol_configs = [{
+        "symbol": "SOLUSDT",
+        "marginType": "CROSSED",
+        "leverage": 20,
+    }]
+
+    with pytest.raises(UnsupportedAccountError, match="isolated"):
+        ExchangeExecutor(client, rules).validate_symbol_risk("SOLUSDT")
+
+
+def test_empty_position_and_symbol_config_fail_closed(rules):
+    client = FakeClient()
+    client.positions = []
+    client.symbol_configs = []
+
+    with pytest.raises(ExchangeExecutionError, match="position information"):
+        ExchangeExecutor(client, rules).current_position("SOLUSDT")
 
 
 def test_rejects_cross_margin_or_non_one_x_leverage(rules):

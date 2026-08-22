@@ -8,7 +8,7 @@ from .binance_usdm_gateway import BinanceUsdMGateway
 
 
 class ReadOnlyMarketGateway:
-    """Expose only server time and public futures candlesticks."""
+    """Expose only server time, public ticker, and futures candlesticks."""
 
     __slots__ = ("_gateway",)
 
@@ -19,6 +19,9 @@ class ReadOnlyMarketGateway:
 
     def server_time(self) -> int:
         return self._gateway.server_time()
+
+    def ticker(self, *, symbol: str) -> Any:
+        return self._gateway.ticker(symbol=symbol)
 
     def klines(
         self,
