@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   getSettings, saveSettings, getMyIp, testConnection,
   listAIProviders, listAIConfigs, createAIConfig, updateAIConfig,
@@ -10,6 +10,9 @@ import {
   Globe, Plus, Pencil, Trash2, X, Zap, Brain, Loader,
 } from "lucide-react";
 import clsx from "clsx";
+import { normalizeApiError } from "../api/errors";
+import { registerRefreshReader } from "../services/refreshCoordinator";
+import { EXCHANGE_PROVIDERS, getExchangeProvider } from "../exchanges/catalog";
 
 const inp = "w-full bg-surface border border-border rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-accent transition-colors";
 const lbl = "text-xs text-muted mb-1 block";
@@ -21,7 +24,17 @@ const AI_PROVIDER_FALLBACKS = {
 };
 
 export default function Settings() {
-  const { refreshRevision, setConnected } = useApp();
+  const {
+    exchangeProvider,
+    exchangeSwitching,
+    exchangeError,
+    switchExchange,
+    setBinanceConnected,
+  } = useApp();
+  const refreshRequest = useRef({ id: 0, controller: null });
+  const ipRequest = useRef({ id: 0, controller: null, inFlight: false });
+  const ipMounted = useRef(false);
+  const exchangeTabRefs = useRef([]);
 
   const [form, setForm] = useState({
     api_key_test: "", api_secret_test: "", api_key_main: "", api_secret_main: "",
@@ -52,27 +65,40 @@ export default function Settings() {
   const [aiDraftTesting, setAiDraftTesting] = useState(false);
   const [aiTestResult, setAiTestResult] = useState(null);
 
-  useEffect(() => {
-    getSettings().then(({ data }) => {
-      setTestKeySet(data.test_key_set); setMainKeySet(data.main_key_set);
-      setForm(f => ({
-        ...f, proxy_url: data.proxy_url || "",
-      }));
-    }).catch(() => {});
-    listAIProviders().then(({ data }) => setProviders(data)).catch(() => {});
-    listAIConfigs().then(({ data }) => setAiConfigs(data)).catch(() => {});
-  }, []);
+  const loadSettingsData = useCallback(async (initialLoad = false) => {
+    refreshRequest.current.controller?.abort();
+    const controller = new AbortController();
+    const id = refreshRequest.current.id + 1;
+    refreshRequest.current = { id, controller };
+    const includeBinanceSettings = exchangeProvider === "binance";
+    const requests = [getSettings(controller.signal)];
+    if (includeBinanceSettings) {
+      requests.push(listAIProviders(controller.signal), listAIConfigs(controller.signal));
+    }
+    const results = await Promise.allSettled(requests);
+    if (controller.signal.aborted || refreshRequest.current.id !== id) return true;
 
-  useEffect(() => {
-    if (!refreshRevision) return;
-    getSettings().then(({ data }) => {
+    const [settingsResult, providersResult, configsResult] = results;
+    if (settingsResult.status === "fulfilled") {
+      const { data } = settingsResult.value;
       setTestKeySet(data.test_key_set);
       setMainKeySet(data.main_key_set);
-      if (typeof data.connected === "boolean") setConnected(data.connected);
-    }).catch(() => {});
-    listAIProviders().then(({ data }) => setProviders(data)).catch(() => {});
-    listAIConfigs().then(({ data }) => setAiConfigs(data)).catch(() => {});
-  }, [refreshRevision]);
+      if (typeof data.connected === "boolean") setBinanceConnected(data.connected);
+      if (initialLoad) setForm((current) => ({ ...current, proxy_url: data.proxy_url || "" }));
+    }
+    if (providersResult?.status === "fulfilled") setProviders(providersResult.value.data);
+    if (configsResult?.status === "fulfilled") setAiConfigs(configsResult.value.data);
+
+    return results.every((result) => result.status === "fulfilled"
+      || normalizeApiError(result.reason).cancelled);
+  }, [exchangeProvider, setBinanceConnected]);
+
+  useEffect(() => {
+    loadSettingsData(true);
+    return () => refreshRequest.current.controller?.abort();
+  }, [loadSettingsData]);
+
+  useEffect(() => registerRefreshReader("settings:page", () => loadSettingsData(false)), [loadSettingsData]);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
@@ -82,7 +108,7 @@ export default function Settings() {
       const { data } = await saveSettings(form);   // 空字段=保持不变（后端处理）
       setResult({ ok: true, msg: data.message || "保存成功" });
       const { data: s } = await getSettings();
-      setTestKeySet(s.test_key_set); setMainKeySet(s.main_key_set); setConnected(s.connected);
+      setTestKeySet(s.test_key_set); setMainKeySet(s.main_key_set); setBinanceConnected(s.connected);
       // 清空密钥输入框（已存盘，不回显）
       setForm(f => ({ ...f, api_key_test: "", api_secret_test: "", api_key_main: "", api_secret_main: "" }));
     } catch (e) {
@@ -104,12 +130,47 @@ export default function Settings() {
     }
   };
 
-  const detectIp = async () => {
-    setIpLoading(true); setMyIp(null);
-    try { const { data } = await getMyIp(); setMyIp(data); }
-    catch (e) { setMyIp({ error: e.response?.data?.detail || "检测失败" }); }
-    finally   { setIpLoading(false); }
-  };
+  const detectIp = useCallback(async () => {
+    if (ipRequest.current.inFlight) return false;
+
+    const controller = new AbortController();
+    const id = ipRequest.current.id + 1;
+    ipRequest.current = { id, controller, inFlight: true };
+    setIpLoading(true);
+    try {
+      const { data } = await getMyIp(controller.signal);
+      if (ipMounted.current && !controller.signal.aborted && ipRequest.current.id === id) {
+        setMyIp(data);
+      }
+    } catch (error) {
+      const normalized = normalizeApiError(error, "检测失败");
+      if (ipMounted.current && !normalized.cancelled && ipRequest.current.id === id) {
+        setMyIp({ error: normalized.message });
+      }
+    } finally {
+      if (ipRequest.current.id === id) {
+        ipRequest.current = { id, controller: null, inFlight: false };
+        if (ipMounted.current) setIpLoading(false);
+      }
+    }
+    return true;
+  }, []);
+
+  useEffect(() => {
+    ipMounted.current = true;
+    detectIp();
+    const timer = window.setInterval(detectIp, 60_000);
+    return () => {
+      ipMounted.current = false;
+      window.clearInterval(timer);
+      ipRequest.current.controller?.abort();
+      ipRequest.current = {
+        id: ipRequest.current.id,
+        controller: null,
+        inFlight: false,
+      };
+    };
+  }, [detectIp]);
 
   // AI helpers
   const openAiModal = () => {
@@ -204,10 +265,88 @@ export default function Settings() {
   };
 
   const activeAi = aiConfigs.find(c => c.is_active);
+  const selectedExchange = getExchangeProvider(exchangeProvider);
+
+  const handleExchangeKeyDown = (event, index) => {
+    let nextIndex = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (index + 1) % EXCHANGE_PROVIDERS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (index - 1 + EXCHANGE_PROVIDERS.length) % EXCHANGE_PROVIDERS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = EXCHANGE_PROVIDERS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    exchangeTabRefs.current[nextIndex]?.focus();
+  };
 
   return (
     <>
     <div className="space-y-3">
+
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <button onClick={handleSave} disabled={saving || exchangeSwitching || exchangeProvider !== "binance"}
+            className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2 text-sm font-bold text-black transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50">
+            <Save size={14}/> {saving ? "保存中..." : "保存配置"}
+          </button>
+          <button onClick={detectIp} disabled={ipLoading}
+            className="flex items-center gap-1.5 rounded-lg border border-border bg-surface px-4 py-2 text-sm text-muted transition-colors hover:text-white disabled:opacity-60">
+            <Search size={13} className={ipLoading ? "animate-spin" : ""}/>
+            {ipLoading ? "检测中..." : "检测出口 IP"}
+          </button>
+          {result && (
+            <div className={clsx("flex items-center gap-1.5 text-sm", result.ok ? "text-green" : "text-red")} role={result.ok ? "status" : "alert"}>
+              {result.ok ? <CheckCircle size={14}/> : <AlertCircle size={14}/>} {result.msg}
+            </div>
+          )}
+          {myIp && !myIp.error && (
+            <div className="flex items-center gap-2 rounded-lg border border-green/20 bg-green/5 px-3 py-2 text-xs text-green">
+              <span>{myIp.via_proxy ? "✓ 代理" : "⚠ 直连"}</span>
+              <code className="font-bold">{myIp.ip}</code>
+              <button onClick={() => navigator.clipboard?.writeText(myIp.ip)}
+                className="flex items-center gap-0.5 text-muted hover:text-white">
+                <Copy size={10}/>复制
+              </button>
+            </div>
+          )}
+          {myIp?.error && <div className="flex items-center gap-1.5 text-xs text-red" role="alert"><AlertCircle size={12}/>{myIp.error}</div>}
+        </div>
+
+        <div className="min-w-0 max-w-full overflow-x-auto" aria-busy={exchangeSwitching}>
+          <div className="flex w-max items-center gap-0.5 rounded-lg border border-border bg-surface p-0.5" role="tablist" aria-label="交易所">
+            {EXCHANGE_PROVIDERS.map((provider, index) => (
+              <button
+                key={provider.id}
+                ref={(node) => { exchangeTabRefs.current[index] = node; }}
+                type="button"
+                role="tab"
+                id={`exchange-tab-${provider.id}`}
+                aria-controls="exchange-settings-panel"
+                aria-selected={exchangeProvider === provider.id}
+                tabIndex={exchangeProvider === provider.id ? 0 : -1}
+                disabled={exchangeSwitching}
+                onKeyDown={(event) => handleExchangeKeyDown(event, index)}
+                onClick={() => switchExchange(provider.id)}
+                className={clsx(
+                  "whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-wait disabled:opacity-60",
+                  exchangeProvider === provider.id ? "bg-accent text-black" : "text-muted hover:text-white",
+                )}
+              >
+                {provider.label}
+              </button>
+            ))}
+          </div>
+          {exchangeError && <p className="mt-1 text-right text-xs text-red" role="alert">{exchangeError}</p>}
+        </div>
+      </div>
+
+      <div id="exchange-settings-panel" role="tabpanel" aria-labelledby={`exchange-tab-${exchangeProvider}`}>
+      {exchangeProvider === "binance" ? (
+      <div className="space-y-3">
 
       {/* ── API 配置（测试网 + 真实网 两套，永久保存）── */}
       <div className="bg-card border border-border rounded-xl p-4">
@@ -293,34 +432,14 @@ export default function Settings() {
           </button>
         </div>
       </div>
-
-      {/* ── 操作 ── */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <button onClick={handleSave} disabled={saving}
-          className="flex items-center gap-2 bg-accent text-black px-5 py-2 rounded-lg text-sm font-bold hover:bg-accent/90 transition-colors disabled:opacity-60">
-          <Save size={14}/> {saving ? "保存中..." : "保存配置"}
-        </button>
-        <button onClick={detectIp} disabled={ipLoading}
-          className="flex items-center gap-1.5 bg-surface border border-border text-sm text-muted hover:text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-60">
-          <Search size={13} className={ipLoading ? "animate-spin" : ""}/>
-          {ipLoading ? "检测中..." : "检测出口 IP"}
-        </button>
-        {result && (
-          <div className={clsx("flex items-center gap-1.5 text-sm", result.ok ? "text-green" : "text-red")}>
-            {result.ok ? <CheckCircle size={14}/> : <AlertCircle size={14}/>} {result.msg}
-          </div>
-        )}
-        {myIp && !myIp.error && (
-          <div className="flex items-center gap-2 text-xs text-green bg-green/5 border border-green/20 rounded-lg px-3 py-2">
-            <span>{myIp.via_proxy ? "✓ 代理" : "⚠ 直连"}</span>
-            <code className="font-bold">{myIp.ip}</code>
-            <button onClick={() => navigator.clipboard?.writeText(myIp.ip)}
-              className="flex items-center gap-0.5 text-muted hover:text-white">
-              <Copy size={10}/>复制
-            </button>
-          </div>
-        )}
-        {myIp?.error && <div className="flex items-center gap-1.5 text-xs text-red"><AlertCircle size={12}/>{myIp.error}</div>}
+      </div>
+      ) : (
+        <section className="flex min-h-52 flex-col items-center justify-center rounded-xl border border-border bg-card px-6 py-12 text-center">
+          <Globe size={24} className="mb-3 text-muted" aria-hidden="true" />
+          <h2 className="text-base font-semibold text-white">{selectedExchange.label}</h2>
+          <p className="mt-2 text-sm text-muted">未来会接入，敬请期待</p>
+        </section>
+      )}
       </div>
     </div>
 

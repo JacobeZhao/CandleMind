@@ -12,6 +12,12 @@ from ..database import Settings, active_keys, get_db
 from ..security import decrypt
 from ..services.strategy_analytics import StrategyAnalyticsService, account_fingerprint
 from ..services.strategy_analytics_store import StrategyAnalyticsStoreError
+from ..services.exchange_provider import (
+    BINANCE_PROVIDER,
+    is_binance_provider,
+    normalize_exchange_provider,
+    unavailable_provider_detail,
+)
 from ..state import app_state
 
 
@@ -21,6 +27,15 @@ analytics_service = StrategyAnalyticsService()
 
 def _active_scope(db: Session) -> tuple[object, str, str, str]:
     settings = db.query(Settings).first()
+    provider = normalize_exchange_provider(
+        getattr(settings, "exchange_provider", None) if settings else None
+    )
+    if not is_binance_provider(provider):
+        raise HTTPException(503, detail=unavailable_provider_detail(provider))
+    if app_state.exchange_provider != BINANCE_PROVIDER:
+        raise HTTPException(
+            503, detail=unavailable_provider_detail(app_state.exchange_provider)
+        )
     if settings is None or app_state.client is None:
         raise HTTPException(503, "Binance is not connected")
     if settings.symbol != app_state.symbol:

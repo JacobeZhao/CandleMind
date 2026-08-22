@@ -21,13 +21,15 @@
 
 ## Overview
 
-CandleMind combines live market data, trend analysis, strategy configuration, exchange execution, and account analytics in a FastAPI and React workspace. It focuses on the **CandleMind Trend Strategy** and includes a continuously running AI market assistant plus reproducible offline research infrastructure.
+CandleMind combines live market data, trend analysis, strategy configuration, exchange execution, and account analytics in a FastAPI and React workspace. It focuses on the **CandleMind Trend Strategy**. The Markets page pairs a viewport-filling, resizable candlestick chart with a live AI market assistant, while reproducible infrastructure supports offline research.
+
+Settings provides a global exchange selector. Only **Binance Futures** is implemented today. OKX, Bybit, Gate.io, and A-share are disconnected placeholders for future integrations; selecting one does not issue Binance market, account, or trading requests.
 
 ## Features
 
 | Capability | Description |
 | --- | --- |
-| Live markets | Binance WebSocket quotes, candlesticks, overlays, and key indicators |
+| Live markets | Binance WebSocket quotes, candlesticks, overlays, and a viewport-responsive resizable workspace |
 | AI market assistant | Ongoing analysis of closed multi-timeframe candles with interactive chat |
 | Strategy runtime | Three configurable automated strategies bound to the selected symbol and network |
 | Orders and account | Open orders, trades, order history, returns, win rate, and profit factor |
@@ -35,6 +37,8 @@ CandleMind combines live market data, trend analysis, strategy configuration, ex
 | Trading safeguards | Testnet-first operation, dual mainnet gates, quantity checks, and idempotent order logs |
 
 The public application contains five areas: Overview, Markets, Orders, Strategies, and Settings. Internal evaluation remains available for research, but there is no public backtest page or `/api/backtest/*` API.
+
+While Settings is open, outbound-IP detection runs immediately and then once per minute, retaining the previous result until the next check completes. The global exchange selection applies consistently to business pages such as Overview, Markets, and Orders; the header provides global symbol selection and a visible Refresh action for the current page.
 
 ## Architecture
 
@@ -91,9 +95,12 @@ Vite runs at <http://localhost:5173> and proxies API requests to the backend.
 
 1. Create `.env` from `.env.example`; never commit secrets, databases, or runtime logs.
 2. Enter Binance and AI provider credentials in Settings. Back up `trader.db` together with `secret.key`.
-3. Cloud AI Base URLs must use trusted HTTPS hosts. Local providers may use loopback or RFC1918 addresses. See [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md).
-4. Mainnet requires completed testnet validation, the server-side switch, and explicit UI confirmation.
-5. Independently review the strategy, sizing, leverage, stops, and exchange permissions before risking capital.
+3. While Settings is open, outbound-IP detection runs once per minute for connection diagnostics; it does not replace exchange API permissions or IP allowlist configuration.
+4. Cloud AI Base URLs must use trusted HTTPS hosts. Local providers may use loopback or RFC1918 addresses. See [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md).
+5. Mainnet requires completed testnet validation, the server-side switch, and explicit UI confirmation.
+6. Independently review the strategy, sizing, leverage, stops, and exchange permissions before risking capital.
+
+See [`docs/BINANCE_RESILIENCE.md`](docs/BINANCE_RESILIENCE.md) for Binance retry, cooldown, IP diagnosis, and order-confirmation rules. See [`docs/EXCHANGE_PROVIDERS.md`](docs/EXCHANGE_PROVIDERS.md) for exchange selection, persistence, and isolation of unavailable providers.
 
 ## Reinforcement Learning Research
 

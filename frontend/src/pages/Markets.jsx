@@ -4,6 +4,7 @@ import MarketSummary from "../components/MarketSummary";
 import MarketAiPanel from "../components/MarketAiPanel";
 import PriceChart from "../components/PriceChart";
 import WorkspaceDivider from "../components/WorkspaceDivider";
+import ExchangeUnavailableState from "../components/ExchangeUnavailableState";
 
 const PANEL_WIDTH_KEY = "candlemind.marketAssistant.width";
 const PANEL_OPEN_KEY = "candlemind.marketAssistant.open";
@@ -44,7 +45,17 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-export default function Markets() {
+function splitBounds(totalSize, preferredPanelMin, preferredChartMin, maxPanelFraction = 1) {
+  const available = Math.max(0, totalSize - DIVIDER_SIZE);
+  if (available === 0) return { min: 0, max: 0 };
+
+  const min = Math.min(preferredPanelMin, available * 0.32);
+  const chartMin = Math.min(preferredChartMin, available * 0.45);
+  const max = Math.max(min, Math.min(available - chartMin, available * maxPanelFraction));
+  return { min, max };
+}
+
+function MarketsWorkspace() {
   const { refreshRevision, symbol } = useApp();
   const workspaceRef = useRef(null);
   const [interval, setInterval] = useState("5m");
@@ -74,26 +85,21 @@ export default function Markets() {
     return () => observer.disconnect();
   }, []);
 
-  const desktopMax = workspaceSize.width > 0
-    ? Math.max(
-      MIN_PANEL_WIDTH,
-      Math.min(workspaceSize.width * 0.55, workspaceSize.width - MIN_CHART_WIDTH - DIVIDER_SIZE),
-    )
-    : DEFAULT_PANEL_WIDTH;
-  const mobileMax = workspaceSize.height > 0
-    ? Math.max(
-      MIN_MOBILE_PANEL_HEIGHT,
-      workspaceSize.height - MIN_MOBILE_CHART_HEIGHT - DIVIDER_SIZE,
-    )
-    : DEFAULT_PANEL_HEIGHT;
+  const desktopBounds = workspaceSize.width > 0
+    ? splitBounds(workspaceSize.width, MIN_PANEL_WIDTH, MIN_CHART_WIDTH, 0.55)
+    : { min: MIN_PANEL_WIDTH, max: DEFAULT_PANEL_WIDTH };
+  const mobileBounds = workspaceSize.height > 0
+    ? splitBounds(workspaceSize.height, MIN_MOBILE_PANEL_HEIGHT, MIN_MOBILE_CHART_HEIGHT)
+    : { min: MIN_MOBILE_PANEL_HEIGHT, max: DEFAULT_PANEL_HEIGHT };
+  const activeBounds = desktop ? desktopBounds : mobileBounds;
   const activeValue = desktop
-    ? clamp(panelWidth, MIN_PANEL_WIDTH, desktopMax)
-    : clamp(panelHeight, MIN_MOBILE_PANEL_HEIGHT, mobileMax);
+    ? clamp(panelWidth, activeBounds.min, activeBounds.max)
+    : clamp(panelHeight, activeBounds.min, activeBounds.max);
 
   useEffect(() => {
-    if (desktop) setPanelWidth((value) => clamp(value, MIN_PANEL_WIDTH, desktopMax));
-    else setPanelHeight((value) => clamp(value, MIN_MOBILE_PANEL_HEIGHT, mobileMax));
-  }, [desktop, desktopMax, mobileMax]);
+    if (desktop) setPanelWidth((value) => clamp(value, desktopBounds.min, desktopBounds.max));
+    else setPanelHeight((value) => clamp(value, mobileBounds.min, mobileBounds.max));
+  }, [desktop, desktopBounds.min, desktopBounds.max, mobileBounds.min, mobileBounds.max]);
 
   const resizePanel = useCallback((value) => {
     if (desktop) setPanelWidth(value);
@@ -120,9 +126,10 @@ export default function Markets() {
   return (
     <div
       ref={workspaceRef}
-      className={`flex h-full min-h-[640px] min-w-0 overflow-hidden ${desktop ? "flex-row" : "flex-col"}`}
+      data-testid="markets-workspace"
+      className={`flex h-full min-h-0 min-w-0 overflow-hidden ${desktop ? "flex-row" : "flex-col"}`}
     >
-      <div className={`min-h-0 min-w-0 flex-1 ${desktop ? "min-w-[480px]" : "min-h-[320px]"}`}>
+      <div className="min-h-0 min-w-0 flex-1">
         <PriceChart
           symbol={symbol}
           interval={interval}
@@ -145,8 +152,8 @@ export default function Markets() {
           <WorkspaceDivider
             orientation={desktop ? "vertical" : "horizontal"}
             value={activeValue}
-            min={desktop ? MIN_PANEL_WIDTH : MIN_MOBILE_PANEL_HEIGHT}
-            max={desktop ? desktopMax : mobileMax}
+            min={activeBounds.min}
+            max={activeBounds.max}
             onChange={resizePanel}
             onCommit={commitPanelSize}
           />
@@ -163,4 +170,16 @@ export default function Markets() {
       )}
     </div>
   );
+}
+
+export default function Markets() {
+  const { exchangeProvider, exchangeSupported, exchangeSwitching, settingsLoaded } = useApp();
+  const isExchangeSupported = settingsLoaded !== false
+    && exchangeSupported;
+
+  if (!isExchangeSupported || exchangeSwitching) {
+    return <ExchangeUnavailableState exchangeProvider={exchangeProvider} />;
+  }
+
+  return <MarketsWorkspace />;
 }

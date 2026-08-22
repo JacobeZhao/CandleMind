@@ -13,6 +13,8 @@
 - [`G_DRIVE_README.md`](G_DRIVE_README.md)：G 盘权威目录结构与备份规则。
 - [`DERIVATIVES_DATA_V1.md`](DERIVATIVES_DATA_V1.md)：衍生品数据来源、因果性和验收证据。
 - [`AI_CONFIGURATION.md`](AI_CONFIGURATION.md)：AI Provider、Base URL、代理和密钥安全边界。
+- [`BINANCE_RESILIENCE.md`](BINANCE_RESILIENCE.md)：Binance 读取重试、限流冷却、错误分类与订单安全边界。
+- [`EXCHANGE_PROVIDERS.md`](EXCHANGE_PROVIDERS.md)：全局交易所选择、支持状态与业务请求隔离规则。
 - [`../backend/scripts/README.md`](../backend/scripts/README.md)：受支持的数据维护与评估命令。
 - [`../ops/README.md`](../ops/README.md)：Docker Compose 启动和隔离验证流程。
 

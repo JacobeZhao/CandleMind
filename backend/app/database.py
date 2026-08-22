@@ -30,6 +30,7 @@ class Settings(Base):
     symbol = Column(String(20), default="BTCUSDT")
     interval = Column(String(10), default="15m")
     proxy_url = Column(String(200), nullable=True)
+    exchange_provider = Column(String(30), nullable=False, default="binance")
 
 
 def active_keys(settings: Settings) -> tuple[str | None, str | None]:
@@ -81,6 +82,12 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         _add_col_if_missing(conn, "settings", "proxy_url", "VARCHAR(200)")
+        _add_col_if_missing(
+            conn,
+            "settings",
+            "exchange_provider",
+            "VARCHAR(30) NOT NULL DEFAULT 'binance'",
+        )
         for column in (
             "api_key_test_enc",
             "api_secret_test_enc",
@@ -95,6 +102,15 @@ def init_db() -> None:
         if settings is None:
             settings = Settings()
             db.add(settings)
+            db.commit()
+
+        from .services.exchange_provider import (
+            EXCHANGE_PROVIDERS,
+            normalize_exchange_provider,
+        )
+
+        if settings.exchange_provider not in EXCHANGE_PROVIDERS:
+            settings.exchange_provider = normalize_exchange_provider(None)
             db.commit()
 
         if settings.api_key_enc and not (

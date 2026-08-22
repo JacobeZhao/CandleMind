@@ -11,6 +11,8 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+from .read_only_market_gateway import ReadOnlyMarketGateway
+
 
 ANALYSIS_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 INTERVAL_MILLISECONDS = {
@@ -279,46 +281,27 @@ def build_multi_timeframe_snapshot(
     return snapshot
 
 
-def _server_time_ms(client: Any) -> int:
-    if callable(getattr(client, "server_time", None)):
-        value = client.server_time()
-        return int(value.get("serverTime")) if isinstance(value, dict) else int(value)
-    return int(client.futures_time()["serverTime"])
-
-
-def _fetch_klines(
-    client: Any, *, symbol: str, interval: str, cutoff_ms: int | None
-) -> Any:
-    if callable(getattr(client, "klines", None)):
-        return client.klines(
-            symbol=symbol,
-            interval=interval,
-            limit=BAR_LIMIT,
-            end_time=cutoff_ms,
-        )
-    parameters: dict[str, Any] = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": BAR_LIMIT,
-    }
-    if cutoff_ms is not None:
-        parameters["endTime"] = cutoff_ms
-    return client.futures_klines(**parameters)
-
-
 async def fetch_multi_timeframe_snapshot(
     client: Any, symbol: str, *, cutoff_ms: int | None = None
 ) -> dict[str, Any]:
     try:
-        server_time_ms = await asyncio.to_thread(_server_time_ms, client)
+        gateway = (
+            client
+            if isinstance(client, ReadOnlyMarketGateway)
+            else ReadOnlyMarketGateway(client)
+        )
+        server_time_ms = await asyncio.to_thread(gateway.server_time)
+        request_cutoff_ms = (
+            cutoff_ms if cutoff_ms is not None else latest_completed_cutoff(server_time_ms)
+        )
         rows = await asyncio.gather(
             *(
                 asyncio.to_thread(
-                    _fetch_klines,
-                    client,
+                    gateway.klines,
                     symbol=symbol,
                     interval=interval,
-                    cutoff_ms=cutoff_ms,
+                    limit=BAR_LIMIT,
+                    end_time=request_cutoff_ms,
                 )
                 for interval in ANALYSIS_INTERVALS
             )
@@ -332,5 +315,5 @@ async def fetch_multi_timeframe_snapshot(
         symbol=symbol,
         server_time_ms=server_time_ms,
         raw_by_interval=dict(zip(ANALYSIS_INTERVALS, rows, strict=True)),
-        cutoff_ms=cutoff_ms,
+        cutoff_ms=request_cutoff_ms,
     )

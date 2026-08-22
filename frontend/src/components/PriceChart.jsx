@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createChart, LineStyle } from "lightweight-charts";
+import { AlertCircle, RefreshCw } from "lucide-react";
 import { getKlines } from "../api/client";
+import { normalizeApiError } from "../api/errors";
 import { getTickerSnapshot, subscribeTicker } from "../context/MarketTickerContext";
+import { registerRefreshReader } from "../services/refreshCoordinator";
 
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
 const MAIN_INDICATORS = [
@@ -143,7 +146,7 @@ export default function PriceChart({
   onIndicatorSnapshot,
   assistantOpen = false,
   headerLeading = null,
-  refreshRevision = 0,
+  refreshRevision: _refreshRevision = 0,
 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -162,7 +165,7 @@ export default function PriceChart({
   });
   const scheduleBoundaryRef = useRef(null);
   const [mainIndicator, setMainIndicator] = useState("psar");
-  const [loading, setLoading] = useState(false);
+  const [requestState, setRequestState] = useState({ phase: "loading", error: null, scopeKey: null });
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
@@ -233,7 +236,7 @@ export default function PriceChart({
     };
   }, []);
 
-  const loadData = useCallback((initialLoad) => {
+  const loadData = useCallback((replaceData) => {
     if (!symbol || !chartRef.current) return null;
 
     const chart = chartRef.current;
@@ -243,16 +246,25 @@ export default function PriceChart({
     requestRef.current.controller?.abort();
     const generation = requestRef.current.generation + 1;
     requestRef.current = { generation, controller };
+    const scopeKey = `${symbol}:${interval}:${mainIndicator}`;
+    const scopeChanged = requestState.scopeKey !== scopeKey;
+    const shouldReplace = replaceData || scopeChanged;
 
-    if (initialLoad) {
+    if (shouldReplace) {
       clearOverlaySeries(series);
+      safeSet(series.candle, []);
+      safeSet(series.volume, []);
       lastBarRef.current = null;
       onIndicatorSnapshot?.(null);
-      setLoading(true);
     }
+    setRequestState((current) => ({
+      phase: !shouldReplace && lastBarRef.current ? "refreshing" : "loading",
+      error: null,
+      scopeKey,
+    }));
 
     const timeScale = chart.timeScale();
-    const previousRange = initialLoad ? null : timeScale.getVisibleLogicalRange?.();
+    const previousRange = shouldReplace ? null : timeScale.getVisibleLogicalRange?.();
     const indicators = [...SUMMARY_INDICATORS, selected.requestId];
     const params = { ...SUMMARY_PARAMS, [selected.requestId]: selected.params };
     const completion = getKlines(symbol, interval, 200, indicators, params, controller.signal)
@@ -278,26 +290,35 @@ export default function PriceChart({
         updateMainIndicator(series, data, mainIndicator);
         onIndicatorSnapshot?.(latestIndicatorSnapshot(data));
 
-        if (initialLoad) {
+        if (shouldReplace) {
           const total = data.length;
-          timeScale.setVisibleLogicalRange({ from: total - VISIBLE_BARS, to: total - 1 });
+          if (total) timeScale.setVisibleLogicalRange({ from: total - VISIBLE_BARS, to: total - 1 });
         } else if (previousRange) {
           timeScale.setVisibleLogicalRange(previousRange);
         }
+        setRequestState({ phase: data.length ? "complete" : "empty", error: null, scopeKey });
         return lastBarRef.current?.time ?? null;
       })
       .catch((error) => {
-        if (error?.code !== "ERR_CANCELED" && error?.name !== "CanceledError") console.error(error);
-        return null;
-      })
-      .finally(() => {
-        if (initialLoad && !controller.signal.aborted && requestRef.current.generation === generation) {
-          setLoading(false);
+        const parsed = normalizeApiError(error, "K 线数据加载失败，请稍后重试。");
+        if (parsed.cancelled || requestRef.current.generation !== generation) return null;
+        setRequestState({
+          phase: parsed.retryable && lastBarRef.current && !scopeChanged ? "stale" : "error",
+          error: parsed.message,
+          scopeKey,
+        });
+        if (!parsed.retryable) {
+          safeSet(series.candle, []);
+          safeSet(series.volume, []);
+          clearOverlaySeries(series);
+          lastBarRef.current = null;
+          onIndicatorSnapshot?.(null);
         }
+        return false;
       });
 
     return { controller, completion };
-  }, [symbol, interval, mainIndicator, onIndicatorSnapshot]);
+  }, [symbol, interval, mainIndicator, onIndicatorSnapshot, requestState.scopeKey]);
 
   const resetBoundaryRefresh = useCallback(() => {
     const current = boundaryRef.current;
@@ -342,7 +363,13 @@ export default function PriceChart({
     resetBoundaryRefresh();
     const request = loadData(true);
     return () => request?.controller.abort();
-  }, [loadData, refreshRevision, resetBoundaryRefresh]);
+  }, [symbol, interval, mainIndicator, resetBoundaryRefresh]);
+
+  useEffect(() => registerRefreshReader("markets:chart", async () => {
+    const request = loadData(false);
+    if (!request) return true;
+    return (await request.completion) !== false;
+  }), [loadData]);
 
   useEffect(() => () => {
     resetBoundaryRefresh();
@@ -410,9 +437,27 @@ export default function PriceChart({
         </button>
       </div>
       <div className="relative min-h-0 flex-1">
-        {loading && (
+        {requestState.phase === "loading" && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-card/60">
             <div className="text-sm text-muted">加载中...</div>
+          </div>
+        )}
+        {requestState.phase === "error" && (
+          <div role="alert" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-card/90 px-6 text-center text-sm text-red">
+            <span className="inline-flex items-center gap-2"><AlertCircle size={16} />{requestState.error}</span>
+            <button type="button" onClick={() => loadData(true)} className="inline-flex items-center gap-1 text-xs font-semibold text-accent hover:text-white"><RefreshCw size={13} />重试</button>
+          </div>
+        )}
+        {requestState.phase === "empty" && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-card/80 text-sm text-muted">
+            <span>当前范围暂无 K 线数据</span>
+            <button type="button" onClick={() => loadData(true)} className="text-xs font-semibold text-accent hover:text-white">重试</button>
+          </div>
+        )}
+        {requestState.phase === "stale" && (
+          <div role="alert" className="absolute right-3 top-3 z-10 flex items-center gap-2 border border-accent/30 bg-card/95 px-3 py-2 text-xs text-accent shadow-lg">
+            <AlertCircle size={13} />显示上次成功数据。{requestState.error}
+            <button type="button" aria-label="重试 K 线数据" title="重试 K 线数据" onClick={() => loadData(false)} className="text-white"><RefreshCw size={13} /></button>
           </div>
         )}
         <div ref={containerRef} className="h-full w-full" />

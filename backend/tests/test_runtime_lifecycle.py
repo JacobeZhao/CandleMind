@@ -7,14 +7,15 @@ from backend.app.ws_manager import ConnectionManager
 
 
 class _DatabaseSession:
-    def __init__(self):
+    def __init__(self, settings=None):
         self.closed = False
+        self.settings = settings
 
     def query(self, _model):
         return self
 
     def first(self):
-        return None
+        return self.settings
 
     def close(self):
         self.closed = True
@@ -154,5 +155,99 @@ def test_broadcast_times_out_and_removes_only_failed_connections():
         assert healthy.payloads == [{"type": "ticker"}]
         assert stalled.cancelled
         assert manager.active == [healthy]
+
+    asyncio.run(scenario())
+
+
+def test_reconnect_loop_skips_binance_for_unavailable_provider(monkeypatch):
+    async def scenario():
+        settings = SimpleNamespace(
+            exchange_provider="okx",
+            api_key_test_enc="key",
+            api_secret_test_enc="secret",
+            api_key_enc=None,
+            api_secret_enc=None,
+            testnet=True,
+        )
+        database = _DatabaseSession(settings)
+        connect_calls = []
+
+        async def one_iteration(_seconds):
+            if database.closed:
+                raise asyncio.CancelledError
+
+        async def connect_active(value):
+            connect_calls.append(value)
+
+        monkeypatch.setattr(main.asyncio, "sleep", one_iteration)
+        monkeypatch.setattr(main, "get_db", lambda: iter((database,)))
+        monkeypatch.setattr(
+            main.settings,
+            "_connect_active",
+            connect_active,
+            raising=False,
+        )
+        main.app_state.client = None
+
+        try:
+            await main._reconnect_loop()
+        except asyncio.CancelledError:
+            pass
+
+        assert database.closed
+        assert connect_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_lifespan_keeps_unavailable_provider_disconnected(monkeypatch):
+    async def scenario():
+        settings = SimpleNamespace(
+            exchange_provider="a_share",
+            api_key_test_enc="key",
+            api_secret_test_enc="secret",
+            api_key_main_enc=None,
+            api_secret_main_enc=None,
+            api_key_enc=None,
+            api_secret_enc=None,
+            testnet=True,
+        )
+        database = _DatabaseSession(settings)
+        events = []
+
+        async def wait_forever():
+            await asyncio.Event().wait()
+
+        async def stop_ws():
+            events.append("ws-stopped")
+
+        async def stop_agent():
+            events.append("agent-stopped")
+
+        async def restore_agent():
+            raise AssertionError("unavailable provider must not restore the market agent")
+
+        async def no_op():
+            return None
+
+        monkeypatch.setattr(main, "init_db", lambda: None)
+        monkeypatch.setattr(main, "get_db", lambda: iter((database,)))
+        monkeypatch.setattr(main.app_state, "client", object())
+        monkeypatch.setattr(main.app_state, "exchange_provider", "binance")
+        monkeypatch.setattr(main.app_state, "broadcast_loop", wait_forever)
+        monkeypatch.setattr(main, "_reconnect_loop", wait_forever)
+        monkeypatch.setattr(main.binance_ws_client, "stop", stop_ws)
+        monkeypatch.setattr(main.market_agent_manager, "stop", stop_agent)
+        monkeypatch.setattr(main.market_agent_manager, "restore", restore_agent)
+        monkeypatch.setattr(main.market_agent_manager, "shutdown", no_op)
+        monkeypatch.setattr(main.strategy_route.bot_engine, "stop", no_op)
+
+        app = SimpleNamespace(state=SimpleNamespace())
+        async with main.lifespan(app):
+            assert main.app_state.exchange_provider == "a_share"
+            assert main.app_state.client is None
+            assert events == ["ws-stopped", "agent-stopped"]
+
+        assert database.closed
 
     asyncio.run(scenario())

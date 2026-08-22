@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from backend.app.services import strategy_analytics
+from backend.app.services.binance_retry import BinanceRetryExecutor, BinanceRetryPolicy
+from backend.app.services.binance_usdm_gateway import BinanceUsdMGateway
 from backend.app.services.strategy_analytics import (
     HISTORY_LOOKBACK_MS,
     StrategyAnalyticsService,
@@ -155,6 +158,71 @@ def test_sync_uses_exact_ids_and_bounded_pagination(tmp_path):
     assert result["status"] == "partial"
     assert len(store.snapshot_rows(scope)["fills"]) == 1
     assert store.get_sync_state(scope, "fills")["reason"] == "external_fills_present"
+
+
+def test_fill_page_retry_preserves_cutoff_and_advances_cursor_once(monkeypatch, tmp_path):
+    cutoff = 1_800_000_000_000
+    started = cutoff - 1_000
+    monkeypatch.setattr(strategy_analytics, "utc_ms", lambda: cutoff)
+    store = StrategyAnalyticsStore(tmp_path / "analytics.sqlite3")
+    service = StrategyAnalyticsService(
+        store, max_pages=2, page_size=2, cooldown_seconds=0
+    )
+    scope = store.ensure_scope("sha256:account", "testnet", "SOLUSDT")
+    store.record_run(
+        scope,
+        "run",
+        strategy_type="sar",
+        config_version="v3",
+        allocation_equity="100",
+        started_at_ms=started,
+    )
+    for order_id in (1, 2):
+        store.record_owned_order(scope, "run", "d", order_id, exchange_order_id=order_id)
+
+    class Client:
+        def __init__(self):
+            self.fill_calls = []
+            self.income_calls = []
+
+        def futures_account_trades(self, **kwargs):
+            self.fill_calls.append(dict(kwargs))
+            if len(self.fill_calls) == 1:
+                raise ConnectionError("private transport details")
+            if "fromId" in kwargs:
+                return []
+            return [
+                {"id": order_id, "orderId": order_id, "time": started + order_id,
+                 "side": "BUY", "qty": "1", "price": "10", "realizedPnl": "0",
+                 "commission": "0", "commissionAsset": "USDT"}
+                for order_id in (1, 2)
+            ]
+
+        def futures_income_history(self, **kwargs):
+            self.income_calls.append(dict(kwargs))
+            if len(self.income_calls) == 1:
+                raise ConnectionError("private income transport details")
+            return []
+
+    client = Client()
+    retry = BinanceRetryExecutor(
+        policy=BinanceRetryPolicy(max_attempts=2, budget_seconds=1),
+        sleeper=lambda _delay: None,
+        rng=lambda: 0,
+    )
+
+    result = service._sync_locked(
+        BinanceUsdMGateway(client, retry_executor=retry), scope, "SOLUSDT"
+    )
+
+    assert result["status"] == "complete"
+    assert client.fill_calls[0] == client.fill_calls[1]
+    assert client.fill_calls[2]["fromId"] == 3
+    assert {call["endTime"] for call in client.fill_calls} == {cutoff}
+    assert len(client.income_calls) == 2
+    assert client.income_calls[0] == client.income_calls[1]
+    assert client.income_calls[0]["endTime"] == cutoff
+    assert store.get_sync_state(scope, "fills")["cursor"] == "2"
 
 
 def test_sync_starts_from_owned_run_without_allocation(tmp_path):

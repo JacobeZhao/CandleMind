@@ -1,9 +1,11 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { getSymbols } from "../api/client";
 import { Activity, AlertCircle, ChevronDown, Loader, RefreshCw, Search, Wifi, WifiOff } from "lucide-react";
 import clsx from "clsx";
 import StrategyEngineControl from "./StrategyEngineControl";
+import { normalizeApiError } from "../api/errors";
+import { registerRefreshReader } from "../services/refreshCoordinator";
 
 function SymbolDropdown({ symbol, symbols, onSelect, disabled = false }) {
   const [open, setOpen] = useState(false);
@@ -138,40 +140,70 @@ export default function Header() {
     refreshAll,
     refreshPending,
     refreshError,
-    refreshRevision,
     networkSwitching,
     strategyCommandPending,
     symbolSwitching,
     strategyStatusUncertain,
+    exchangeProvider,
+    exchangeSupported,
+    exchangeSwitching,
+    settingsLoaded,
   } = useApp();
+  const isExchangeSupported = exchangeSupported;
+  const exchangeReady = settingsLoaded !== false && isExchangeSupported && !exchangeSwitching;
   const [symbols, setSymbols] = useState([]);
+  const symbolsRequest = useRef({ id: 0, controller: null });
   const direction = botStatus?.position_direction ?? botStatus?.last_signal;
   const fillCount = botStatus?.filled_order_count;
   const engineState = botStatus?.engine_state || (botStatus?.running ? "running" : "stopped");
   const engineLabel = engineState === "retrying" ? "策略重试中" : "策略运行中";
 
+  const loadSymbols = useCallback(async () => {
+    symbolsRequest.current.controller?.abort();
+    if (!exchangeReady) {
+      setSymbols([]);
+      return true;
+    }
+    const controller = new AbortController();
+    const id = symbolsRequest.current.id + 1;
+    symbolsRequest.current = { id, controller };
+    try {
+      const { data } = await getSymbols(controller.signal);
+      if (controller.signal.aborted || symbolsRequest.current.id !== id) return true;
+      setSymbols(Array.isArray(data) ? data : []);
+      return true;
+    } catch (error) {
+      const parsed = normalizeApiError(error);
+      return parsed.cancelled || symbolsRequest.current.id !== id;
+    }
+  }, [exchangeReady]);
+
   useEffect(() => {
-    getSymbols().then(({ data }) => setSymbols(data)).catch(() => {});
-  }, [refreshRevision]);
+    loadSymbols();
+    return () => symbolsRequest.current.controller?.abort();
+  }, [loadSymbols]);
+
+  useEffect(() => registerRefreshReader("header:symbols", loadSymbols), [loadSymbols]);
 
   return (
-    <header className="flex min-h-16 shrink-0 items-center justify-between gap-2 border-b border-border bg-card px-2 py-2 sm:px-4">
+    <header className="flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b border-border bg-card px-2 py-2 sm:px-4">
       <div className="relative flex min-w-0 items-center gap-1.5">
         <SymbolDropdown
           symbol={symbol}
           symbols={symbols}
           onSelect={setSymbol}
-          disabled={refreshPending || networkSwitching || strategyCommandPending || symbolSwitching || strategyStatusUncertain}
+          disabled={!exchangeReady || refreshPending || networkSwitching || strategyCommandPending || symbolSwitching || strategyStatusUncertain}
         />
         <button
           type="button"
           aria-label="刷新当前数据"
           title="刷新当前数据"
           onClick={refreshAll}
-          disabled={refreshPending || networkSwitching || strategyCommandPending || symbolSwitching}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted transition-colors hover:border-accent/50 hover:text-white disabled:cursor-wait disabled:opacity-50"
+          disabled={!exchangeReady || refreshPending || networkSwitching || strategyCommandPending || symbolSwitching}
+          className="flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-border px-2 text-muted transition-colors hover:border-accent/50 hover:text-white disabled:cursor-wait disabled:opacity-50"
         >
           <RefreshCw size={15} className={clsx(refreshPending && "animate-spin")} />
+          <span className="text-xs font-medium">刷新</span>
         </button>
         {refreshError && (
           <div role="alert" className="absolute left-0 top-full z-50 mt-2 flex w-72 max-w-[calc(100vw-1rem)] items-start gap-2 rounded-md border border-red/40 bg-card px-3 py-2 text-xs text-red shadow-xl">
@@ -183,9 +215,9 @@ export default function Header() {
 
       <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
         <StrategyEngineControl />
-        <NetworkTabs />
+        {exchangeReady && <NetworkTabs />}
 
-        {botStatusLoaded && direction && direction !== "NONE" && (
+        {exchangeReady && botStatusLoaded && direction && direction !== "NONE" && (
           <span
             className={clsx(
               "hidden items-center gap-1 rounded border px-2 py-1 text-xs md:flex",
@@ -199,7 +231,7 @@ export default function Header() {
           </span>
         )}
 
-        {botStatus?.running && (
+        {exchangeReady && botStatus?.running && (
           <span className="hidden items-center gap-1.5 text-xs text-accent lg:flex">
             <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
             {engineLabel}
@@ -212,12 +244,12 @@ export default function Header() {
         <div
           className={clsx(
             "flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-xs",
-            connected ? "bg-green/10 text-green" : "bg-surface text-muted",
+            exchangeReady && connected ? "bg-green/10 text-green" : "bg-surface text-muted",
           )}
-          title={connected ? "WebSocket 已连接" : "WebSocket 未连接"}
+          title={exchangeReady && connected ? "交易所已连接" : `${exchangeProvider || "当前交易所"}未连接`}
         >
-          {connected ? <Wifi size={13} /> : <WifiOff size={13} />}
-          <span className="hidden lg:block">{connected ? "已连接" : "未连接"}</span>
+          {exchangeReady && connected ? <Wifi size={13} /> : <WifiOff size={13} />}
+          <span className="hidden lg:block">{exchangeReady && connected ? "已连接" : "未连接"}</span>
         </div>
       </div>
     </header>

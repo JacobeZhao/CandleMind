@@ -4,12 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppProvider, useApp } from "./AppContext";
 import { clearTicker, useTicker } from "./MarketTickerContext";
 import { getAccountBalance, getEngineStatus, getSettings, getStrategyConfig, saveSettings, startEngine } from "../api/client";
+import { registerRefreshReader } from "../services/refreshCoordinator";
 
 let receiveMessage;
+let changeConnection;
 
 vi.mock("../hooks/useWebSocket", () => ({
-  useWebSocket: (onMessage) => {
+  useWebSocket: (onMessage, onConnectionChange) => {
     receiveMessage = onMessage;
+    changeConnection = onConnectionChange;
   },
 }));
 
@@ -24,7 +27,7 @@ vi.mock("../api/client", () => ({
 }));
 
 function Probe() {
-  const { account, accountError, symbol, symbolSwitching, setSymbol, botStatus, botStatusLoaded, networkTab, networkSwitching, networkError, strategyCommandPending, strategyCommandError, strategyStatusUncertain, refreshRevision, refreshPending, refreshError, refreshAll, startStrategy, switchNetwork } = useApp();
+  const { account, accountError, accountPhase, positions, positionsError, positionsPhase, symbol, symbolSwitching, setSymbol, botStatus, botStatusLoaded, networkTab, networkSwitching, networkError, strategyCommandPending, strategyCommandError, strategyStatusUncertain, refreshRevision, refreshPending, refreshError, refreshAll, startStrategy, switchNetwork, exchangeProvider, exchangeSupported, exchangeSwitching, exchangeError, transportConnected, connected, switchExchange } = useApp();
   const ticker = useTicker();
   return (
     <div>
@@ -33,11 +36,21 @@ function Probe() {
       <span data-testid="bot-loaded">{String(botStatusLoaded)}</span>
       <span data-testid="bot-state">{botStatus?.engine_state ?? "none"}</span>
       <span data-testid="network">{networkTab}</span>
+      <span data-testid="exchange">{exchangeProvider}</span>
+      <span data-testid="exchange-supported">{String(exchangeSupported)}</span>
+      <span data-testid="exchange-switching">{String(exchangeSwitching)}</span>
+      <span data-testid="exchange-error">{exchangeError ?? "none"}</span>
+      <span data-testid="transport-connected">{String(transportConnected)}</span>
+      <span data-testid="exchange-connected">{String(connected)}</span>
       <span data-testid="network-switching">{String(networkSwitching)}</span>
       <span data-testid="symbol-switching">{String(symbolSwitching)}</span>
       <span data-testid="network-error">{networkError ?? "none"}</span>
       <span data-testid="account-balance">{account?.totalWalletBalance ?? "none"}</span>
       <span data-testid="account-error">{accountError ?? "none"}</span>
+      <span data-testid="account-phase">{accountPhase}</span>
+      <span data-testid="positions-count">{positions.length}</span>
+      <span data-testid="positions-phase">{positionsPhase}</span>
+      <span data-testid="positions-error">{positionsError ?? "none"}</span>
       <span data-testid="command-pending">{String(strategyCommandPending)}</span>
       <span data-testid="command-error">{strategyCommandError ?? "none"}</span>
       <span data-testid="status-uncertain">{String(strategyStatusUncertain)}</span>
@@ -46,6 +59,7 @@ function Probe() {
       <span data-testid="refresh-error">{refreshError ?? "none"}</span>
       <button onClick={() => setSymbol("SOLUSDT")}>switch</button>
       <button onClick={() => switchNetwork("main")}>mainnet</button>
+      <button onClick={() => switchExchange("okx")}>okx</button>
       <button onClick={() => { startStrategy(); startStrategy(); }}>start-twice</button>
       <button onClick={() => { refreshAll(); refreshAll(); }}>refresh-twice</button>
     </div>
@@ -56,7 +70,7 @@ describe("AppProvider ticker scheduling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     clearTicker();
-    getSettings.mockResolvedValue({ data: { symbol: "BTCUSDT", testnet: true } });
+    getSettings.mockResolvedValue({ data: { symbol: "BTCUSDT", testnet: true, exchange_provider: "binance", connected: true } });
     getAccountBalance.mockResolvedValue({ data: { totalWalletBalance: "100.00" } });
     getEngineStatus.mockResolvedValue({ data: { engine_state: "stopped", running: false } });
     getStrategyConfig.mockResolvedValue({
@@ -98,6 +112,92 @@ describe("AppProvider ticker scheduling", () => {
     expect(getAccountBalance).toHaveBeenCalledOnce();
     expect(screen.getByTestId("account-balance").textContent).toBe("100.00");
     expect(screen.getByTestId("account-error").textContent).toBe("none");
+  });
+
+  it("separates backend exchange readiness from websocket transport connectivity", async () => {
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByTestId("transport-connected").textContent).toBe("false");
+    expect(screen.getByTestId("exchange-connected").textContent).toBe("false");
+
+    act(() => changeConnection(true));
+    expect(screen.getByTestId("transport-connected").textContent).toBe("true");
+    expect(screen.getByTestId("exchange-connected").textContent).toBe("true");
+  });
+
+  it("does not request a Binance account for an unsupported initial exchange", async () => {
+    getSettings.mockResolvedValueOnce({
+      data: { symbol: "BTCUSDT", testnet: true, exchange_provider: "bybit", connected: false },
+    });
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByTestId("exchange").textContent).toBe("bybit");
+    expect(getAccountBalance).not.toHaveBeenCalled();
+    expect(screen.getByTestId("exchange-connected").textContent).toBe("false");
+  });
+
+  it("switches exchange immediately, persists it, and clears Binance state", async () => {
+    let finishSwitch;
+    saveSettings.mockReturnValueOnce(new Promise((resolve) => { finishSwitch = resolve; }));
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+    act(() => receiveMessage({ type: "positions", data: [{ symbol: "BTCUSDT", positionAmt: "1" }] }));
+
+    fireEvent.click(screen.getByText("okx"));
+
+    expect(screen.getByTestId("exchange").textContent).toBe("okx");
+    expect(screen.getByTestId("exchange-switching").textContent).toBe("true");
+    expect(screen.getByTestId("account-balance").textContent).toBe("none");
+    expect(screen.getByTestId("positions-count").textContent).toBe("0");
+    expect(saveSettings).toHaveBeenCalledWith({ exchange_provider: "okx" });
+
+    await act(async () => finishSwitch({ data: { exchange_provider: "okx", connected: false } }));
+    expect(screen.getByTestId("exchange-switching").textContent).toBe("false");
+    expect(screen.getByTestId("exchange-connected").textContent).toBe("false");
+    expect(screen.getByTestId("exchange-supported").textContent).toBe("false");
+  });
+
+  it("blocks an exchange switch until Binance strategy execution is confirmed stopped", async () => {
+    getEngineStatus.mockResolvedValueOnce({
+      data: { engine_state: "recovery_required", running: false },
+    });
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByText("okx"));
+
+    expect(screen.getByTestId("exchange").textContent).toBe("binance");
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a failed exchange switch and exposes the backend error", async () => {
+    saveSettings.mockRejectedValueOnce({ response: { data: { detail: "交易所设置保存失败" } } });
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    await act(async () => fireEvent.click(screen.getByText("okx")));
+
+    expect(screen.getByTestId("exchange").textContent).toBe("binance");
+    expect(screen.getByTestId("exchange-switching").textContent).toBe("false");
+    expect(screen.getByTestId("exchange-error").textContent).toBe("交易所设置保存失败");
+  });
+
+  it("drops an account response that arrives after the exchange scope changes", async () => {
+    let finishAccountRefresh;
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+    getAccountBalance.mockReturnValueOnce(new Promise((resolve) => { finishAccountRefresh = resolve; }));
+    saveSettings.mockResolvedValueOnce({ data: { exchange_provider: "okx", connected: false } });
+
+    fireEvent.click(screen.getByText("refresh-twice"));
+    await act(async () => Promise.resolve());
+    await act(async () => fireEvent.click(screen.getByText("okx")));
+    await act(async () => finishAccountRefresh({ data: { totalWalletBalance: "999.00" } }));
+
+    expect(screen.getByTestId("exchange").textContent).toBe("okx");
+    expect(screen.getByTestId("account-balance").textContent).toBe("none");
   });
 
   it("does not rerender non-ticker context consumers when ticker updates", async () => {
@@ -153,6 +253,40 @@ describe("AppProvider ticker scheduling", () => {
     });
     expect(screen.getByTestId("symbol").textContent).toBe("SOLUSDT");
     expect(screen.getByTestId("price").textContent).toBe("150");
+  });
+
+  it("clears positions immediately when the active symbol changes", async () => {
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+    act(() => receiveMessage({ type: "positions", data: [{ symbol: "BTCUSDT", positionAmt: "1" }] }));
+    expect(screen.getByTestId("positions-count").textContent).toBe("1");
+
+    await act(async () => fireEvent.click(screen.getByText("switch")));
+
+    expect(screen.getByTestId("symbol").textContent).toBe("SOLUSDT");
+    expect(screen.getByTestId("positions-count").textContent).toBe("0");
+    expect(screen.getByTestId("positions-phase").textContent).toBe("loading");
+  });
+
+  it("retains positions as stale for retryable errors and clears them for authentication errors", async () => {
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+    act(() => receiveMessage({ type: "positions", data: [{ symbol: "BTCUSDT", positionAmt: "1" }] }));
+
+    act(() => receiveMessage({
+      type: "positions_error",
+      data: { message: "持仓接口暂不可用", retryable: true },
+    }));
+    expect(screen.getByTestId("positions-count").textContent).toBe("1");
+    expect(screen.getByTestId("positions-phase").textContent).toBe("stale");
+
+    act(() => receiveMessage({
+      type: "positions_error",
+      data: { message: "API Key 权限无效", retryable: false },
+    }));
+    expect(screen.getByTestId("positions-count").textContent).toBe("0");
+    expect(screen.getByTestId("positions-phase").textContent).toBe("error");
+    expect(screen.getByTestId("positions-error").textContent).toContain("API Key");
   });
 
   it("loads engine status immediately without inventing a position or fill count", async () => {
@@ -446,8 +580,26 @@ describe("AppProvider ticker scheduling", () => {
     await act(async () => fireEvent.click(screen.getByText("refresh-twice")));
 
     expect(screen.getByTestId("account-balance").textContent).toBe("100.00");
+    expect(screen.getByTestId("account-phase").textContent).toBe("stale");
     expect(screen.getByTestId("bot-state").textContent).toBe("running");
     expect(screen.getByTestId("refresh-error").textContent).toContain("部分数据刷新失败");
     expect(screen.getByTestId("refresh-revision").textContent).toBe("1");
+  });
+
+  it("keeps global refresh pending until a mounted page reader settles", async () => {
+    let finishPageRead;
+    const unregister = registerRefreshReader("test:mounted-page", () => new Promise((resolve) => {
+      finishPageRead = resolve;
+    }));
+    render(<AppProvider><Probe /></AppProvider>);
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByText("refresh-twice"));
+    await act(async () => Promise.resolve());
+    expect(screen.getByTestId("refresh-pending").textContent).toBe("true");
+
+    await act(async () => finishPageRead(true));
+    expect(screen.getByTestId("refresh-pending").textContent).toBe("false");
+    unregister();
   });
 });

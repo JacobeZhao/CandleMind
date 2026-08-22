@@ -22,6 +22,7 @@ from .routes import (
 from .routes import strategy as strategy_route
 from .services.market_agent import market_agent_manager
 from .services.market_agent_state_store import MarketAgentStateError
+from .services.exchange_provider import BINANCE_PROVIDER, normalize_exchange_provider
 
 
 async def _reconnect_loop():
@@ -36,7 +37,10 @@ async def _reconnect_loop():
                     s = db.query(Settings).first()
                 finally:
                     db.close()
-                if s and active_keys(s)[0]:
+                provider = normalize_exchange_provider(
+                    getattr(s, "exchange_provider", None) if s else None
+                )
+                if s and provider == BINANCE_PROVIDER and active_keys(s)[0]:
                     await _connect_active(s)
                     logger.info("Auto-reconnect succeeded")
             except Exception:
@@ -52,8 +56,12 @@ async def lifespan(app: FastAPI):
     db = next(get_db())
     try:
         s = db.query(Settings).first()
+        provider = normalize_exchange_provider(
+            getattr(s, "exchange_provider", None) if s else None
+        )
+        app_state.exchange_provider = provider
         key_enc, _ = active_keys(s) if s else (None, None)
-        if key_enc:
+        if provider == BINANCE_PROVIDER and key_enc:
             try:
                 from .routes.settings import _connect_active
 
@@ -65,7 +73,12 @@ async def lifespan(app: FastAPI):
         db.close()
 
     try:
-        await market_agent_manager.restore()
+        if app_state.exchange_provider == BINANCE_PROVIDER:
+            await market_agent_manager.restore()
+        else:
+            await binance_ws_client.stop()
+            app_state.disconnect_exchange(app_state.exchange_provider)
+            await market_agent_manager.stop()
     except MarketAgentStateError:
         logger.error("Market agent startup rejected: a single Uvicorn worker is required")
         raise

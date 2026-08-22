@@ -15,11 +15,14 @@ from backend.app.state import app_state
 def restore_app_state():
     original_client = app_state.client
     original_symbol = app_state.symbol
+    original_provider = app_state.exchange_provider
+    app_state.exchange_provider = "binance"
     try:
         yield
     finally:
         app_state.client = original_client
         app_state.symbol = original_symbol
+        app_state.exchange_provider = original_provider
 
 
 class FakeClient:
@@ -72,6 +75,7 @@ def _api(fake: FakeClient) -> TestClient:
     orders.account_analytics_service._cache.clear()
     app_state.client = fake
     app_state.symbol = "SOLUSDT"
+    app_state.exchange_provider = "binance"
     test_app = FastAPI()
     test_app.include_router(orders.router, prefix="/api/orders")
     return TestClient(test_app)
@@ -99,6 +103,7 @@ def test_combined_open_orders_returns_partial_when_one_source_fails() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "partial"
     assert response.json()["warnings"] == ["algo_orders_unavailable"]
+    assert all(isinstance(warning, str) for warning in response.json()["warnings"])
     assert "private" not in response.text
 
 
@@ -110,7 +115,11 @@ def test_combined_open_orders_maps_total_failure_without_leaking_details() -> No
     response = _api(fake).get("/api/orders/open/combined")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Binance is temporarily unavailable"}
+    assert response.json() == {"detail": {
+        "code": "binance_unavailable",
+        "message": "Binance 请求超时，服务器已完成自动重试。",
+        "retryable": True,
+    }}
     assert "secret" not in response.text
 
 
@@ -120,7 +129,11 @@ def test_new_routes_reject_non_active_symbol_before_exchange_call() -> None:
     response = _api(fake).get("/api/orders/analytics?symbol=BTCUSDT")
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Requested symbol is not the active symbol"
+    assert response.json()["detail"] == {
+        "code": "scope_conflict",
+        "message": "请求品种与当前品种不一致，请刷新后重试。",
+        "retryable": True,
+    }
 
 
 def test_account_analytics_exposes_account_scope_and_unavailable_returns() -> None:
@@ -145,7 +158,11 @@ def test_account_analytics_maps_transport_failure_safely() -> None:
     response = _api(fake).get("/api/orders/analytics")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Binance is temporarily unavailable"}
+    assert response.json() == {"detail": {
+        "code": "binance_unavailable",
+        "message": "Binance 请求超时，服务器已完成自动重试。",
+        "retryable": True,
+    }}
     assert "credential-like" not in response.text
 
 
@@ -163,4 +180,52 @@ def test_history_maps_binance_ip_allowlist_rejection_to_actionable_401() -> None
     response = _api(fake).get("/api/orders/history?symbol=SOLUSDT")
 
     assert response.status_code == 401
-    assert "IP" in response.json()["detail"]
+    assert response.json()["detail"] == {
+        "code": "binance_access_rejected",
+        "message": "Binance 拒绝了账户请求，请核对 API Key、USD-M 合约权限和后端出口 IP 白名单。",
+        "retryable": False,
+    }
+
+
+def test_open_orders_uses_gateway_retry_and_structured_errors() -> None:
+    fake = FakeClient()
+    attempts = 0
+
+    def transient(**_params):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise Timeout("first attempt")
+        return [{"orderId": 42}]
+
+    fake.futures_get_open_orders = transient
+    response = _api(fake).get("/api/orders/open?symbol=SOLUSDT")
+
+    assert response.status_code == 200
+    assert response.json() == [{"orderId": 42}]
+    assert attempts == 2
+
+
+def test_non_binance_orders_reject_before_gateway_or_service_calls(monkeypatch) -> None:
+    fake = FakeClient()
+    client = _api(fake)
+    app_state.exchange_provider = "gateio"
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("Binance-backed service must not be called")
+
+    monkeypatch.setattr(orders.account_analytics_service, "snapshot", unexpected_call)
+    monkeypatch.setattr(orders.open_order_service, "combined", unexpected_call)
+
+    for path in (
+        "/api/orders/open",
+        "/api/orders/open/combined",
+        "/api/orders/analytics",
+        "/api/orders/history",
+        "/api/orders/trades",
+    ):
+        response = client.get(path)
+        assert response.status_code == 503
+        assert response.json()["detail"]["provider"] == "gateio"
+
+    assert fake.__dict__.get("calls", []) == []

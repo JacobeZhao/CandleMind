@@ -1,17 +1,17 @@
 import asyncio
 from decimal import Decimal
-from http.client import RemoteDisconnected
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
 from requests.exceptions import ConnectionError as RequestsConnectionError
-from requests.exceptions import SSLError as RequestsSSLError
 from requests.exceptions import Timeout as RequestsTimeout
 
 from backend.app.services import bot_engine as bot_engine_module
 from backend.app.services.bot_engine import BotEngine
+from backend.app.services.binance_errors import BinanceGatewayUnavailable
 from backend.app.services.exchange_executor import (
     AccountValidation,
     ExchangePosition,
@@ -81,7 +81,7 @@ def _snapshot():
                 "0",
             ]
         ],
-        server_time={"serverTime": 300010},
+        server_time=300010,
         funding=[],
         exchange_info={"symbols": [{"symbol": "SOLUSDT", "status": "TRADING"}]},
         mark_price={"markPrice": "100"},
@@ -193,7 +193,7 @@ class _SnapshotClient:
 
     def futures_time(self):
         self.calls.append("server_time")
-        return _snapshot().server_time
+        return {"serverTime": _snapshot().server_time}
 
     def futures_funding_rate(self, **_kwargs):
         self.calls.append("funding_rate")
@@ -362,6 +362,54 @@ def test_stop_uses_exchange_executor_reduce_only_close(tmp_path):
     ] == 1
 
 
+def test_stop_waits_for_inflight_decision_thread_before_closing(tmp_path):
+    engine = BotEngine()
+    executor = _Executor()
+    store = _store(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    events = []
+
+    def decision():
+        entered.set()
+        release.wait(timeout=2)
+        executor.position = _position(1, "0.5")
+        events.append("decision_finished")
+
+    original_execute = executor.execute
+
+    def execute(intent):
+        events.append("close_submitted")
+        return original_execute(intent)
+
+    executor.execute = execute
+    engine._executor = executor
+    engine._execution_store = store
+    engine._network = "testnet"
+    engine._symbol = "SOLUSDT"
+    engine.running = True
+
+    async def scenario():
+        worker = asyncio.create_task(engine._run_execution_critical(decision))
+        engine._task = worker
+        while not entered.is_set():
+            await asyncio.sleep(0)
+
+        stopping = asyncio.create_task(engine.stop())
+        await asyncio.sleep(0.05)
+        assert stopping.done() is False
+        assert events == []
+
+        release.set()
+        await stopping
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2.0))
+
+    assert events == ["decision_finished", "close_submitted"]
+    assert executor.position.direction == 0
+    assert engine._task is None
+
+
 def test_status_exposes_exchange_execution_fields(tmp_path):
     engine = BotEngine()
     store = _store(tmp_path)
@@ -420,10 +468,10 @@ def test_transient_snapshot_failure_retries_full_snapshot_and_recovers(
     store = _store(tmp_path)
     observed = []
 
-    async def immediate_sleep(_delay):
-        observed.append((engine.running, engine.engine_state, engine.failure_count))
+    def immediate_sleep(_delay):
+        observed.append((engine.engine_state, engine.failure_count, engine.next_retry_at))
 
-    monkeypatch.setattr(bot_engine_module.asyncio, "sleep", immediate_sleep)
+    monkeypatch.setattr(bot_engine_module.time, "sleep", immediate_sleep)
     result = asyncio.run(
         engine._cycle_with_retry(
             client, "SOLUSDT", runtime, executor, store, "testnet", 250.0
@@ -432,21 +480,28 @@ def test_transient_snapshot_failure_retries_full_snapshot_and_recovers(
 
     assert result.no_action_reason == "bar_already_processed"
     assert client.calls.count("klines") == 2
-    assert client.calls.count("server_time") == 2
-    assert client.calls.count("funding_rate") == 2
-    assert client.calls.count("exchange_info") == 2
-    assert client.calls.count("mark_price") == 2
+    assert client.calls.count("server_time") == 1
+    assert client.calls.count("funding_rate") == 1
+    assert client.calls.count("exchange_info") == 1
+    assert client.calls.count("mark_price") == 1
     assert runtime.prepare_calls == 1
-    assert observed == [(True, "retrying", 1)]
+    assert observed[0][0:2] == ("retrying", 1)
+    assert observed[0][2] is not None
     assert engine.engine_state == "running"
     assert engine.failure_count == 0
     assert engine.error_code is None
     assert engine.last_success_at is not None
 
 
-@pytest.mark.parametrize("error_type", [RequestsTimeout, RequestsConnectionError])
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    [
+        (RequestsTimeout, "Binance request timed out"),
+        (RequestsConnectionError, "Binance is temporarily unavailable"),
+    ],
+)
 def test_retry_exhaustion_halts_with_sanitized_network_state(
-    monkeypatch, tmp_path, error_type
+    monkeypatch, tmp_path, error_type, message
 ):
     engine = BotEngine()
     client = _SnapshotClient(
@@ -487,54 +542,19 @@ def test_retry_exhaustion_halts_with_sanitized_network_state(
     assert engine.running is False
     assert engine.engine_state == "network_halted"
     assert engine.failure_count == 3
-    assert engine.error_code == "network_unavailable"
-    assert engine.error_msg == "Binance is temporarily unavailable"
+    assert engine.error_code == "upstream_unavailable"
+    assert engine.error_msg == message
     assert "secret" not in engine.error_msg
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        (408, "request_timeout"),
-        (429, "rate_limited"),
-        (500, "upstream_unavailable"),
-        (503, "upstream_unavailable"),
-        (401, None),
-        (403, None),
-        (422, None),
-    ],
-)
-def test_only_approved_http_statuses_are_retryable(status, expected):
-    error = type("HttpFailure", (Exception,), {"status_code": status})()
-    assert BotEngine._retry_details(error) == expected
+def test_bot_engine_uses_gateway_retry_contract_without_local_retry_helpers():
+    assert not hasattr(BotEngine, "_retry_details")
+    assert not hasattr(BotEngine, "_retry_delay")
 
-
-@pytest.mark.parametrize(
-    "error",
-    [RemoteDisconnected("closed"), ConnectionResetError("reset")],
-)
-def test_direct_connection_failures_are_retryable(error):
-    assert BotEngine._retry_details(error) == "network_unavailable"
-
-
-def test_tls_certificate_failure_is_not_retryable():
-    assert BotEngine._retry_details(RequestsSSLError("certificate failed")) is None
-
-
-def test_rate_limit_retry_after_must_fit_the_short_retry_window():
-    short = type(
-        "RateLimit",
-        (Exception,),
-        {"status_code": 429, "response": SimpleNamespace(headers={"Retry-After": "2"})},
-    )()
-    long = type(
-        "RateLimit",
-        (Exception,),
-        {"status_code": 429, "response": SimpleNamespace(headers={"Retry-After": "30"})},
-    )()
-
-    assert BotEngine._retry_delay(1, short) == 2.0
-    assert BotEngine._retry_delay(1, long) is None
+    engine = BotEngine()
+    error = BinanceGatewayUnavailable("Binance is temporarily unavailable")
+    engine._set_terminal_error(error)
+    assert engine.engine_state == "halted"
 
 
 def test_runtime_failure_requires_reconciliation():
@@ -658,6 +678,60 @@ def test_warmup_failure_rolls_back_staged_runtime(monkeypatch, tmp_path):
     assert engine._sar_adx_runtime is None
     assert engine._executor is None
     assert engine._symbol == ""
+
+
+def test_cancelled_start_waits_for_warmup_order_then_flattens(
+    monkeypatch, tmp_path
+):
+    engine = BotEngine()
+    _runtime, executor, _store_instance = _install_start_dependencies(
+        monkeypatch, tmp_path
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    events = []
+
+    async def fetch_snapshot(*_args, **_kwargs):
+        return _snapshot()
+
+    def process_snapshot(*_args, **_kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        executor.position = _position(1, "0.5")
+        events.append("warmup_finished")
+        return bot_engine_module._CycleResult(100.0, "LONG", "OPEN LONG", 1)
+
+    original_execute = executor.execute
+
+    def execute(intent):
+        events.append("cleanup_close")
+        return original_execute(intent)
+
+    executor.execute = execute
+    monkeypatch.setattr(engine, "_fetch_snapshot", fetch_snapshot)
+    monkeypatch.setattr(engine, "_process_snapshot", process_snapshot)
+
+    async def scenario():
+        starting = asyncio.create_task(
+            engine.start(_StartClient(), _engine_config())
+        )
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        starting.cancel()
+        await asyncio.sleep(0.05)
+        assert starting.done() is False
+        assert events == []
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2.0))
+
+    assert events == ["warmup_finished", "cleanup_close"]
+    assert executor.position.direction == 0
+    assert engine._task is None
+    assert engine._executor is None
 
 
 @pytest.mark.parametrize(

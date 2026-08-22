@@ -71,7 +71,11 @@ def client():
     test_app.include_router(account.router, prefix="/api/account")
     test_app.include_router(orders.router, prefix="/api/orders")
     test_app.dependency_overrides[get_db] = lambda: FakeSession(
-        SimpleNamespace(proxy_url="http://proxy.test:8080", testnet=True)
+        SimpleNamespace(
+            proxy_url="http://proxy.test:8080",
+            testnet=True,
+            exchange_provider="binance",
+        )
     )
     return TestClient(test_app)
 
@@ -80,11 +84,14 @@ def client():
 def restore_runtime_state():
     original_client = app_state.client
     original_symbol = app_state.symbol
+    original_provider = app_state.exchange_provider
+    app_state.exchange_provider = "binance"
     try:
         yield
     finally:
         app_state.client = original_client
         app_state.symbol = original_symbol
+        app_state.exchange_provider = original_provider
 
 
 def test_health_reports_runtime_and_mocked_exit_ip(client, monkeypatch):
@@ -109,13 +116,15 @@ def test_health_reports_runtime_and_mocked_exit_ip(client, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "connected": True,
+        "provider": "binance",
         "engine_running": bot_engine.running,
         "execution_mode": "exchange",
         "testnet": True,
         "proxy_set": True,
         "exit_ip": "203.0.113.10",
         "country": "Singapore",
-        "restricted": False,
+        "restricted": None,
+        "location_advisory": "SG",
     }
     assert requests_seen == [
         (
@@ -141,7 +150,7 @@ def test_health_handles_ip_lookup_failure_without_network(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["exit_ip"] is None
     assert response.json()["restricted"] is None
-    assert response.json()["ip_error"] == "offline"
+    assert response.json()["ip_error"] == "Exit IP lookup failed"
 
 
 @pytest.mark.parametrize(
@@ -162,6 +171,37 @@ def test_account_and_order_routes_require_binance_connection(client, path):
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/account/balance",
+        "/api/account/positions",
+        "/api/orders/open",
+        "/api/orders/open/combined",
+        "/api/orders/analytics",
+        "/api/orders/history",
+        "/api/orders/trades",
+    ],
+)
+def test_non_binance_provider_rejects_before_any_client_call(client, path):
+    class FailOnAccess:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected Binance call: {name}")
+
+    app_state.client = FailOnAccess()
+    app_state.exchange_provider = "okx"
+
+    response = client.get(path)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {
+        "code": "exchange_provider_unavailable",
+        "message": "所选市场暂未接入，敬请期待。",
+        "retryable": False,
+        "provider": "okx",
+    }}
+
+
 def test_account_routes_filter_zero_balances_and_positions(client):
     app_state.client = FakeBinanceClient()
 
@@ -180,6 +220,24 @@ def test_account_routes_filter_zero_balances_and_positions(client):
     }
     assert positions.status_code == 200
     assert positions.json() == [{"symbol": "SOLUSDT", "positionAmt": "2"}]
+
+
+def test_account_route_returns_structured_retryable_failure(client):
+    fake = FakeBinanceClient()
+    fake.futures_account = lambda: (_ for _ in ()).throw(
+        TimeoutError("private credential-like detail")
+    )
+    app_state.client = fake
+
+    response = client.get("/api/account/balance")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {
+        "code": "binance_unavailable",
+        "message": "Binance 请求超时，服务器已完成自动重试。",
+        "retryable": True,
+    }}
+    assert "private" not in response.text
 
 
 def test_order_routes_forward_parameters_and_reverse_history(client):

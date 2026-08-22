@@ -1,15 +1,16 @@
 import axios from "axios";
+export { isRequestCancelled, normalizeApiError } from "./errors";
 
 const api = axios.create({ baseURL: "/api", timeout: 15000 });
 const apiAI = axios.create({ baseURL: "/api", timeout: 35000 });
 
-export const getSettings = () => api.get("/settings");
+export const getSettings = (signal) => api.get("/settings", { signal });
 export const saveSettings = (data) => api.post("/settings", data);
 export const testConnection = (testnet) => api.post("/settings/test-connection", null, { params: { testnet } });
-export const getMyIp = () => api.get("/settings/myip");
+export const getMyIp = (signal) => api.get("/settings/myip", { signal });
 export const getAccountBalance = () => api.get("/account/balance");
 
-export const getTicker = (sym) => api.get(`/market/ticker/${sym}`);
+export const getTicker = (sym, signal) => api.get(`/market/ticker/${sym}`, { signal });
 export const getKlines = (sym, interval, limit, inds = "psar", indParams = {}, signal) =>
   api.get(`/market/klines/${sym}`, {
     signal,
@@ -20,7 +21,7 @@ export const getKlines = (sym, interval, limit, inds = "psar", indParams = {}, s
       params: JSON.stringify(indParams),
     },
   });
-export const getSymbols = () => api.get("/market/symbols");
+export const getSymbols = (signal) => api.get("/market/symbols", { signal });
 export const getOrderHistory = (sym, limit, signal) => api.get("/orders/history", {
   signal,
   params: { symbol: sym, limit },
@@ -59,8 +60,8 @@ export const getEngineStatus = () => api.get("/strategy/engine/status");
 export const getStrategyCatalog = () => api.get("/strategy/catalog");
 export const getStrategyConfig = () => api.get("/strategy/config");
 export const saveStrategyConfig = (data) => api.put("/strategy/config", data);
-export const listAIProviders = () => api.get("/ai/providers");
-export const listAIConfigs = () => api.get("/ai/list");
+export const listAIProviders = (signal) => api.get("/ai/providers", { signal });
+export const listAIConfigs = (signal) => api.get("/ai/list", { signal });
 export const createAIConfig = (data) => api.post("/ai/create", data);
 export const updateAIConfig = (id, data) => api.put(`/ai/${id}`, data);
 export const deleteAIConfig = (id) => api.delete(`/ai/${id}`);

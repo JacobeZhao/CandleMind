@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from backend.app.services.binance_retry import BinanceRetryExecutor, BinanceRetryPolicy
+from backend.app.services.binance_usdm_gateway import BinanceUsdMGateway
 from backend.app.services.multi_timeframe_market_snapshot import (
     ANALYSIS_INTERVALS,
     INTERVAL_MILLISECONDS,
@@ -92,15 +94,18 @@ def test_fetch_requests_each_timeframe_once_and_uses_exchange_time():
         def futures_time(self):
             return {"serverTime": server_time_ms}
 
-        def futures_klines(self, *, symbol, interval, limit):
-            self.calls.append((symbol, interval, limit))
+        def futures_klines(self, *, symbol, interval, limit, endTime):
+            self.calls.append((symbol, interval, limit, endTime))
             return rows[interval]
 
     client = Client()
     snapshot = asyncio.run(fetch_multi_timeframe_snapshot(client, "SOLUSDT"))
 
-    assert {interval for _, interval, _ in client.calls} == set(ANALYSIS_INTERVALS)
+    assert {interval for _, interval, _, _ in client.calls} == set(ANALYSIS_INTERVALS)
     assert len(client.calls) == len(ANALYSIS_INTERVALS)
+    assert {end_time for _, _, _, end_time in client.calls} == {
+        latest_completed_cutoff(server_time_ms)
+    }
     assert snapshot["symbol"] == "SOLUSDT"
 
 
@@ -203,3 +208,41 @@ def test_read_only_gateway_exposes_only_public_market_methods():
     }]
     assert not hasattr(gateway, "futures_create_order")
     assert not hasattr(gateway, "futures_account")
+
+
+def test_kline_retry_keeps_the_exact_cutoff():
+    server_time_ms = int(
+        datetime(2026, 8, 20, 0, 7, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    cutoff = latest_completed_cutoff(server_time_ms)
+    rows = _raw_by_interval(server_time_ms)
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+            self.failed = False
+
+        def futures_time(self):
+            return {"serverTime": server_time_ms}
+
+        def futures_klines(self, **parameters):
+            self.calls.append(dict(parameters))
+            if parameters["interval"] == "5m" and not self.failed:
+                self.failed = True
+                raise ConnectionError("private transport details")
+            return rows[parameters["interval"]]
+
+    client = Client()
+    retry = BinanceRetryExecutor(
+        policy=BinanceRetryPolicy(max_attempts=2, budget_seconds=1),
+        sleeper=lambda _delay: None,
+        rng=lambda: 0,
+    )
+    gateway = ReadOnlyMarketGateway(BinanceUsdMGateway(client, retry_executor=retry))
+
+    asyncio.run(fetch_multi_timeframe_snapshot(gateway, "SOLUSDT", cutoff_ms=cutoff))
+
+    five_minute_calls = [call for call in client.calls if call["interval"] == "5m"]
+    assert len(five_minute_calls) == 2
+    assert five_minute_calls[0] == five_minute_calls[1]
+    assert {call["endTime"] for call in client.calls} == {cutoff}

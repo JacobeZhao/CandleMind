@@ -3,6 +3,8 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 import json
+import random
+import time
 from typing import Any
 import urllib.parse
 
@@ -12,11 +14,20 @@ from .proxy import rewrite_proxy_for_runtime
 from .ws_manager import manager
 
 WS_MAINNET = "wss://fstream.binance.com"
-WS_TESTNET = "wss://stream.binancefuture.com"
+WS_TESTNET = "wss://demo-fstream.binance.com"
 BROADCAST_INTERVAL_SECONDS = 0.5
 KLINE_INTERVAL = "5m"
+RECONNECT_BACKOFF_INITIAL_SECONDS = 2.0
+RECONNECT_BACKOFF_CAP_SECONDS = 60.0
+RECONNECT_STABLE_SECONDS = 30.0
 
 ClosedKlineListener = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+class _UnexpectedDisconnect(ConnectionError):
+    def __init__(self, *, stable: bool):
+        super().__init__("Binance WebSocket disconnected unexpectedly")
+        self.stable = stable
 
 
 class BinanceWSClient:
@@ -171,27 +182,57 @@ class BinanceWSClient:
         await manager.broadcast({"type": "ticker", "data": combined})
 
     async def _run(self):
-        backoff = 2
+        backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
         while self._running:
             try:
                 await self._connect()
-                backoff = 2
             except asyncio.CancelledError:
-                break
+                raise
+            except _UnexpectedDisconnect as exc:
+                if not self._running:
+                    return
+                if exc.stable:
+                    backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
+                delay = self._jittered_backoff(backoff)
+                logger.warning(
+                    "Binance WS disconnected, retry in {:.2f}s", delay
+                )
+                await asyncio.sleep(delay)
+                backoff = min(backoff * 2, RECONNECT_BACKOFF_CAP_SECONDS)
             except Exception as exc:
                 if self._running:
+                    delay = self._jittered_backoff(backoff)
                     logger.warning(
-                        "Binance WS error "
-                        f"({type(exc).__name__}: {exc}), retry {backoff}s"
+                        "Binance WS connection failed: exception_type={} "
+                        "retry_seconds={:.2f}",
+                        type(exc).__name__,
+                        delay,
                     )
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
+                    await asyncio.sleep(delay)
+                    backoff = min(backoff * 2, RECONNECT_BACKOFF_CAP_SECONDS)
+
+    @staticmethod
+    def _jittered_backoff(backoff: float) -> float:
+        nominal = min(backoff, RECONNECT_BACKOFF_CAP_SECONDS)
+        return min(
+            random.uniform(nominal * 0.5, nominal),
+            RECONNECT_BACKOFF_CAP_SECONDS,
+        )
+
+    def _mark_disconnected(self, subscription_id: int) -> None:
+        if (
+            self._running
+            and subscription_id == self._subscription_id
+            and subscription_id == self._ready_subscription_id
+        ):
+            self._ready_event.clear()
 
     async def _connect(self):
         import aiohttp
 
         symbol = self.symbol
         subscription_id = self._subscription_id
+        self._mark_disconnected(subscription_id)
         base = WS_TESTNET if self.testnet else WS_MAINNET
         stream = symbol.lower()
         url = f"{base}/ws"
@@ -218,6 +259,7 @@ class BinanceWSClient:
                 ws_kwargs["proxy"] = proxy_url
 
             async with session.ws_connect(url, **ws_kwargs) as ws:
+                connected_at = time.monotonic()
                 await ws.send_json({
                     "method": "SUBSCRIBE",
                     "params": [
@@ -229,25 +271,55 @@ class BinanceWSClient:
                     "id": 1,
                 })
                 logger.info(f"Binance WS connected: {symbol} combined ticker")
-                async for msg in ws:
-                    if not self._running or subscription_id != self._subscription_id:
-                        return
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        self._incoming_context = (symbol, subscription_id)
-                        try:
-                            # Keep the one-argument call compatible with the
-                            # readiness wrapper in routes/settings.py.
-                            await self._handle(msg.data)
-                        finally:
-                            self._incoming_context = None
-                    elif msg.type in (
-                        aiohttp.WSMsgType.ERROR,
-                        aiohttp.WSMsgType.CLOSED,
+                try:
+                    async for msg in ws:
+                        if (
+                            not self._running
+                            or subscription_id != self._subscription_id
+                        ):
+                            return
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            self._incoming_context = (symbol, subscription_id)
+                            try:
+                                # Keep the one-argument call compatible with the
+                                # readiness wrapper in routes/settings.py.
+                                await self._handle(msg.data)
+                            finally:
+                                self._incoming_context = None
+                        elif msg.type in (
+                            aiohttp.WSMsgType.ERROR,
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSING,
+                            aiohttp.WSMsgType.CLOSED,
+                        ):
+                            self._mark_disconnected(subscription_id)
+                            raise _UnexpectedDisconnect(
+                                stable=self._connection_was_stable(connected_at)
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except _UnexpectedDisconnect:
+                    raise
+                except Exception as exc:
+                    if (
+                        not self._running
+                        or subscription_id != self._subscription_id
                     ):
-                        logger.warning(
-                            f"Binance WS {msg.type.name}, reconnecting..."
-                        )
                         return
+                    self._mark_disconnected(subscription_id)
+                    raise _UnexpectedDisconnect(
+                        stable=self._connection_was_stable(connected_at)
+                    ) from exc
+
+                if self._running and subscription_id == self._subscription_id:
+                    self._mark_disconnected(subscription_id)
+                    raise _UnexpectedDisconnect(
+                        stable=self._connection_was_stable(connected_at)
+                    )
+
+    @staticmethod
+    def _connection_was_stable(connected_at: float) -> bool:
+        return time.monotonic() - connected_at >= RECONNECT_STABLE_SECONDS
 
     async def _handle(
         self,

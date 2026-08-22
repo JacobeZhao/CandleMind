@@ -9,6 +9,7 @@ from decimal import Decimal
 from time import monotonic
 from typing import Any
 
+from .binance_usdm_gateway import BinanceUsdMGateway
 from .execution_store import ExecutionStore
 from .strategy_analytics_store import SCHEMA_VERSION, StrategyAnalyticsStore, utc_ms
 
@@ -275,6 +276,11 @@ class StrategyAnalyticsService:
             lock.release()
 
     def _sync_locked(self, client: Any, scope_id: int, symbol: str) -> dict[str, Any]:
+        gateway = (
+            client
+            if isinstance(client, BinanceUsdMGateway)
+            else BinanceUsdMGateway(client)
+        )
         rows = self.store.snapshot_rows(scope_id)
         allocated_runs = [row for row in rows["runs"] if _d(row["allocation_equity"]) > 0]
         owned_run_ids = {row["run_id"] for row in rows["owned_orders"]}
@@ -311,12 +317,12 @@ class StrategyAnalyticsService:
             )
             order_ids, client_ids = self.store.owned_order_ids(scope_id)
             for _ in range(self.max_pages):
-                kwargs = {"symbol": symbol, "limit": self.page_size}
+                kwargs = {"symbol": symbol, "limit": self.page_size, "endTime": now}
                 if from_id is None:
                     kwargs["startTime"] = effective_start_ms
                 else:
                     kwargs["fromId"] = from_id
-                page = list(client.futures_account_trades(**kwargs) or [])
+                page = gateway.account_trades(**kwargs)
                 owned = [
                     fill for fill in page
                     if str(fill.get("orderId")) in order_ids
@@ -397,10 +403,10 @@ class StrategyAnalyticsService:
                 if cursor > now:
                     break
                 window_end = min(cursor + INCOME_WINDOW_MS - 1, now)
-                page = list(client.futures_income_history(
+                page = gateway.income_history(
                     symbol=symbol, incomeType="FUNDING_FEE", startTime=cursor,
                     endTime=window_end, limit=self.page_size,
-                ) or [])
+                )
                 counts["income"] += self.store.upsert_income(scope_id, page)
                 if len(page) >= self.page_size:
                     income_window_full = True

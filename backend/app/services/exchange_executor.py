@@ -10,8 +10,17 @@ import time
 from typing import Any, Protocol
 
 from binance.exceptions import BinanceRequestException
-from requests.exceptions import ConnectionError as RequestsConnectionError
-from requests.exceptions import Timeout as RequestsTimeout
+
+from .binance_errors import (
+    BinanceFailureCategory,
+    BinanceGatewayAuthenticationError,
+    BinanceGatewayRejected,
+    BinanceGatewayUnavailable,
+    BinanceSubmissionOutcome,
+    classify_binance_failure,
+)
+from .binance_retry import BinanceOperation
+from .binance_usdm_gateway import BinanceUsdMGateway
 
 
 class ExchangeExecutionError(RuntimeError):
@@ -126,12 +135,6 @@ class ExecutionResult:
 
 class FuturesClient(Protocol):
     def futures_create_order(self, **params: Any) -> dict[str, Any]: ...
-    def futures_get_order(self, **params: Any) -> dict[str, Any]: ...
-    def futures_get_position_mode(self) -> dict[str, Any]: ...
-    def futures_position_information(self, **params: Any) -> list[dict[str, Any]]: ...
-    def futures_get_open_orders(self, **params: Any) -> list[dict[str, Any]]: ...
-    def futures_get_open_algo_orders(self, **params: Any) -> list[dict[str, Any]]: ...
-    def futures_account_balance(self) -> list[dict[str, Any]]: ...
 
 
 class ExchangeExecutor:
@@ -139,6 +142,7 @@ class ExchangeExecutor:
 
     def __init__(self, client: FuturesClient, rules: SymbolRules) -> None:
         self.client = client
+        self.gateway = BinanceUsdMGateway(client)
         self.rules = rules
 
     def layer_quantity(
@@ -192,25 +196,23 @@ class ExchangeExecutor:
         allow_open_orders: bool = False,
     ) -> AccountValidation:
         normalized = _symbol(symbol)
-        mode = self.client.futures_get_position_mode()
+        mode = self.gateway.position_mode()
         if bool(mode.get("dualSidePosition")):
             raise UnsupportedAccountError("hedge mode is not supported")
 
-        positions = self.client.futures_position_information(symbol=normalized)
+        positions = self.gateway.position_information(symbol=normalized)
         quantity = sum((_decimal(item.get("positionAmt", "0"), "position amount") for item in positions), Decimal("0"))
         if quantity and not allow_existing_position:
             raise UnsupportedAccountError("an existing position requires reconciliation")
-        open_orders = list(self.client.futures_get_open_orders(symbol=normalized) or [])
-        algo_orders = list(
-            self.client.futures_get_open_algo_orders(symbol=normalized) or []
-        )
+        open_orders = self.gateway.reconcile_open_orders(normalized)
+        algo_orders = self.gateway.open_algo_orders(normalized)
         open_order_count = len(open_orders) + len(algo_orders)
         if open_order_count and not allow_open_orders:
             raise UnsupportedAccountError("existing open orders require reconciliation")
         return AccountValidation(normalized, quantity, open_order_count)
 
     def available_balance(self, asset: str = "USDT") -> Decimal:
-        balances = self.client.futures_account_balance()
+        balances = self.gateway.account_balance()
         row = next((item for item in balances if item.get("asset") == asset), None)
         if row is None:
             raise ExchangeExecutionError(f"{asset} futures balance is unavailable")
@@ -221,7 +223,7 @@ class ExchangeExecutor:
 
     def current_position(self, symbol: str) -> ExchangePosition:
         normalized = _symbol(symbol)
-        rows = self.client.futures_position_information(symbol=normalized)
+        rows = self.gateway.reconcile_position_information(symbol=normalized)
         if not rows:
             raise ExchangeExecutionError(f"position information is unavailable for {normalized}")
         non_flat = [row for row in rows if _decimal(row.get("positionAmt", "0"), "position amount")]
@@ -269,18 +271,32 @@ class ExchangeExecutor:
 
         recovered = False
         try:
-            payload = self.client.futures_create_order(**params)
-        except (
-            BinanceRequestException,
-            RequestsConnectionError,
-            RequestsTimeout,
-            TimeoutError,
-            ConnectionError,
-            OSError,
-        ) as exc:
+            payload = self.gateway.retry_executor.run(
+                BinanceOperation.WRITE_SUBMIT,
+                lambda: self.client.futures_create_order(**params),
+            )
+        except Exception as exc:
+            failure = classify_binance_failure(exc)
+            if failure.submission_outcome is BinanceSubmissionOutcome.NOT_ACCEPTED:
+                error_type = (
+                    BinanceGatewayUnavailable
+                    if failure.retryable
+                    else BinanceGatewayRejected
+                )
+                raise error_type(failure.safe_message, failure=failure) from exc
+            if not (
+                failure.retryable
+                or isinstance(exc, (BinanceRequestException, OSError))
+            ):
+                error_type = (
+                    BinanceGatewayAuthenticationError
+                    if failure.category == BinanceFailureCategory.AUTHENTICATION
+                    else BinanceGatewayRejected
+                )
+                raise error_type(failure.safe_message, failure=failure) from exc
             recovered = True
             try:
-                payload = self.client.futures_get_order(
+                payload = self.gateway.order(
                     symbol=symbol,
                     origClientOrderId=client_order_id,
                 )
@@ -298,7 +314,7 @@ class ExchangeExecutor:
                 return result
             time.sleep(0.2)
             try:
-                payload = self.client.futures_get_order(
+                payload = self.gateway.order(
                     symbol=symbol,
                     origClientOrderId=client_order_id,
                 )
@@ -322,7 +338,7 @@ class ExchangeExecutor:
         side = "SELL" if (intent.direction == 1) == closing else "BUY"
         client_order_id = deterministic_client_order_id(intent)
         try:
-            payload = self.client.futures_get_order(
+            payload = self.gateway.order(
                 symbol=symbol,
                 origClientOrderId=client_order_id,
             )

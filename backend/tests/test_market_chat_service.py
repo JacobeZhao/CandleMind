@@ -3,6 +3,9 @@ import asyncio
 import pytest
 
 from backend.app.services import market_chat
+from backend.app.services.binance_retry import BinanceRetryExecutor, BinanceRetryPolicy
+from backend.app.services.binance_usdm_gateway import BinanceUsdMGateway
+from backend.app.services.read_only_market_gateway import ReadOnlyMarketGateway
 
 
 def _klines(count=80, interval_ms=3_600_000, start=1_700_000_000_000):
@@ -145,4 +148,33 @@ def test_fetch_uses_separate_completed_hourly_data():
 
     snapshot = asyncio.run(market_chat.fetch_market_snapshot(Client(), "SOLUSDT", "5m"))
     assert [call["interval"] for call in calls] == ["5m", "1h"]
+    assert {call["endTime"] for call in calls} == {hourly[-1][6]}
     assert snapshot["interval"] == "5m"
+
+
+def test_fetch_retry_preserves_end_time_and_sanitizes_failure():
+    rows = _klines()
+    calls = []
+
+    class Client:
+        def futures_time(self):
+            return {"serverTime": rows[-1][6] + 1}
+
+        def futures_klines(self, **kwargs):
+            calls.append(dict(kwargs))
+            raise ConnectionError("https://key:secret@private.invalid")
+
+    retry = BinanceRetryExecutor(
+        policy=BinanceRetryPolicy(max_attempts=2, budget_seconds=1),
+        sleeper=lambda _delay: None,
+        rng=lambda: 0,
+    )
+    gateway = ReadOnlyMarketGateway(BinanceUsdMGateway(Client(), retry_executor=retry))
+
+    with pytest.raises(market_chat.MarketDataError) as captured:
+        asyncio.run(market_chat.fetch_market_snapshot(gateway, "SOLUSDT", "1h"))
+
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0]["endTime"] == rows[-1][6]
+    assert "secret" not in str(captured.value)

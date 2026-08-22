@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getTicker } from "../api/client";
 import MarketSummary from "./MarketSummary";
+import { refreshMountedReaders } from "../services/refreshCoordinator";
 
 let currentTicker;
 
@@ -51,12 +52,23 @@ describe("MarketSummary", () => {
     expect(screen.getByText("24H低").nextElementSibling.textContent).toContain("$138.00");
   });
 
-  it("reloads the REST snapshot when the global refresh revision changes", async () => {
-    const view = render(<MarketSummary symbol="SOLUSDT" refreshRevision={0} />);
+  it("registers its REST snapshot with the mounted global refresh", async () => {
+    render(<MarketSummary symbol="SOLUSDT" />);
     await act(async () => Promise.resolve());
     expect(getTicker).toHaveBeenCalledTimes(1);
-    view.rerender(<MarketSummary symbol="SOLUSDT" refreshRevision={1} />);
-    await act(async () => Promise.resolve());
+    await act(async () => refreshMountedReaders());
     expect(getTicker).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the same-symbol snapshot stale after a transient refresh failure", async () => {
+    render(<MarketSummary symbol="SOLUSDT" />);
+    await act(async () => Promise.resolve());
+    getTicker.mockRejectedValueOnce({ response: { status: 503, data: { detail: "行情源暂不可用" } } });
+
+    await act(async () => refreshMountedReaders());
+
+    expect(screen.getByText("当前价格").nextElementSibling.textContent).toContain("$140.00");
+    expect(screen.getByRole("alert").textContent).toContain("行情可能已过期");
+    expect(screen.getByRole("button", { name: "重试行情摘要" })).toBeTruthy();
   });
 });

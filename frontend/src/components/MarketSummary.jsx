@@ -1,6 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, Loader, RefreshCw } from "lucide-react";
 import { getTicker } from "../api/client";
+import { normalizeApiError } from "../api/errors";
 import { useTicker } from "../context/MarketTickerContext";
+import { registerRefreshReader } from "../services/refreshCoordinator";
 
 function normalizeTicker(data, fallbackSymbol) {
   if (!data) return null;
@@ -35,35 +38,76 @@ function Quote({ label, value }) {
   );
 }
 
-export default function MarketSummary({ symbol, indicators = null, refreshRevision = 0 }) {
+export default function MarketSummary({ symbol, indicators = null, refreshRevision: _refreshRevision = 0 }) {
   const tickerValue = useTicker();
   const ticker = tickerValue?.ticker ?? tickerValue;
-  const [restTicker, setRestTicker] = useState(null);
+  const [state, setState] = useState({ phase: "loading", data: null, error: null, scopeKey: null });
+  const requestRef = useRef({ id: 0, controller: null });
+
+  const loadTicker = useCallback(async (replace = false) => {
+    if (!symbol) {
+      setState({ phase: "empty", data: null, error: null, scopeKey: null });
+      return true;
+    }
+    requestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const id = requestRef.current.id + 1;
+    requestRef.current = { id, controller };
+    setState((current) => {
+      const sameScope = current.scopeKey === symbol;
+      return {
+        phase: !replace && sameScope && current.data ? "refreshing" : "loading",
+        data: replace || !sameScope ? null : current.data,
+        error: null,
+        scopeKey: symbol,
+      };
+    });
+    try {
+      const { data } = await getTicker(symbol, controller.signal);
+      if (controller.signal.aborted || requestRef.current.id !== id) return true;
+      if (data?.symbol && data.symbol !== symbol) {
+        setState((current) => ({
+          ...current,
+          phase: current.data ? "stale" : "error",
+          error: "行情响应范围与当前品种不一致，请重试。",
+        }));
+        return false;
+      }
+      const normalized = normalizeTicker(data, symbol);
+      setState({
+        phase: normalized ? "complete" : "empty",
+        data: normalized,
+        error: null,
+        scopeKey: symbol,
+      });
+      return true;
+    } catch (error) {
+      const parsed = normalizeApiError(error, "行情摘要加载失败，请稍后重试。");
+      if (parsed.cancelled || requestRef.current.id !== id) return true;
+      setState((current) => ({
+        ...current,
+        data: parsed.retryable ? current.data : null,
+        phase: parsed.retryable && current.data ? "stale" : "error",
+        error: parsed.message,
+      }));
+      return false;
+    }
+  }, [symbol]);
 
   useEffect(() => {
-    if (!symbol) {
-      setRestTicker(null);
-      return undefined;
-    }
-    let cancelled = false;
-    setRestTicker(null);
-    getTicker(symbol)
-      .then(({ data }) => {
-        if (cancelled || (data.symbol && data.symbol !== symbol)) return;
-        setRestTicker(normalizeTicker(data, symbol));
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshRevision, symbol]);
+    loadTicker(true);
+    return () => requestRef.current.controller?.abort();
+  }, [loadTicker]);
+
+  useEffect(() => registerRefreshReader("markets:summary", () => loadTicker(false)), [loadTicker]);
 
   const display = useMemo(() => {
+    const restTicker = state.scopeKey === symbol ? state.data : null;
     const matchingRest = restTicker?.symbol === symbol ? restTicker : null;
     const matchingLive = ticker?.symbol === symbol ? normalizeTicker(ticker, symbol) : null;
     if (!matchingRest && !matchingLive) return null;
     return { ...matchingRest, ...matchingLive };
-  }, [restTicker, ticker, symbol]);
+  }, [state.data, state.scopeKey, ticker, symbol]);
 
   return (
     <section className="flex min-w-max flex-nowrap items-center gap-5" aria-label={`${symbol || "当前品种"} 行情摘要`}>
@@ -73,6 +117,15 @@ export default function MarketSummary({ symbol, indicators = null, refreshRevisi
       <Quote label="ADX(14)" value={formatIndicator(indicators?.adx)} />
       <Quote label="ATR(14)" value={formatPrice(indicators?.atr)} />
       <Quote label="RSI(14)" value={formatIndicator(indicators?.rsi)} />
+      {state.phase === "loading" && <span role="status" className="inline-flex items-center gap-1 text-xs text-muted"><Loader size={12} className="animate-spin" />行情加载中</span>}
+      {["error", "stale"].includes(state.phase) && (
+        <span role="alert" className="inline-flex max-w-72 items-center gap-1 text-xs text-accent">
+          <AlertCircle size={12} className="shrink-0" />
+          <span className="truncate">{state.phase === "stale" ? "行情可能已过期" : state.error}</span>
+          <button type="button" aria-label="重试行情摘要" title="重试行情摘要" onClick={() => loadTicker(state.phase === "error")} className="shrink-0 text-white"><RefreshCw size={12} /></button>
+        </span>
+      )}
+      {state.phase === "empty" && <span className="text-xs text-muted">暂无行情</span>}
     </section>
   );
 }

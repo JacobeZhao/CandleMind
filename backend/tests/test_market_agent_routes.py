@@ -38,6 +38,7 @@ class FakeManager:
 def _client(monkeypatch):
     manager = FakeManager()
     monkeypatch.setattr(route, "market_agent_manager", manager)
+    monkeypatch.setattr(route.app_state, "exchange_provider", "binance")
     app = FastAPI()
     app.include_router(route.router, prefix="/api/ai")
     return TestClient(app), manager
@@ -82,6 +83,7 @@ def test_lifecycle_events_validation_and_redacted_errors(monkeypatch):
     assert client.get("/api/ai/market-agent/events?after_sequence=2").json() == {
         "events": [{"sequence": 3}],
         "latest_sequence": 3,
+        "provider": "binance",
     }
     assert client.get("/api/ai/market-agent/events?limit=101").status_code == 422
     assert client.post("/api/ai/market-agent/stop").json() == {
@@ -101,3 +103,28 @@ def test_manual_message_uses_the_persistent_agent_contract(monkeypatch):
     assert response.status_code == 200
     assert response.json()["type"] == "assistant_message"
     assert manager.messages == [("SOLUSDT", "Analyze the current regime")]
+
+
+def test_non_binance_blocks_start_and_messages_but_keeps_stop_and_status(monkeypatch):
+    client, manager = _client(monkeypatch)
+    route.app_state.exchange_provider = "okx"
+
+    start = client.post("/api/ai/market-agent/start", json={"symbol": "SOLUSDT"})
+    message = client.post(
+        "/api/ai/market-agent/messages",
+        json={"symbol": "SOLUSDT", "content": "Analyze"},
+    )
+
+    for response in (start, message):
+        assert response.status_code == 503
+        assert response.json()["detail"] == {
+            "code": "exchange_provider_unavailable",
+            "message": "所选市场暂未接入，敬请期待。",
+            "retryable": False,
+            "provider": "okx",
+        }
+    assert manager.started_symbols == []
+    assert manager.messages == []
+    assert client.get("/api/ai/market-agent/status").json()["provider"] == "okx"
+    assert client.get("/api/ai/market-agent/events").json()["provider"] == "okx"
+    assert client.post("/api/ai/market-agent/stop").status_code == 200

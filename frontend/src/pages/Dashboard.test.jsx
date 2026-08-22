@@ -21,6 +21,9 @@ vi.mock("react-router-dom", () => ({
 function renderDashboard(botStatus, botStatusLoaded = true, ticker = null) {
   tickerState = ticker;
   appState = {
+    exchangeProvider: "binance",
+    exchangeSupported: true,
+    exchangeSwitching: false,
     account: {},
     accountError: null,
     positions: [],
@@ -57,6 +60,9 @@ describe("Dashboard strategy status", () => {
 
   it("does not display a stale balance after account authentication fails", () => {
     appState = {
+      exchangeProvider: "binance",
+      exchangeSupported: true,
+      exchangeSwitching: false,
       account: null,
       accountError: "Binance 账户读取失败，请检查 API Key、合约权限和出口 IP 白名单。",
       positions: [],
@@ -70,6 +76,27 @@ describe("Dashboard strategy status", () => {
     expect(screen.getByRole("alert").textContent).toContain("Binance 账户读取失败");
     expect(screen.getAllByText("--").length).toBeGreaterThanOrEqual(4);
     expect(screen.queryByText("$0.00")).toBeNull();
+  });
+
+  it("labels retained positions as stale when the position feed is temporarily unavailable", () => {
+    appState = {
+      exchangeProvider: "binance",
+      exchangeSupported: true,
+      exchangeSwitching: false,
+      account: {},
+      accountError: null,
+      positions: [{ symbol: "SOLUSDT", positionAmt: "1", entryPrice: "100", markPrice: "101", unrealizedProfit: "1" }],
+      positionsError: "持仓接口暂不可用",
+      positionsPhase: "stale",
+      connected: true,
+      botStatus: null,
+      botStatusLoaded: false,
+    };
+
+    render(<Dashboard />);
+
+    expect(screen.getByRole("alert").textContent).toContain("显示上次成功持仓");
+    expect(screen.getByText("SOLUSDT")).toBeTruthy();
   });
 
   it("shows the current exchange position and filled order count", () => {
@@ -107,6 +134,9 @@ describe("Dashboard strategy status", () => {
 
   it("keeps strategy failure status visible when market data is disconnected", () => {
     appState = {
+      exchangeProvider: "binance",
+      exchangeSupported: true,
+      exchangeSwitching: false,
       account: {},
       accountError: null,
       positions: [],
@@ -143,5 +173,19 @@ describe("Dashboard strategy status", () => {
     expect(screen.getByText(stateLabel)).toBeTruthy();
     expect(screen.getByText(message)).toBeTruthy();
     expect(screen.queryByText(/sensitive raw exception/)).toBeNull();
+  });
+
+  it("replaces Binance account content for an unavailable exchange", () => {
+    appState = {
+      exchangeProvider: "bybit",
+      exchangeSupported: false,
+      exchangeSwitching: false,
+    };
+
+    render(<Dashboard />);
+
+    expect(screen.getByRole("heading", { name: "Bybit 未连接" })).toBeTruthy();
+    expect(screen.getByText("未来会接入，敬请期待")).toBeTruthy();
+    expect(screen.queryByText("账户净值")).toBeNull();
   });
 });

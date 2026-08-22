@@ -14,6 +14,11 @@ from backend.app.services.exchange_executor import (
     UnsupportedAccountError,
     deterministic_client_order_id,
 )
+from backend.app.services.binance_errors import BinanceGatewayUnavailable
+from backend.app.services.binance_retry import (
+    BinanceRetryExecutor,
+    ProcessCooldown,
+)
 
 
 EXCHANGE_INFO = {
@@ -223,6 +228,66 @@ def test_ambiguous_submit_is_looked_up_without_resubmit(rules):
     assert result.order_id == 456
 
 
+def test_known_not_accepted_submit_retries_with_the_same_client_id(rules):
+    client = FakeClient()
+    attempts = []
+
+    def create(**params):
+        attempts.append(dict(params))
+        if len(attempts) == 1:
+            error = RuntimeError("private upstream response")
+            error.status_code = 503
+            error.code = -1008
+            error.message = "Request throttled by system-level protection."
+            error.response = None
+            raise error
+        return client.create_result
+
+    client.futures_create_order = create
+    executor = ExchangeExecutor(client, rules)
+    executor.gateway.retry_executor = BinanceRetryExecutor(
+        sleeper=lambda _delay: None,
+        rng=lambda: 0,
+        cooldown=ProcessCooldown(),
+    )
+
+    result = executor.execute(
+        OrderIntent("SOLUSDT", OrderIntentType.OPEN, 1, Decimal("1.2"), "decision-safe-retry")
+    )
+
+    assert result.status == "FILLED"
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
+    assert client.lookups == []
+
+
+def test_unknown_503_submit_is_only_reconciled(rules):
+    client = FakeClient()
+    error = RuntimeError("private upstream response")
+    error.status_code = 503
+    error.code = -1000
+    error.message = "Unknown error, please check your request or try again later."
+    error.response = None
+    client.create_error = error
+    client.lookup_result = {
+        "symbol": "SOLUSDT",
+        "orderId": 789,
+        "clientOrderId": "recovered",
+        "status": "FILLED",
+        "side": "BUY",
+        "executedQty": "1.2",
+        "avgPrice": "101",
+    }
+
+    result = ExchangeExecutor(client, rules).execute(
+        OrderIntent("SOLUSDT", OrderIntentType.OPEN, 1, Decimal("1.2"), "decision-unknown")
+    )
+
+    assert result.recovered_after_ambiguous_submit is True
+    assert len(client.created) == 1
+    assert len(client.lookups) == 1
+
+
 def test_non_terminal_market_response_is_queried_until_filled(rules, monkeypatch):
     client = FakeClient()
     client.create_result = {
@@ -248,14 +313,20 @@ def test_non_terminal_market_response_is_queried_until_filled(rules, monkeypatch
 def test_unknown_ambiguous_submit_requires_recovery(rules, transport_error):
     client = FakeClient()
     client.create_error = transport_error
-    client.lookup_error = RuntimeError("not found")
+    client.lookup_error = RequestsTimeout("lookup timed out")
     executor = ExchangeExecutor(client, rules)
+    executor.gateway.retry_executor = BinanceRetryExecutor(
+        sleeper=lambda _delay: None,
+        rng=lambda: 0,
+        cooldown=ProcessCooldown(),
+    )
 
     with pytest.raises(RecoveryRequiredError, match="unknown exchange state"):
         executor.execute(
             OrderIntent("SOLUSDT", OrderIntentType.OPEN, 1, Decimal("1.2"), "decision-3")
         )
     assert len(client.created) == 1
+    assert len(client.lookups) == 3
 
 
 def test_account_validation_rejects_hedge_mode(rules):
@@ -309,7 +380,7 @@ def test_account_validation_fails_closed_when_any_open_order_query_fails(
     else:
         client.open_algo_orders_error = TimeoutError("algo orders timed out")
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(BinanceGatewayUnavailable):
         ExchangeExecutor(client, rules).validate_one_way_account(
             "SOLUSDT", allow_open_orders=True
         )

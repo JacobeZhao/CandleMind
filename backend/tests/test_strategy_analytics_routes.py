@@ -32,9 +32,10 @@ def test_router_exposes_only_backend_scoped_paths():
 
 
 def test_active_scope_uses_db_network_symbol_and_decrypted_key(monkeypatch):
-    settings = SimpleNamespace(testnet=False, symbol="ETHUSDT")
+    settings = SimpleNamespace(testnet=False, symbol="ETHUSDT", exchange_provider="binance")
     monkeypatch.setattr(routes.app_state, "client", SimpleNamespace(API_KEY="active-api-key"))
     monkeypatch.setattr(routes.app_state, "symbol", "ETHUSDT")
+    monkeypatch.setattr(routes.app_state, "exchange_provider", "binance")
     monkeypatch.setattr(routes, "active_keys", lambda value: ("encrypted", "secret"))
     monkeypatch.setattr(routes, "decrypt", lambda value: "active-api-key")
 
@@ -47,9 +48,10 @@ def test_active_scope_uses_db_network_symbol_and_decrypted_key(monkeypatch):
 
 
 def test_get_returns_stale_snapshot_with_sanitized_refresh_failure(monkeypatch):
-    settings = SimpleNamespace(testnet=True, symbol="SOLUSDT")
+    settings = SimpleNamespace(testnet=True, symbol="SOLUSDT", exchange_provider="binance")
     monkeypatch.setattr(routes.app_state, "client", SimpleNamespace(API_KEY="key"))
     monkeypatch.setattr(routes.app_state, "symbol", "SOLUSDT")
+    monkeypatch.setattr(routes.app_state, "exchange_provider", "binance")
     monkeypatch.setattr(routes, "active_keys", lambda value: ("encrypted", "secret"))
     monkeypatch.setattr(routes, "decrypt", lambda value: "key")
 
@@ -72,7 +74,9 @@ def test_get_returns_stale_snapshot_with_sanitized_refresh_failure(monkeypatch):
 
 def test_scope_rejects_disconnected_backend():
     original = routes.app_state.client
+    original_provider = routes.app_state.exchange_provider
     routes.app_state.client = None
+    routes.app_state.exchange_provider = "binance"
     try:
         try:
             routes._active_scope(_Db(SimpleNamespace(testnet=True, symbol="SOLUSDT")))
@@ -82,12 +86,14 @@ def test_scope_rejects_disconnected_backend():
             raise AssertionError("disconnected scope was accepted")
     finally:
         routes.app_state.client = original
+        routes.app_state.exchange_provider = original_provider
 
 
 def test_scope_rejects_client_and_committed_credential_mismatch(monkeypatch):
     settings = SimpleNamespace(testnet=True, symbol="SOLUSDT")
     monkeypatch.setattr(routes.app_state, "client", SimpleNamespace(API_KEY="new-key"))
     monkeypatch.setattr(routes.app_state, "symbol", "SOLUSDT")
+    monkeypatch.setattr(routes.app_state, "exchange_provider", "binance")
     monkeypatch.setattr(routes, "active_keys", lambda value: ("encrypted", "secret"))
     monkeypatch.setattr(routes, "decrypt", lambda value: "old-key")
 
@@ -97,3 +103,31 @@ def test_scope_rejects_client_and_committed_credential_mismatch(monkeypatch):
         assert exc.status_code == 409
     else:
         raise AssertionError("mismatched client and committed credentials were accepted")
+
+
+def test_non_binance_analytics_rejects_before_credentials_or_sync(monkeypatch):
+    settings = SimpleNamespace(
+        testnet=True,
+        symbol="SOLUSDT",
+        exchange_provider="a_share",
+    )
+    monkeypatch.setattr(routes.app_state, "client", object())
+    monkeypatch.setattr(routes.app_state, "exchange_provider", "a_share")
+    active_keys = lambda _settings: (_ for _ in ()).throw(
+        AssertionError("credentials must not be read")
+    )
+    monkeypatch.setattr(routes, "active_keys", active_keys)
+
+    for endpoint in (routes.get_strategy_analytics, routes.sync_strategy_analytics):
+        try:
+            asyncio.run(endpoint(_Db(settings)))
+        except HTTPException as exc:
+            assert exc.status_code == 503
+            assert exc.detail == {
+                "code": "exchange_provider_unavailable",
+                "message": "所选市场暂未接入，敬请期待。",
+                "retryable": False,
+                "provider": "a_share",
+            }
+        else:
+            raise AssertionError("non-Binance analytics was accepted")

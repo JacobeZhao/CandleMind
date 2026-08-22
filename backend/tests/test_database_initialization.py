@@ -117,3 +117,64 @@ print(json.dumps({"before": before, "after": after, "tables": tables}))
         "strategies",
         "strategy_configuration",
     ]
+
+
+def test_initialization_adds_exchange_provider_without_changing_legacy_settings(tmp_path):
+    result = _run_database_contract(
+        tmp_path,
+        """
+import json
+import os
+import sqlite3
+from pathlib import Path
+
+database_path = Path(os.environ["DATA_DIR"]) / "trader.db"
+connection = sqlite3.connect(database_path)
+connection.execute(
+    '''CREATE TABLE settings (
+        id INTEGER PRIMARY KEY,
+        api_key_enc TEXT,
+        api_secret_enc TEXT,
+        api_key_test_enc TEXT,
+        api_secret_test_enc TEXT,
+        api_key_main_enc TEXT,
+        api_secret_main_enc TEXT,
+        testnet BOOLEAN,
+        symbol VARCHAR(20),
+        interval VARCHAR(10),
+        proxy_url VARCHAR(200)
+    )'''
+)
+connection.execute(
+    "INSERT INTO settings VALUES (1, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?, ?)",
+    ("SOLUSDT", "5m", "http://proxy.test:8080"),
+)
+connection.commit()
+connection.close()
+
+from backend.app import database
+database.init_db()
+session = database.SessionLocal()
+try:
+    settings = session.query(database.Settings).one()
+    result = {
+        "provider": settings.exchange_provider,
+        "testnet": settings.testnet,
+        "symbol": settings.symbol,
+        "interval": settings.interval,
+        "proxy_url": settings.proxy_url,
+    }
+finally:
+    session.close()
+    database.engine.dispose()
+print(json.dumps(result))
+""",
+    )
+
+    assert result == {
+        "provider": "binance",
+        "testnet": False,
+        "symbol": "SOLUSDT",
+        "interval": "5m",
+        "proxy_url": "http://proxy.test:8080",
+    }

@@ -1,10 +1,27 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Settings from "./Settings";
 import * as client from "../api/client";
+import { refreshMountedReaders } from "../services/refreshCoordinator";
 
-const appState = { refreshRevision: 0, setConnected: vi.fn() };
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
+
+const appState = {
+  exchangeProvider: "binance",
+  exchangeSwitching: false,
+  exchangeError: null,
+  switchExchange: vi.fn(),
+  setBinanceConnected: vi.fn(),
+};
 
 vi.mock("../context/AppContext", () => ({
   useApp: () => appState,
@@ -30,26 +47,194 @@ describe("Settings", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    appState.refreshRevision = 0;
+    appState.exchangeProvider = "binance";
+    appState.exchangeSwitching = false;
+    appState.exchangeError = null;
     client.getSettings.mockResolvedValue({
-      data: { test_key_set: false, main_key_set: false, proxy_url: "", connected: false },
+      data: { test_key_set: false, main_key_set: false, proxy_url: "", connected: false, exchange_provider: "binance" },
     });
     client.saveSettings.mockResolvedValue({ data: { message: "保存成功" } });
+    client.getMyIp.mockResolvedValue({ data: { ip: "203.0.113.1", via_proxy: false } });
     client.listAIProviders.mockResolvedValue({ data: [] });
     client.listAIConfigs.mockResolvedValue({ data: [] });
   });
 
+  it("detects the outbound IP on mount and every 60 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<Settings />);
+      await act(async () => Promise.resolve());
+
+      expect(client.getMyIp).toHaveBeenCalledOnce();
+      expect(client.getMyIp.mock.calls[0][0]).toBeInstanceOf(AbortSignal);
+
+      await act(async () => vi.advanceTimersByTimeAsync(59_999));
+      expect(client.getMyIp).toHaveBeenCalledOnce();
+
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(client.getMyIp).toHaveBeenCalledTimes(2);
+    } finally {
+      cleanup();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains the previous result while a scheduled detection is pending", async () => {
+    vi.useFakeTimers();
+    const nextDetection = deferred();
+    client.getMyIp
+      .mockResolvedValueOnce({ data: { ip: "203.0.113.10", via_proxy: true } })
+      .mockReturnValueOnce(nextDetection.promise);
+    try {
+      render(<Settings />);
+      await act(async () => Promise.resolve());
+      expect(screen.getByText("203.0.113.10")).toBeTruthy();
+
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(screen.getByText("203.0.113.10")).toBeTruthy();
+      expect(screen.getByRole("button", { name: /检测中/ }).disabled).toBe(true);
+
+      await act(async () => nextDetection.resolve({ data: { ip: "203.0.113.11", via_proxy: false } }));
+      expect(screen.getByText("203.0.113.11")).toBeTruthy();
+    } finally {
+      cleanup();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("prevents scheduled and manual detections from overlapping", async () => {
+    vi.useFakeTimers();
+    const pending = deferred();
+    client.getMyIp.mockReturnValueOnce(pending.promise);
+    try {
+      render(<Settings />);
+      await act(async () => Promise.resolve());
+      const detectButton = screen.getByRole("button", { name: /检测中/ });
+      expect(detectButton.disabled).toBe(true);
+
+      fireEvent.click(detectButton);
+      await act(async () => vi.advanceTimersByTimeAsync(180_000));
+      expect(client.getMyIp).toHaveBeenCalledOnce();
+
+      await act(async () => pending.resolve({ data: { ip: "203.0.113.12", via_proxy: true } }));
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(client.getMyIp).toHaveBeenCalledTimes(2);
+    } finally {
+      cleanup();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts the active detection and clears polling on unmount", async () => {
+    vi.useFakeTimers();
+    const pending = deferred();
+    client.getMyIp.mockReturnValueOnce(pending.promise);
+    try {
+      const view = render(<Settings />);
+      await act(async () => Promise.resolve());
+      const signal = client.getMyIp.mock.calls[0][0];
+
+      view.unmount();
+      expect(signal.aborted).toBe(true);
+
+      await act(async () => vi.advanceTimersByTimeAsync(120_000));
+      expect(client.getMyIp).toHaveBeenCalledOnce();
+    } finally {
+      pending.reject(Object.assign(new Error("cancelled"), { code: "ERR_CANCELED" }));
+      await Promise.resolve();
+      cleanup();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("normalizes structured IP detection errors", async () => {
+    client.getMyIp.mockRejectedValueOnce({
+      response: { data: { detail: { code: "ip_lookup_failed", message: "出口 IP 服务暂不可用" } } },
+    });
+
+    render(<Settings />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("出口 IP 服务暂不可用");
+  });
+
+  it("renders five accessible exchange tabs and switches immediately", async () => {
+    render(<Settings />);
+    await waitFor(() => expect(client.getSettings).toHaveBeenCalledOnce());
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Binance", "OKX", "Bybit", "Gate.io", "A股"]);
+    expect(screen.getByRole("tab", { name: "Binance" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "OKX" }));
+    expect(appState.switchExchange).toHaveBeenCalledWith("okx");
+  });
+
+  it("shows only the unavailable message, disables save, and keeps IP detection available", async () => {
+    appState.exchangeProvider = "gateio";
+    client.getMyIp.mockResolvedValue({ data: { ip: "203.0.113.8", via_proxy: true } });
+    render(<Settings />);
+    await waitFor(() => expect(client.getSettings).toHaveBeenCalledOnce());
+
+    expect(screen.getByText("未来会接入，敬请期待")).toBeTruthy();
+    expect(screen.queryByText("Binance API 配置")).toBeNull();
+    expect(screen.getByRole("button", { name: /保存配置/ }).disabled).toBe(true);
+    expect(client.listAIProviders).not.toHaveBeenCalled();
+    expect(client.listAIConfigs).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /检测出口 IP/ }));
+    expect(await screen.findByText("203.0.113.8")).toBeTruthy();
+  });
+
+  it("moves focus between exchange tabs with arrow keys without switching", async () => {
+    render(<Settings />);
+    await waitFor(() => expect(client.getSettings).toHaveBeenCalledOnce());
+    const binance = screen.getByRole("tab", { name: "Binance" });
+    const okx = screen.getByRole("tab", { name: "OKX" });
+    binance.focus();
+
+    fireEvent.keyDown(binance, { key: "ArrowRight" });
+
+    expect(document.activeElement).toBe(okx);
+    expect(appState.switchExchange).not.toHaveBeenCalled();
+  });
+
   it("refreshes read-only settings without clearing unsaved secret input", async () => {
-    const view = render(<Settings />);
+    render(<Settings />);
     await waitFor(() => expect(client.getSettings).toHaveBeenCalledOnce());
     const keyInput = screen.getAllByPlaceholderText("输入 API Key")[0];
     fireEvent.change(keyInput, { target: { value: "unsaved-key" } });
 
-    appState.refreshRevision = 1;
-    view.rerender(<Settings />);
+    await act(async () => refreshMountedReaders());
 
     await waitFor(() => expect(client.getSettings).toHaveBeenCalledTimes(2));
     expect(keyInput.value).toBe("unsaved-key");
+  });
+
+  it("keeps the mounted refresh pending until all settings readers settle", async () => {
+    let finishConfigs;
+    render(<Settings />);
+    await waitFor(() => expect(client.getSettings).toHaveBeenCalledOnce());
+    client.listAIConfigs.mockReturnValueOnce(new Promise((resolve) => { finishConfigs = resolve; }));
+
+    let refresh;
+    await act(async () => {
+      refresh = refreshMountedReaders();
+      await Promise.resolve();
+    });
+    let settled = false;
+    refresh.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await act(async () => finishConfigs({ data: [] }));
+    expect((await refresh).find((result) => result.key === "settings:page")).toMatchObject({
+      status: "fulfilled",
+      value: true,
+    });
   });
 
   it("sends secrets once and clears them after a successful save", async () => {

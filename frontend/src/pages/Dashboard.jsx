@@ -2,8 +2,9 @@ import React from "react";
 import { useApp } from "../context/AppContext";
 import { useTicker } from "../context/MarketTickerContext";
 import { useNavigate } from "react-router-dom";
-import { Wallet, TrendingUp, Activity, AlertCircle, BarChart3 } from "lucide-react";
+import { Wallet, TrendingUp, Activity, AlertCircle, BarChart3, RefreshCw } from "lucide-react";
 import clsx from "clsx";
+import ExchangeUnavailableState from "../components/ExchangeUnavailableState";
 
 function StatCard({ icon: Icon, label, value, sub, color = "text-white" }) {
   return (
@@ -39,8 +40,19 @@ function isStrategyAction(value) {
   return !/(halted|recovery|required|network|connection|error|retry|连接|网络|重试|恢复)/i.test(value);
 }
 
-export default function Dashboard() {
-  const { account, accountError, positions, botStatus, botStatusLoaded, connected } = useApp();
+function DashboardContent() {
+  const {
+    account,
+    accountError,
+    accountPhase: accountPhaseValue,
+    positions,
+    positionsError,
+    positionsPhase,
+    botStatus,
+    botStatusLoaded,
+    connected,
+    refreshAccount,
+  } = useApp();
   const ticker = useTicker();
   const navigate = useNavigate();
 
@@ -66,6 +78,7 @@ export default function Dashboard() {
   const accountValue = (value, prefix = "$") => account
     ? `${prefix}${value.toFixed(2)}`
     : "--";
+  const accountPhase = accountPhaseValue || (account ? "complete" : accountError ? "error" : "loading");
 
   return (
     <div className="space-y-4">
@@ -83,18 +96,34 @@ export default function Dashboard() {
       {accountError && (
         <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border border-red/20 bg-red/5 px-4 py-3 text-sm text-red">
           <span className="flex items-center gap-2">
-            <AlertCircle size={16} /> {accountError}
+            <AlertCircle size={16} />
+            {accountPhase === "stale" && <strong className="font-semibold">显示上次成功数据。</strong>}
+            {accountError}
           </span>
-          <button onClick={() => navigate("/settings")}
-            className="text-xs font-medium text-accent hover:text-accent/80">
-            检查 API 配置
-          </button>
+          <span className="flex items-center gap-3">
+            {refreshAccount && (
+              <button type="button" onClick={refreshAccount} disabled={accountPhase === "refreshing"}
+                className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:text-accent/80 disabled:opacity-50">
+                <RefreshCw size={13} className={accountPhase === "refreshing" ? "animate-spin" : ""} />重试
+              </button>
+            )}
+            <button onClick={() => navigate("/settings")}
+              className="text-xs font-medium text-accent hover:text-accent/80">
+              检查 API 配置
+            </button>
+          </span>
+        </div>
+      )}
+      {accountPhase === "empty" && !accountError && (
+        <div className="flex items-center justify-between gap-3 border border-border bg-surface/40 px-4 py-3 text-sm text-muted">
+          <span>账户暂时没有可显示的余额数据。</span>
+          {refreshAccount && <button type="button" onClick={refreshAccount} className="text-xs font-medium text-accent">重试</button>}
         </div>
       )}
 
       {/* 账户总览 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard icon={Wallet} label="账户净值" value={accountValue(totalBalance)} />
+        <StatCard icon={Wallet} label="账户净值" value={accountPhase === "loading" ? "加载中" : accountValue(totalBalance)} />
         <StatCard icon={BarChart3} label="可用余额" value={accountValue(available)} sub="USDT" />
         <StatCard icon={TrendingUp} label="未实现盈亏"
           value={account ? `${unrealized >= 0 ? "+" : ""}$${unrealized.toFixed(2)}` : "--"}
@@ -140,7 +169,14 @@ export default function Dashboard() {
 
       {/* 当前持仓 */}
       <div className="bg-card border border-border rounded-xl p-4">
-        <h3 className="font-semibold text-sm mb-3">当前持仓</h3>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-semibold text-sm">当前持仓</h3>
+          {positionsError && (
+            <span role="alert" className={clsx("text-xs", positionsPhase === "stale" ? "text-accent" : "text-red")}>
+              {positionsPhase === "stale" ? "显示上次成功持仓：" : ""}{positionsError}
+            </span>
+          )}
+        </div>
         {positions.length === 0 ? (
           <p className="text-muted text-sm text-center py-4">暂无持仓</p>
         ) : (
@@ -206,4 +242,16 @@ export default function Dashboard() {
       )}
     </div>
   );
+}
+
+export default function Dashboard() {
+  const { exchangeProvider, exchangeSupported, exchangeSwitching, settingsLoaded } = useApp();
+  const isExchangeSupported = settingsLoaded !== false
+    && exchangeSupported;
+
+  if (!isExchangeSupported || exchangeSwitching) {
+    return <ExchangeUnavailableState exchangeProvider={exchangeProvider} />;
+  }
+
+  return <DashboardContent />;
 }

@@ -1,14 +1,18 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Header from "./Header";
 import { getSymbols } from "../api/client";
 import { MemoryRouter } from "react-router-dom";
+import { refreshMountedReaders } from "../services/refreshCoordinator";
 
 const appState = {
   botStatus: null,
   botStatusLoaded: true,
   connected: true,
+  exchangeProvider: "binance",
+  exchangeSupported: true,
+  exchangeSwitching: false,
   symbol: "SOLUSDT",
   networkTab: "test",
   networkSwitching: false,
@@ -58,6 +62,9 @@ describe("Header network controls", () => {
     appState.refreshRevision = 0;
     appState.refreshPending = false;
     appState.refreshError = null;
+    appState.exchangeProvider = "binance";
+    appState.exchangeSupported = true;
+    appState.exchangeSwitching = false;
     getSymbols.mockResolvedValue({ data: ["SOLUSDT"] });
   });
 
@@ -107,9 +114,34 @@ describe("Header network controls", () => {
     expect(symbol.className).toContain("text-base");
     expect(symbol.className).toContain("font-semibold");
     expect(symbol.parentElement.parentElement).toBe(refresh.parentElement);
+    expect(refresh.textContent).toContain("刷新");
+    expect(refresh.className).toContain("px-2");
+    expect(refresh.className).not.toContain("w-8");
+    expect(refresh.closest("header").className).toContain("flex-wrap");
 
     fireEvent.click(refresh);
     expect(appState.refreshAll).toHaveBeenCalledOnce();
+  });
+
+  it("registers symbol loading as an awaited mounted reader", async () => {
+    let finishRefresh;
+    renderHeader();
+    await waitFor(() => expect(getSymbols).toHaveBeenCalledOnce());
+    getSymbols.mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve; }));
+
+    let refresh;
+    await act(async () => {
+      refresh = refreshMountedReaders();
+      await Promise.resolve();
+    });
+    expect(getSymbols).toHaveBeenCalledTimes(2);
+    let settled = false;
+    refresh.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await act(async () => finishRefresh({ data: ["BTCUSDT"] }));
+    expect((await refresh)[0]).toMatchObject({ key: "header:symbols", status: "fulfilled", value: true });
   });
 
   it("requires the exact symbol-scoped confirmation on mainnet", async () => {
@@ -141,6 +173,21 @@ describe("Header network controls", () => {
     const refresh = screen.getByRole("button", { name: "刷新当前数据" });
     expect(refresh.disabled).toBe(true);
     expect(refresh.querySelector("svg").classList.contains("animate-spin")).toBe(true);
+  });
+
+  it("does not load Binance controls or symbols for an unavailable exchange", async () => {
+    appState.exchangeProvider = "okx";
+    appState.exchangeSupported = false;
+    renderHeader();
+
+    await act(async () => Promise.resolve());
+    expect(getSymbols).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "测试网" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "真实网" })).toBeNull();
+    expect(screen.getByRole("button", { name: "启动策略" }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "刷新当前数据" }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: /SOLUSDT/ }).disabled).toBe(true);
+    expect(screen.getByText("未连接")).toBeTruthy();
   });
 
   it("confirms symbol, network and capital before starting on testnet", async () => {

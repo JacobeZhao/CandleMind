@@ -11,6 +11,10 @@ let networkTestnet;
 let strategyRunning;
 let strategyStartCount;
 let strategyConfiguration;
+let openOrderMode;
+let openOrderDelayMs;
+let exchangeProvider;
+let binanceBusinessRequestCount;
 
 const strategyDefaults = {
   sar_adx_trend: {
@@ -75,6 +79,10 @@ test.beforeEach(async ({ page }) => {
   strategyRunning = false;
   strategyStartCount = 0;
   strategyConfiguration = configuredStrategy("sar_adx_trend");
+  openOrderMode = "complete";
+  openOrderDelayMs = 0;
+  exchangeProvider = "binance";
+  binanceBusinessRequestCount = 0;
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
@@ -83,11 +91,16 @@ test.beforeEach(async ({ page }) => {
     if (!url.pathname.startsWith("/api/")) return route.continue();
     if (url.pathname === "/api/settings") {
       if (route.request().method() === "POST") {
-        networkTestnet = route.request().postDataJSON().testnet;
+        const settings = route.request().postDataJSON();
+        if (typeof settings.testnet === "boolean") networkTestnet = settings.testnet;
+        if (settings.exchange_provider) exchangeProvider = settings.exchange_provider;
       }
       return json(route, {
         symbol: "SOLUSDT",
         testnet: networkTestnet,
+        exchange_provider: exchangeProvider,
+        exchange_supported: exchangeProvider === "binance",
+        exchange_connected: exchangeProvider === "binance",
         test_key_set: false,
         main_key_set: false,
       });
@@ -138,9 +151,16 @@ test.beforeEach(async ({ page }) => {
         trigger_interval: "5m",
       });
     }
-    if (url.pathname === "/api/market/symbols") return json(route, ["SOLUSDT"]);
-    if (url.pathname.includes("/api/market/klines/")) return json(route, marketRows);
+    if (url.pathname === "/api/market/symbols") {
+      binanceBusinessRequestCount += 1;
+      return json(route, ["SOLUSDT"]);
+    }
+    if (url.pathname.includes("/api/market/klines/")) {
+      binanceBusinessRequestCount += 1;
+      return json(route, marketRows);
+    }
     if (url.pathname === "/api/account/balance") {
+      binanceBusinessRequestCount += 1;
       return json(route, { totalWalletBalance: "1000", totalMarginBalance: "1000" });
     }
     if (url.pathname === "/api/strategy/engine/status") {
@@ -160,7 +180,25 @@ test.beforeEach(async ({ page }) => {
       strategyRunning = false;
       return json(route, { ok: true, message: "策略已停止" });
     }
+    if (url.pathname === "/api/orders/open/combined") {
+      binanceBusinessRequestCount += 1;
+      if (openOrderDelayMs) await new Promise((resolve) => setTimeout(resolve, openOrderDelayMs));
+      if (openOrderMode === "transient") {
+        return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "Binance 暂时不可用" }) });
+      }
+      if (openOrderMode === "auth") {
+        return route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ code: -2015, msg: "Invalid API-key, IP, or permissions" }) });
+      }
+      return json(route, {
+        scope: { network: networkTestnet ? "testnet" : "mainnet", symbol: "SOLUSDT" },
+        as_of: "2026-08-20T08:00:00Z",
+        status: "complete",
+        warnings: [],
+        orders: [{ id: "regular-1", source: "regular", time: 1_700_000_000_000, symbol: "SOLUSDT", side: "BUY", type: "LIMIT", origQty: "1", price: "123.45", status: "NEW" }],
+      });
+    }
     if (url.pathname === "/api/orders/analytics") {
+      binanceBusinessRequestCount += 1;
       return json(route, {
         schema_version: 1,
         scope: { network: networkTestnet ? "testnet" : "mainnet", symbol: "SOLUSDT" },
@@ -315,14 +353,33 @@ for (const viewport of [
 
     const chart = page.locator(".price-chart-root");
     const assistant = page.getByRole("region", { name: /实时行情助手/ });
+    const refresh = page.getByRole("button", { name: "刷新当前数据" });
     await expect(chart).toBeVisible();
     await expect(assistant).toBeVisible();
+    await expect(refresh).toContainText("刷新");
     const [chartBox, assistantBox] = await Promise.all([chart.boundingBox(), assistant.boundingBox()]);
     if (viewport.width >= 900) {
       expect(chartBox.x + chartBox.width).toBeLessThanOrEqual(assistantBox.x);
     } else {
       expect(chartBox.y + chartBox.height).toBeLessThanOrEqual(assistantBox.y);
     }
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      const header = document.querySelector("header");
+      const workspace = document.querySelector('[data-testid="markets-workspace"]');
+      const bounds = workspace?.getBoundingClientRect();
+      return {
+        documentOverflow: document.documentElement.scrollHeight - window.innerHeight,
+        mainOverflow: main ? main.scrollHeight - main.clientHeight : null,
+        headerOverflow: header ? header.scrollWidth - header.clientWidth : null,
+        workspaceBottom: bounds?.bottom ?? null,
+      };
+    });
+    expect(layout.documentOverflow).toBeLessThanOrEqual(1);
+    expect(layout.mainOverflow).toBeLessThanOrEqual(1);
+    expect(layout.headerOverflow).toBeLessThanOrEqual(1);
+    expect(layout.workspaceBottom).toBeLessThanOrEqual(viewport.height + 1);
 
     const canvases = chart.locator("canvas");
     await expect(canvases.first()).toBeVisible();
@@ -341,6 +398,23 @@ for (const viewport of [
   });
 }
 
+test("serves the project logo and favicon as optimized frontend assets", async ({ page }) => {
+  const [logoResponse, faviconResponse] = await Promise.all([
+    page.request.get("/candlemind-logo.png"),
+    page.request.get("/favicon.png"),
+  ]);
+  expect(logoResponse.ok()).toBe(true);
+  expect(faviconResponse.ok()).toBe(true);
+  expect(logoResponse.headers()["content-type"]).toContain("image/png");
+  expect(faviconResponse.headers()["content-type"]).toContain("image/png");
+
+  await page.goto("/");
+  const logo = page.getByRole("img", { name: "CandleMind" });
+  await expect(logo).toBeVisible();
+  expect(await logo.evaluate((image) => ({ width: image.naturalWidth, height: image.naturalHeight })))
+    .toEqual({ width: 128, height: 128 });
+});
+
 test("keeps the strategy command global and enforces mainnet confirmation", async ({ page }) => {
   await page.goto("/markets");
   await expect(page.getByRole("button", { name: "启动策略" })).toBeVisible();
@@ -353,6 +427,83 @@ test("keeps the strategy command global and enforces mainnet confirmation", asyn
   await page.getByLabel("真实网确认文本").fill("MAINNET:SOLUSDT");
   await page.getByRole("button", { name: "确认真实网启动" }).click();
   await expect.poll(() => strategyStartCount).toBe(1);
+});
+
+test("keeps unavailable exchanges disconnected across Binance business pages", async ({ page }) => {
+  exchangeProvider = "okx";
+
+  await page.goto("/markets");
+  await expect(page.getByRole("heading", { name: "OKX 未连接" })).toBeVisible();
+  await expect(page.getByText("未来会接入，敬请期待")).toBeVisible();
+  await expect(page.getByRole("button", { name: "启动策略" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "刷新当前数据" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "测试网" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "真实网" })).toHaveCount(0);
+
+  await page.goto("/orders");
+  await expect(page.getByRole("heading", { name: "OKX 未连接" })).toBeVisible();
+  await expect(page.getByLabel("订单明细")).toHaveCount(0);
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "OKX 未连接" })).toBeVisible();
+  await expect(page.getByText("账户净值")).toHaveCount(0);
+  expect(binanceBusinessRequestCount).toBe(0);
+});
+
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`keeps exchange settings controls accessible at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/settings");
+
+    const save = page.getByRole("button", { name: "保存配置" });
+    const detectIp = page.getByRole("button", { name: "检测出口 IP" });
+    const tabs = page.getByRole("tablist", { name: "交易所" });
+    await expect(save).toBeVisible();
+    await expect(detectIp).toBeVisible();
+    await expect(tabs).toBeVisible();
+    await expect(page.getByRole("tab")).toHaveCount(5);
+
+    const [saveBox, tabsBox] = await Promise.all([save.boundingBox(), tabs.boundingBox()]);
+    expect(saveBox).not.toBeNull();
+    expect(tabsBox).not.toBeNull();
+    if (viewport.width >= 1024) {
+      expect(tabsBox.x).toBeGreaterThan(saveBox.x + saveBox.width);
+      expect(Math.abs(tabsBox.y - saveBox.y)).toBeLessThan(16);
+    } else {
+      expect(tabsBox.y).toBeGreaterThan(saveBox.y + saveBox.height);
+    }
+
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+  });
+}
+
+test("keeps scoped order data stale for transient failures and clears it for -2015", async ({ page }) => {
+  await page.goto("/orders");
+  await expect(page.getByText("123.45")).toBeVisible();
+
+  openOrderDelayMs = 200;
+  const globalRefresh = page.getByRole("button", { name: "刷新当前数据" });
+  await globalRefresh.click();
+  await expect(globalRefresh).toBeDisabled();
+  await expect(globalRefresh).toBeEnabled();
+
+  openOrderDelayMs = 0;
+  openOrderMode = "transient";
+  await page.getByRole("button", { name: "刷新订单数据" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "数据可能已过期" })).toBeVisible();
+  await expect(page.getByText("123.45")).toBeVisible();
+
+  openOrderMode = "auth";
+  await page.getByRole("button", { name: "刷新订单数据" }).click();
+  const authError = page.getByRole("alert").filter({ hasText: "-2015" });
+  await expect(authError).toContainText("API Key 无效");
+  await expect(authError).toContainText("合约交易权限");
+  await expect(authError).toContainText("后端服务器出口 IP");
+  await expect(page.getByText("123.45")).toHaveCount(0);
 });
 
 for (const viewport of [

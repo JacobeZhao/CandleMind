@@ -14,6 +14,18 @@ class ReadOnlyBinanceClient:
         self.testnet = False
         self.open_orders_error = None
         self.open_algo_orders_error = None
+        self.account_error = None
+        self.positions_error = None
+
+    def futures_account(self):
+        if self.account_error:
+            raise self.account_error
+        return {"assets": [], "totalWalletBalance": "10"}
+
+    def futures_position_information(self, **_kwargs):
+        if self.positions_error:
+            raise self.positions_error
+        return [{"symbol": "BTCUSDT", "positionAmt": "1"}]
 
     def futures_get_open_orders(self, **kwargs):
         self.calls.append(("open", kwargs))
@@ -181,6 +193,38 @@ def test_open_order_push_broadcasts_error_instead_of_empty_orders(
         "type": "open_orders_error",
         "symbol": "SOLUSDT",
         "network": "mainnet",
-        "data": {"message": "Binance open orders are unavailable."},
+        "data": {
+                "code": "binance_unavailable",
+                "message": "Binance 请求超时，服务器已完成自动重试。",
+            "retryable": True,
+        },
     }]
     assert all(message.get("data") != [] for message in messages)
+
+
+def test_account_and_position_pushes_emit_errors_without_fake_empty_success(monkeypatch):
+    fake_client = ReadOnlyBinanceClient()
+    fake_client.account_error = TimeoutError("account private detail")
+    fake_client.positions_error = TimeoutError("positions private detail")
+    state = type(app_state)()
+    state.client = fake_client
+    messages = []
+
+    async def capture(message):
+        messages.append(message)
+
+    monkeypatch.setattr("backend.app.state.manager.broadcast", capture)
+
+    asyncio.run(state._push_account())
+    asyncio.run(state._push_positions())
+
+    assert [message["type"] for message in messages] == [
+        "account_error",
+        "positions_error",
+    ]
+    assert all(message["data"] == {
+        "code": "binance_unavailable",
+        "message": "Binance 请求超时，服务器已完成自动重试。",
+        "retryable": True,
+    } for message in messages)
+    assert not any(message["type"] in {"account", "positions"} for message in messages)

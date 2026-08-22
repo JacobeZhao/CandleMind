@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChart } from "lightweight-charts";
 import { getKlines } from "../api/client";
 import PriceChart, { intervalBucketStart } from "./PriceChart";
+import { refreshMountedReaders } from "../services/refreshCoordinator";
 
 let tickerSubscriber;
 let currentTicker;
@@ -250,6 +251,18 @@ describe("PriceChart", () => {
 
     expect(onIndicatorSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ adx: 31 }));
     expect(chart.createdSeries[4].setData).toHaveBeenLastCalledWith([expect.objectContaining({ value: 101 })]);
+  });
+
+  it("retains rendered candles as stale when a coordinated refresh transiently fails", async () => {
+    render(<PriceChart symbol="SOLUSDT" interval="5m" onIntervalChange={vi.fn()} onOpenAssistant={vi.fn()} />);
+    await act(async () => Promise.resolve());
+    getKlines.mockRejectedValueOnce({ response: { status: 503, data: { detail: "行情源暂不可用" } } });
+
+    await act(async () => refreshMountedReaders());
+
+    expect(screen.getByRole("alert").textContent).toContain("显示上次成功数据");
+    expect(screen.getByRole("button", { name: "重试 K 线数据" })).toBeTruthy();
+    expect(chart.createdSeries[0].setData).not.toHaveBeenLastCalledWith([]);
   });
 
   it("silently refreshes a closed-candle boundary and preserves the viewport", async () => {

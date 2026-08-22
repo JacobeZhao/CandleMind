@@ -1,16 +1,21 @@
 from typing import Any
 import os
 
-from binance.exceptions import BinanceAPIException, BinanceRequestException
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from requests.exceptions import ConnectionError as RequestsConnectionError
-from requests.exceptions import Timeout as RequestsTimeout
 
 from ..services.bot_engine import bot_engine
 from ..database import Settings, get_db
 from ..services.exchange_executor import ExchangeExecutionError
+from ..services.binance_errors import BinanceGatewayError
+from ..services.binance_usdm_gateway import gateway_error_detail, gateway_error_status
 from ..services.execution_store import ExecutionStoreError
+from ..services.exchange_provider import (
+    BINANCE_PROVIDER,
+    is_binance_provider,
+    normalize_exchange_provider,
+    unavailable_provider_detail,
+)
 from ..services.live_strategy_runtime import LiveStrategyRuntimeError
 from ..services.strategy_configuration import (
     StrategyConfigurationConflict,
@@ -24,6 +29,19 @@ from sqlalchemy.orm import Session
 
 
 router = APIRouter()
+
+
+def _require_binance_provider(settings) -> str:
+    provider = normalize_exchange_provider(
+        getattr(settings, "exchange_provider", None)
+    )
+    if not is_binance_provider(provider):
+        raise HTTPException(503, detail=unavailable_provider_detail(provider))
+    if app_state.exchange_provider != BINANCE_PROVIDER:
+        raise HTTPException(
+            503, detail=unavailable_provider_detail(app_state.exchange_provider)
+        )
+    return provider
 
 
 class EngineStartRequest(BaseModel):
@@ -68,6 +86,7 @@ async def update_strategy_configuration(
     if bot_engine.running or getattr(bot_engine, "engine_state", "stopped") != "stopped":
         raise HTTPException(409, "Stop the running strategy before changing its configuration")
     settings = db.query(Settings).first()
+    _require_binance_provider(settings)
     network = "testnet" if settings.testnet else "mainnet"
     if app_state.client is None:
         if bot_engine.has_execution_journal(settings.symbol, network):
@@ -98,16 +117,25 @@ async def update_strategy_configuration(
 @router.get("/engine/status")
 def engine_status(db: Session = Depends(get_db)):
     settings = db.query(Settings).first()
+    provider = normalize_exchange_provider(
+        getattr(settings, "exchange_provider", None)
+    )
+    if (
+        not is_binance_provider(provider)
+        or app_state.exchange_provider != BINANCE_PROVIDER
+    ):
+        return {**bot_engine.status, "provider": provider}
     network = "testnet" if settings.testnet else "mainnet"
     bot_engine.hydrate_persisted_status(app_state.symbol, network)
-    return bot_engine.status
+    return {**bot_engine.status, "provider": provider}
 
 
 @router.post("/engine/start")
 async def start_engine(body: EngineStartRequest, db: Session = Depends(get_db)):
+    settings = db.query(Settings).first()
+    provider = _require_binance_provider(settings)
     if not app_state.client:
         raise HTTPException(503, "Binance is not connected")
-    settings = db.query(Settings).first()
     network = "testnet" if settings.testnet else "mainnet"
     try:
         saved = get_strategy_configuration(db)
@@ -148,15 +176,10 @@ async def start_engine(body: EngineStartRequest, db: Session = Depends(get_db)):
         raise HTTPException(409, f"Strategy execution requires recovery: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    except (BinanceAPIException, BinanceRequestException) as exc:
-        raise HTTPException(502, "Binance rejected or returned an invalid response") from exc
-    except (
-        TimeoutError,
-        ConnectionError,
-        RequestsTimeout,
-        RequestsConnectionError,
-    ) as exc:
-        raise HTTPException(503, "Binance is temporarily unavailable") from exc
+    except BinanceGatewayError as exc:
+        raise HTTPException(
+            gateway_error_status(exc), detail=gateway_error_detail(exc)
+        ) from exc
     status = bot_engine.status
     return {
         "ok": True,
@@ -166,6 +189,7 @@ async def start_engine(body: EngineStartRequest, db: Session = Depends(get_db)):
         "strategy_type": status.get("strategy_type", body.strategy_type),
         "config_version": status.get("config_version", body.config_version),
         "config_hash": status.get("config_hash", body.config_hash),
+        "provider": provider,
     }
 
 

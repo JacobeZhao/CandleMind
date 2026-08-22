@@ -1,6 +1,13 @@
 import asyncio
 
+import pytest
+
 from backend.app.routes import market
+
+
+@pytest.fixture(autouse=True)
+def binance_provider(monkeypatch):
+    monkeypatch.setattr(market.app_state, "exchange_provider", "binance")
 
 
 class FakeBinanceClient:
@@ -64,9 +71,9 @@ def test_ticker_starts_all_three_calls_before_waiting(monkeypatch):
     result = asyncio.run(market.ticker("SOLUSDT"))
 
     assert set(started) == {
-        "futures_symbol_ticker",
-        "futures_ticker",
-        "futures_mark_price",
+        "symbol_ticker",
+        "ticker",
+        "mark_price",
     }
     assert result["markPrice"] == "145.20"
 
@@ -82,3 +89,53 @@ def test_ticker_does_not_fabricate_optional_mark_fields(monkeypatch):
     assert "indexPrice" not in result
     assert "lastFundingRate" not in result
     assert "nextFundingTime" not in result
+
+
+def test_ticker_returns_structured_retryable_gateway_failure(monkeypatch):
+    client = FakeBinanceClient()
+    client.futures_symbol_ticker = lambda **_kwargs: (_ for _ in ()).throw(
+        TimeoutError("credential-like private detail")
+    )
+    monkeypatch.setattr(market.app_state, "client", client)
+
+    try:
+        asyncio.run(market.ticker("SOLUSDT"))
+    except market.HTTPException as exc:
+        assert exc.status_code == 503
+        assert exc.detail == {
+            "code": "binance_unavailable",
+            "message": "Binance 请求超时，服务器已完成自动重试。",
+            "retryable": True,
+        }
+        assert "private" not in str(exc.detail)
+    else:
+        raise AssertionError("expected structured gateway failure")
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "args"),
+    [
+        (market.ticker, ("SOLUSDT",)),
+        (market.klines, ("SOLUSDT",)),
+        (market.symbols, ()),
+    ],
+)
+def test_non_binance_market_routes_never_construct_gateway(monkeypatch, endpoint, args):
+    class FailGateway:
+        def __init__(self, _client):
+            raise AssertionError("Binance gateway must not be constructed")
+
+    monkeypatch.setattr(market.app_state, "client", object())
+    monkeypatch.setattr(market.app_state, "exchange_provider", "bybit")
+    monkeypatch.setattr(market, "BinanceUsdMGateway", FailGateway)
+
+    with pytest.raises(market.HTTPException) as raised:
+        asyncio.run(endpoint(*args))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == {
+        "code": "exchange_provider_unavailable",
+        "message": "所选市场暂未接入，敬请期待。",
+        "retryable": False,
+        "provider": "bybit",
+    }

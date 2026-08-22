@@ -21,13 +21,15 @@
 
 ## 项目简介
 
-CandleMind 采用 FastAPI 与 React 构建，将实时行情、趋势分析、策略配置、交易所执行运行时和账户统计整合到一个工作台。平台聚焦 **CandleMind 趋势策略**，并提供持续运行的 AI 行情助手以及可复现的离线研究基础设施。
+CandleMind 采用 FastAPI 与 React 构建，将实时行情、趋势分析、策略配置、交易所执行运行时和账户统计整合到一个工作台。平台聚焦 **CandleMind 趋势策略**，行情页提供铺满可用视口、支持拖拽调整的 K 线图与实时 AI 行情助手，并保留可复现的离线研究基础设施。
+
+设置页提供全局市场选择器；目前仅 **Binance Futures** 已接入。OKX、Bybit、Gate.io 与 A 股是后续接入占位，选择后业务页面会明确显示未连接，且不会发起 Binance 行情、账户或交易请求。
 
 ## 核心能力
 
 | 能力 | 说明 |
 | --- | --- |
-| 实时行情 | Binance WebSocket 行情、K 线、主图指标与关键市场指标 |
+| 实时行情 | Binance WebSocket 行情、K 线、主图指标，以及自适应视口的可拖拽工作区 |
 | AI 行情助手 | 基于已收盘多周期 K 线持续解读行情，并支持随时对话 |
 | 策略运行时 | 三种可配置自动化策略，绑定所选品种与交易网络 |
 | 订单与账户 | 挂单、成交、历史订单及收益、胜率、盈亏比统计 |
@@ -35,6 +37,8 @@ CandleMind 采用 FastAPI 与 React 构建，将实时行情、趋势分析、�
 | 交易安全 | 测试网优先、真实网双重开关、数量校验与幂等订单日志 |
 
 当前公开产品包含概览、行情、订单、策略和设置五个页面。内部评估能力不提供公开回测页面或 `/api/backtest/*` 接口。
+
+设置页打开期间会立即检测出口 IP，并每分钟自动刷新一次；上一次结果会保留到下一次检测完成。全局交易所选择会同步作用于概览、行情和订单等业务页面；顶部栏可统一切换品种，并通过“刷新”入口更新当前页面数据。
 
 ## 技术架构
 
@@ -95,9 +99,13 @@ Vite 默认运行在 <http://localhost:5173>，并将 API 请求代理至后端�
 
 1. 从 `.env.example` 创建 `.env`，不要提交密钥、数据库或运行日志。
 2. 在设置页录入 Binance 和 AI Provider 凭据；备份时同时保存 `trader.db` 与 `secret.key`。
-3. 云端 AI Base URL 仅允许受信任的 HTTPS 主机；本地 Provider 可使用回环或 RFC1918 地址。详见 [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md)。
-4. 真实网交易必须先完成 testnet 验收，并同时启用服务端开关和页面确认。
-5. 使用真实资金前，应独立审查策略、仓位、杠杆、止损和交易所权限。
+3. 设置页打开期间每分钟自动检测出口 IP；该结果仅用于连接诊断，不代替交易所 API 的权限和 IP 白名单配置。
+4. 云端 AI Base URL 仅允许受信任的 HTTPS 主机；本地 Provider 可使用回环或 RFC1918 地址。详见 [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md)。
+5. 真实网交易必须先完成 testnet 验收，并同时启用服务端开关和页面确认。
+6. 使用真实资金前，应独立审查策略、仓位、杠杆、止损和交易所权限。
+
+Binance 读取重试、限流冷却、IP 判断和订单确认规则见 [`docs/BINANCE_RESILIENCE.md`](docs/BINANCE_RESILIENCE.md)。
+交易所选择、持久化及未接入市场的隔离规则见 [`docs/EXCHANGE_PROVIDERS.md`](docs/EXCHANGE_PROVIDERS.md)。
 
 ## 强化学习研究
 

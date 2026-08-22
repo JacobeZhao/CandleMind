@@ -4,18 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from decimal import Decimal
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from time import monotonic
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
-from requests.exceptions import ConnectionError as RequestsConnectionError
-from requests.exceptions import SSLError as RequestsSSLError
-from requests.exceptions import Timeout as RequestsTimeout
 
 from backend.app.strategies.sar_pyramid import (
     PositionSnapshot,
@@ -33,6 +30,9 @@ from .exchange_executor import (
     UnsupportedAccountError,
 )
 from .execution_store import ExecutionStore, ExecutionStoreError
+from .binance_errors import BinanceGatewayError
+from .binance_retry import BinanceRetryExecutor, BinanceRetryPolicy
+from .binance_usdm_gateway import BinanceUsdMGateway
 from .strategy_analytics import StrategyAnalyticsService, account_fingerprint
 from .live_strategy_runtime import (
     DecisionPlan,
@@ -67,7 +67,7 @@ class _CycleResult:
 @dataclass(frozen=True)
 class _MarketSnapshot:
     klines: list
-    server_time: dict
+    server_time: int
     funding: list
     exchange_info: dict
     mark_price: dict
@@ -91,15 +91,11 @@ class _SnapshotFetchError(Exception):
 class BotEngine:
     """Own one exchange-backed decision runtime and its polling task."""
 
-    _MAX_SNAPSHOT_ATTEMPTS = 3
-    _RETRY_DELAYS = (0.5, 1.0)
-    _MAX_RETRY_AFTER_SECONDS = 5.0
-    _MAX_RETRY_BUDGET_SECONDS = 5.0
-
     def __init__(self) -> None:
         self.running = False
         self._task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
+        self._execution_lock = asyncio.Lock()
         self.last_signal = "NONE"
         self.last_action = ""
         self.error_msg = ""
@@ -174,7 +170,8 @@ class BotEngine:
             if self.running or self._task is not None or self.engine_state != "stopped":
                 raise ValueError("strategy execution is not fully stopped")
             normalized = symbol.strip().upper()
-            exchange_info = await asyncio.to_thread(client.futures_exchange_info)
+            gateway = BinanceUsdMGateway(client)
+            exchange_info = await asyncio.to_thread(gateway.exchange_info)
             executor = ExchangeExecutor(
                 client, SymbolRules.from_exchange_info(exchange_info, normalized)
             )
@@ -234,7 +231,8 @@ class BotEngine:
                     return
                 raise ValueError(f"strategy already running for {self._symbol}")
 
-            exchange_info = await asyncio.to_thread(client.futures_exchange_info)
+            gateway = BinanceUsdMGateway(client)
+            exchange_info = await asyncio.to_thread(gateway.exchange_info)
             if not self._is_tradable(exchange_info, symbol):
                 raise ValueError(f"symbol is not currently tradable: {symbol}")
 
@@ -324,7 +322,7 @@ class BotEngine:
                 raise UnsupportedAccountError("available USDT balance is zero")
             if isinstance(runtime, LiveLayeredStrategyRuntime):
                 mark_payload = await asyncio.to_thread(
-                    client.futures_mark_price, symbol=symbol
+                    gateway.mark_price, symbol=symbol
                 )
                 reference_price = float(mark_payload["markPrice"])
                 for weight in runtime.config.layer_weights:
@@ -340,15 +338,28 @@ class BotEngine:
                 config_version=config_version,
                 resume_existing=journal_position.direction != 0,
             )
-            first_cycle = await self._cycle(
-                client,
-                symbol,
-                runtime,
-                executor=executor,
-                store=store,
-                network=network,
-                capital_limit=capital_limit,
-            )
+            try:
+                first_cycle = await self._cycle(
+                    client,
+                    symbol,
+                    runtime,
+                    executor=executor,
+                    store=store,
+                    network=network,
+                    capital_limit=capital_limit,
+                )
+            except asyncio.CancelledError:
+                try:
+                    await self._close_position_context(
+                        executor,
+                        store,
+                        network,
+                        symbol,
+                        "strategy_start_cancelled",
+                    )
+                finally:
+                    self._clear_runtime()
+                raise
 
             task: asyncio.Task[None] | None = None
             try:
@@ -410,38 +421,83 @@ class BotEngine:
             self.engine_state = "stopped"
             if not task.done():
                 task.cancel()
+            cancellation: asyncio.CancelledError | None = None
             try:
-                await self._await_terminal(task)
+                try:
+                    await self._await_terminal(task)
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
                 await self._close_exchange_position("strategy_stop")
             finally:
                 if self._task is task and task.done():
                     self._clear_runtime()
+            if cancellation is not None:
+                raise cancellation
             logger.info("Engine stopped")
 
     async def _close_exchange_position(self, reason: str) -> None:
         if not self._executor or not self._execution_store or not self._symbol:
             return
-        position = await asyncio.to_thread(self._executor.current_position, self._symbol)
+        await self._close_position_context(
+            self._executor,
+            self._execution_store,
+            self._network,
+            self._symbol,
+            reason,
+        )
+
+    async def _close_position_context(
+        self,
+        executor: ExchangeExecutor,
+        store: ExecutionStore,
+        network: str,
+        symbol: str,
+        reason: str,
+    ) -> None:
+        await self._run_execution_critical(
+            self._close_position_sync,
+            executor,
+            store,
+            network,
+            symbol,
+            reason,
+        )
+
+    def _close_position_sync(
+        self,
+        executor: ExchangeExecutor,
+        store: ExecutionStore,
+        network: str,
+        symbol: str,
+        reason: str,
+    ) -> None:
+        position = executor.current_position(symbol)
         if not position.direction:
             return
         decision_id = f"stop:{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-        self._execution_store.record_decision(
-            self._network,
-            self._symbol,
+        store.record_decision(
+            network,
+            symbol,
             decision_id=decision_id,
             action="CLOSE",
             details={"reason": reason},
         )
         intent = OrderIntent(
-            symbol=self._symbol,
+            symbol=symbol,
             action=OrderIntentType.CLOSE,
             direction=position.direction,
             quantity=position.quantity,
             decision_id=decision_id,
         )
-        self._record_attempt(intent)
-        result = await asyncio.to_thread(self._executor.execute, intent)
-        self._record_result(decision_id, 0, result)
+        self._record_attempt(intent, store=store, network=network)
+        result = executor.execute(intent)
+        self._record_result(
+            decision_id,
+            0,
+            result,
+            store=store,
+            network=network,
+        )
         if result.status != "FILLED":
             raise RecoveryRequiredError("stop order was not confirmed filled")
 
@@ -504,7 +560,7 @@ class BotEngine:
             snapshot = await self._fetch_snapshot(client, symbol)
         except _SnapshotFetchError as exc:
             raise exc.cause from exc
-        return await asyncio.to_thread(
+        return await self._run_execution_critical(
             self._process_snapshot, snapshot, symbol, runtime, executor, store,
             network, capital_limit,
         )
@@ -519,37 +575,13 @@ class BotEngine:
         network: str,
         capital_limit: float,
     ) -> _CycleResult:
-        snapshot: _MarketSnapshot | None = None
-        retry_started = monotonic()
-        for attempt in range(1, self._MAX_SNAPSHOT_ATTEMPTS + 1):
-            try:
-                snapshot = await self._fetch_snapshot(client, symbol)
-                break
-            except _SnapshotFetchError as exc:
-                retry = self._retry_details(exc.cause)
-                if retry is None or attempt >= self._MAX_SNAPSHOT_ATTEMPTS:
-                    if retry is not None:
-                        self.failure_count = attempt
-                    raise
-                self.failure_count = attempt
-                self.engine_state = "retrying"
-                self.error_code = retry
-                self.error_msg = "Binance is temporarily unavailable"
-                delay = self._retry_delay(attempt, exc.cause)
-                if (
-                    delay is None
-                    or monotonic() - retry_started + delay
-                    > self._MAX_RETRY_BUDGET_SECONDS
-                ):
-                    raise
-                retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-                self.next_retry_at = retry_at.isoformat()
-                self._log_snapshot_failure(symbol, exc)
-                await asyncio.sleep(delay)
-
-        if snapshot is None:
-            raise RuntimeError("market snapshot retry invariant failed")
-        result = await asyncio.to_thread(
+        try:
+            snapshot = await self._fetch_snapshot(client, symbol)
+        except _SnapshotFetchError as exc:
+            self._observe_gateway_failure(exc.cause)
+            self._log_snapshot_failure(symbol, exc)
+            raise
+        result = await self._run_execution_critical(
             self._process_snapshot, snapshot, symbol, runtime, executor, store,
             network, capital_limit,
         )
@@ -557,25 +589,46 @@ class BotEngine:
         self._clear_failure_state()
         return result
 
+    async def _run_execution_critical(self, operation: Any, *args: Any) -> Any:
+        """Run exchange decision work to completion even when its caller is cancelled."""
+
+        async with self._execution_lock:
+            worker = asyncio.create_task(asyncio.to_thread(operation, *args))
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                try:
+                    await self._await_terminal(worker)
+                except Exception as exc:
+                    logger.error(
+                        "Cancelled exchange operation finished with error: type={}",
+                        type(exc).__name__,
+                    )
+                raise
+
     async def _fetch_snapshot(self, client, symbol: str) -> _MarketSnapshot:
+        gateway = BinanceUsdMGateway(
+            client,
+            retry_executor=BinanceRetryExecutor(sleeper=self._observe_retry_delay),
+        )
         batch = asyncio.gather(
             self._fetch_stage(
                 "klines",
-                client.futures_klines,
+                gateway.klines,
                 symbol=symbol,
                 interval=BAR_INTERVAL,
                 limit=500,
             ),
-            self._fetch_stage("server_time", client.futures_time),
+            self._fetch_stage("server_time", gateway.server_time),
             self._fetch_stage(
                 "funding_rate",
-                client.futures_funding_rate,
+                gateway.funding_rate,
                 symbol=symbol,
                 limit=100,
             ),
-            self._fetch_stage("exchange_info", client.futures_exchange_info),
+            self._fetch_stage("exchange_info", gateway.exchange_info),
             self._fetch_stage(
-                "mark_price", client.futures_mark_price, symbol=symbol
+                "mark_price", gateway.mark_price, symbol=symbol
             ),
             return_exceptions=True,
         )
@@ -592,7 +645,7 @@ class BotEngine:
         for failure in failures:
             if (
                 isinstance(failure, _SnapshotFetchError)
-                and self._retry_details(failure.cause) is None
+                and not isinstance(failure.cause, BinanceGatewayError)
             ):
                 raise failure
         if failures:
@@ -601,11 +654,7 @@ class BotEngine:
         return _MarketSnapshot(raw, server, funding_raw, exchange_info, mark)
 
     @staticmethod
-    async def _fetch_stage(
-        stage: str,
-        request: Callable[..., Any],
-        **kwargs: Any,
-    ) -> Any:
+    async def _fetch_stage(stage: str, request: Any, **kwargs: Any) -> Any:
         try:
             return await asyncio.to_thread(request, **kwargs)
         except asyncio.CancelledError:
@@ -660,7 +709,7 @@ class BotEngine:
         plan = runtime.prepare_decision(
             bars,
             position,
-            server_time=pd.Timestamp(int(server["serverTime"]), unit="ms", tz="UTC"),
+            server_time=pd.Timestamp(server, unit="ms", tz="UTC"),
             execution_price=float(mark["markPrice"]),
             eligible=self._is_tradable(exchange_info, symbol),
         )
@@ -1022,56 +1071,33 @@ class BotEngine:
         self.error_msg = ""
         self.last_success_at = datetime.now(timezone.utc).isoformat()
 
-    @staticmethod
-    def _http_status(exc: Exception) -> int | None:
-        status = getattr(exc, "status_code", None)
-        if status is None:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-        return status if isinstance(status, int) else None
+    def _observe_gateway_failure(self, exc: Exception) -> None:
+        if not isinstance(exc, BinanceGatewayError) or exc.failure is None:
+            return
+        self.failure_count = (
+            BinanceRetryPolicy().max_attempts if exc.failure.retryable else 1
+        )
+        self.error_code = exc.code
+        self.error_msg = str(exc)
+        self.next_retry_at = None
 
-    @classmethod
-    def _retry_details(cls, exc: Exception) -> str | None:
-        if isinstance(exc, RequestsSSLError):
-            return None
-        if isinstance(
-            exc,
-            (RequestsTimeout, RequestsConnectionError, TimeoutError, ConnectionError),
-        ):
-            return "network_unavailable"
-        status = cls._http_status(exc)
-        if status == 408:
-            return "request_timeout"
-        if status == 429:
-            return "rate_limited"
-        if status is not None and 500 <= status <= 599:
-            return "upstream_unavailable"
-        return None
-
-    @classmethod
-    def _retry_delay(cls, attempt: int, exc: Exception) -> float | None:
-        delay = cls._RETRY_DELAYS[attempt - 1]
-        if cls._http_status(exc) != 429:
-            return delay
-        headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
-        retry_after = headers.get("Retry-After")
-        if retry_after is None:
-            return delay
-        try:
-            requested_delay = float(retry_after)
-        except (TypeError, ValueError):
-            return delay
-        if requested_delay < 0 or requested_delay > cls._MAX_RETRY_AFTER_SECONDS:
-            return None
-        return max(delay, requested_delay)
+    def _observe_retry_delay(self, delay: float) -> None:
+        self.failure_count += 1
+        self.engine_state = "retrying"
+        self.error_code = "binance_read_retry"
+        self.error_msg = "Binance read retry is in progress"
+        self.next_retry_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=delay)
+        ).isoformat()
+        time.sleep(delay)
 
     def _set_terminal_error(self, exc: Exception) -> None:
         cause = exc.cause if isinstance(exc, _SnapshotFetchError) else exc
-        retry_code = self._retry_details(cause)
         self.next_retry_at = None
-        if retry_code is not None:
+        if isinstance(cause, BinanceGatewayError) and cause.failure and cause.failure.retryable:
             self.engine_state = "network_halted"
-            self.error_code = retry_code
-            self.error_msg = "Binance is temporarily unavailable"
+            self.error_code = cause.code
+            self.error_msg = str(cause)
         elif isinstance(
             cause,
             (
@@ -1088,9 +1114,8 @@ class BotEngine:
             self.error_code = "engine_failure"
             self.error_msg = "Strategy stopped unexpectedly"
 
-    @classmethod
+    @staticmethod
     def _log_snapshot_failure(
-        cls,
         symbol: str,
         exc: _SnapshotFetchError,
     ) -> None:
@@ -1100,12 +1125,12 @@ class BotEngine:
             symbol,
             exc.stage,
             type(cause).__name__,
-            cls._http_status(cause),
+            getattr(getattr(cause, "failure", None), "status_code", None),
             getattr(cause, "code", None),
         )
 
-    @classmethod
-    def _log_terminal_error(cls, symbol: str, exc: Exception) -> None:
+    @staticmethod
+    def _log_terminal_error(symbol: str, exc: Exception) -> None:
         stage = exc.stage if isinstance(exc, _SnapshotFetchError) else "runtime"
         cause = exc.cause if isinstance(exc, _SnapshotFetchError) else exc
         logger.error(
@@ -1113,7 +1138,7 @@ class BotEngine:
             symbol,
             stage,
             type(cause).__name__,
-            cls._http_status(cause),
+            getattr(getattr(cause, "failure", None), "status_code", None),
             getattr(cause, "code", None),
         )
 

@@ -8,6 +8,8 @@ from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..services.market_agent import MarketAgentError, market_agent_manager
+from ..services.exchange_provider import is_binance_provider, unavailable_provider_detail
+from ..state import app_state
 
 
 router = APIRouter()
@@ -57,8 +59,17 @@ def _raise_api_error(exc: MarketAgentError) -> None:
     ) from exc
 
 
+def _require_binance_provider() -> None:
+    if not is_binance_provider(app_state.exchange_provider):
+        raise HTTPException(
+            status_code=503,
+            detail=unavailable_provider_detail(app_state.exchange_provider),
+        )
+
+
 @router.post("/market-agent/start")
 async def start_market_agent(body: MarketAgentStartRequest):
+    _require_binance_provider()
     try:
         return await market_agent_manager.start(symbol=body.symbol)
     except MarketAgentError as exc:
@@ -71,6 +82,7 @@ async def send_market_agent_message(
     response: Response,
     client_message_id: str | None = Header(default=None, alias="X-Client-Message-Id"),
 ):
+    _require_binance_provider()
     try:
         if client_message_id is None:
             result = await market_agent_manager.message(
@@ -96,7 +108,10 @@ async def stop_market_agent():
 
 @router.get("/market-agent/status")
 def market_agent_status():
-    return market_agent_manager.status()
+    return {
+        **market_agent_manager.status(),
+        "provider": app_state.exchange_provider,
+    }
 
 
 @router.get("/market-agent/events")
@@ -105,4 +120,8 @@ def market_agent_events(
     limit: int = Query(default=100, ge=1, le=100),
 ):
     events = market_agent_manager.events(after_sequence=after_sequence, limit=limit)
-    return {"events": events, "latest_sequence": market_agent_manager.status()["latest_sequence"]}
+    return {
+        "events": events,
+        "latest_sequence": market_agent_manager.status()["latest_sequence"],
+        "provider": app_state.exchange_provider,
+    }

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { AlertCircle, Loader, Play, Square } from "lucide-react";
 import clsx from "clsx";
 import { useApp } from "../context/AppContext";
@@ -22,7 +22,12 @@ export default function StrategyEngineControl() {
     strategyConfiguration,
     strategyConfigurationLoaded,
     strategyConfigurationError,
+    exchangeSupported,
+    exchangeSwitching,
+    settingsLoaded,
   } = useApp();
+  const isExchangeSupported = settingsLoaded !== false
+    && exchangeSupported;
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [confirmation, setConfirmation] = useState("");
   const running = Boolean(botStatus?.running);
@@ -30,7 +35,9 @@ export default function StrategyEngineControl() {
     ? strategyDefinition(strategyConfiguration.strategy_type)
     : null;
   const disabled = (
-    !botStatusLoaded
+    !isExchangeSupported
+    || exchangeSwitching
+    || !botStatusLoaded
     || networkSwitching
     || strategyCommandPending
     || refreshPending
@@ -41,7 +48,12 @@ export default function StrategyEngineControl() {
     || !symbol
   );
 
+  useEffect(() => {
+    if (!isExchangeSupported) setShowConfirmation(false);
+  }, [isExchangeSupported]);
+
   const requestCommand = () => {
+    if (!isExchangeSupported || exchangeSwitching) return;
     if (running) {
       stopStrategy();
       return;

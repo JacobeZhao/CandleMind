@@ -4,17 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from .binance_usdm_gateway import BinanceUsdMGateway
+
 
 class ReadOnlyMarketGateway:
     """Expose only server time and public futures candlesticks."""
 
-    __slots__ = ("_client",)
+    __slots__ = ("_gateway",)
 
     def __init__(self, client: Any) -> None:
-        self._client = client
+        self._gateway = (
+            client if isinstance(client, BinanceUsdMGateway) else BinanceUsdMGateway(client)
+        )
 
     def server_time(self) -> int:
-        return int(self._client.futures_time()["serverTime"])
+        return self._gateway.server_time()
 
     def klines(
         self,
@@ -31,4 +35,4 @@ class ReadOnlyMarketGateway:
         }
         if end_time is not None:
             parameters["endTime"] = end_time
-        return self._client.futures_klines(**parameters)
+        return self._gateway.klines(**parameters)

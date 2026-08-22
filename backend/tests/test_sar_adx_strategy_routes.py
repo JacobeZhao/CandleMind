@@ -3,14 +3,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from binance.exceptions import BinanceAPIException, BinanceRequestException
 from fastapi import HTTPException
 from pydantic import ValidationError
-from requests.exceptions import ConnectionError as RequestsConnectionError
-from requests.exceptions import Timeout as RequestsTimeout
 
 from backend.app.routes import strategy as strategy_routes
 from backend.app.services.exchange_executor import RecoveryRequiredError
+from backend.app.services.binance_errors import (
+    BinanceFailure,
+    BinanceFailureCategory,
+    BinanceGatewayRejected,
+    BinanceGatewayUnavailable,
+)
 from backend.app.services.execution_store import ExecutionStoreError
 from backend.app.services.live_strategy_runtime import LiveStrategyRuntimeError
 
@@ -40,8 +43,12 @@ class _Query:
 
 
 class _Db:
-    def __init__(self, *, testnet=True, symbol="SOLUSDT"):
-        self.settings = SimpleNamespace(testnet=testnet, symbol=symbol)
+    def __init__(self, *, testnet=True, symbol="SOLUSDT", exchange_provider="binance"):
+        self.settings = SimpleNamespace(
+            testnet=testnet,
+            symbol=symbol,
+            exchange_provider=exchange_provider,
+        )
 
     def query(self, model):
         assert model is strategy_routes.Settings
@@ -85,6 +92,7 @@ def _install(monkeypatch, *, testnet=True, symbol="SOLUSDT"):
     monkeypatch.setattr(strategy_routes, "bot_engine", engine)
     monkeypatch.setattr(strategy_routes.app_state, "client", object())
     monkeypatch.setattr(strategy_routes.app_state, "symbol", symbol)
+    monkeypatch.setattr(strategy_routes.app_state, "exchange_provider", "binance")
     monkeypatch.setattr(
         strategy_routes,
         "get_strategy_configuration",
@@ -159,6 +167,22 @@ def test_start_requires_connected_binance_client(monkeypatch):
     engine.start.assert_not_awaited()
 
 
+def test_non_binance_provider_blocks_start_before_configuration_or_engine(monkeypatch):
+    engine, db = _install(monkeypatch)
+    db.settings.exchange_provider = "okx"
+    get_configuration = Mock(side_effect=AssertionError("configuration must not load"))
+    monkeypatch.setattr(strategy_routes, "get_strategy_configuration", get_configuration)
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(strategy_routes.start_engine(_request(), db))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "exchange_provider_unavailable"
+    assert raised.value.detail["provider"] == "okx"
+    get_configuration.assert_not_called()
+    engine.start.assert_not_awaited()
+
+
 def test_mainnet_start_is_disabled_without_server_authorization(monkeypatch):
     engine, db = _install(monkeypatch, testnet=False)
     monkeypatch.delenv("CANDLEMIND_MAINNET_TRADING_ENABLED", raising=False)
@@ -226,54 +250,48 @@ def test_start_maps_conflicts_without_exposing_exchange_credentials(monkeypatch,
     assert "api_key" not in raised.value.detail.lower()
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        BinanceRequestException("upstream payload contained secret details"),
-        BinanceAPIException(
-            response=type(
-                "Response",
-                (),
-                {
-                    "status_code": 429,
-                    "text": '{"code": -1003, "msg": "sensitive upstream detail"}',
-                    "request": None,
-                },
-            )(),
-            status_code=429,
-            text='{"code": -1003, "msg": "sensitive upstream detail"}',
-        ),
-    ],
-)
-def test_start_maps_binance_response_failures_to_safe_502(monkeypatch, error):
+def test_start_maps_binance_response_failures_to_structured_safe_502(monkeypatch):
     engine, db = _install(monkeypatch)
-    engine.start.side_effect = error
+    engine.start.side_effect = BinanceGatewayRejected(
+        "Binance rejected the request",
+        failure=BinanceFailure(
+            BinanceFailureCategory.REJECTED,
+            False,
+            "Binance rejected the request",
+        ),
+    )
 
     with pytest.raises(HTTPException) as raised:
         asyncio.run(strategy_routes.start_engine(_request(), db))
 
     assert raised.value.status_code == 502
-    assert raised.value.detail == "Binance rejected or returned an invalid response"
+    assert raised.value.detail == {
+        "code": "binance_request_rejected",
+        "message": "Binance 拒绝了请求。",
+        "retryable": False,
+    }
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        TimeoutError("secret"),
-        ConnectionError("secret"),
-        RequestsTimeout("secret"),
-        RequestsConnectionError("secret"),
-    ],
-)
-def test_start_maps_binance_availability_failures_to_safe_503(monkeypatch, error):
+def test_start_maps_binance_availability_failures_to_structured_safe_503(monkeypatch):
     engine, db = _install(monkeypatch)
-    engine.start.side_effect = error
+    engine.start.side_effect = BinanceGatewayUnavailable(
+        "Binance is temporarily unavailable",
+        failure=BinanceFailure(
+            BinanceFailureCategory.TRANSPORT,
+            True,
+            "Binance is temporarily unavailable",
+        ),
+    )
 
     with pytest.raises(HTTPException) as raised:
         asyncio.run(strategy_routes.start_engine(_request(), db))
 
     assert raised.value.status_code == 503
-    assert raised.value.detail == "Binance is temporarily unavailable"
+    assert raised.value.detail == {
+        "code": "binance_unavailable",
+        "message": "Binance 暂时不可用，服务器已完成自动重试。",
+        "retryable": True,
+    }
 
 
 def test_status_hydrates_bound_network_and_returns_execution_fields(monkeypatch):
@@ -288,6 +306,17 @@ def test_status_hydrates_bound_network_and_returns_execution_fields(monkeypatch)
     assert result["filled_order_count"] == 0
     assert result["rejected_order_count"] == 0
     assert result["unknown_order_count"] == 0
+    assert result["provider"] == "binance"
+
+
+def test_non_binance_status_returns_provider_without_hydrating_binance(monkeypatch):
+    engine, db = _install(monkeypatch)
+    db.settings.exchange_provider = "bybit"
+
+    result = strategy_routes.engine_status(db)
+
+    assert result["provider"] == "bybit"
+    engine.hydrate_persisted_status.assert_not_called()
 
 
 def test_stop_maps_reconciliation_failure_to_conflict(monkeypatch):

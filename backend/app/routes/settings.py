@@ -8,6 +8,20 @@ from ..security import encrypt, decrypt
 from ..state import app_state
 from ..binance_ws import binance_ws_client
 from ..proxy import rewrite_proxy_for_runtime
+from ..services.binance_errors import BinanceGatewayError
+from ..services.binance_usdm_gateway import (
+    BinanceUsdMGateway,
+    gateway_error_detail,
+    gateway_error_status,
+)
+from ..services.exchange_provider import (
+    BINANCE_PROVIDER,
+    ExchangeProvider,
+    is_binance_provider,
+    normalize_exchange_provider,
+    unavailable_provider_detail,
+)
+from ..services.market_agent import market_agent_manager
 import asyncio
 import re
 import requests as _requests
@@ -16,6 +30,22 @@ router = APIRouter()
 
 CONNECT_TIMEOUT = 30  # 秒
 WS_READY_TIMEOUT = 10  # Must fail before the frontend's 15s settings timeout.
+USD_M_DEMO_REST_URL = "https://demo-fapi.binance.com/fapi"
+CONNECTION_FAILURE_DETAIL = {
+    "code": "binance_connection_failed",
+    "message": "Binance 连接校验失败，请检查凭据、网络和代理配置。",
+    "retryable": False,
+}
+RESTORE_FAILURE_DETAIL = {
+    "code": "settings_restore_failed",
+    "message": "设置保存失败，且无法恢复之前的运行状态。",
+    "retryable": False,
+}
+IP_LOOKUP_FAILURE_DETAIL = {
+    "code": "exit_ip_lookup_failed",
+    "message": "后端出口 IP 检测失败。",
+    "retryable": False,
+}
 
 _KEEP = ("_keep_", "")
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]+(?:_[A-Z0-9]+)?$")
@@ -40,6 +70,7 @@ class SettingsIn(BaseModel):
     symbol: Optional[str] = None
     interval: Optional[str] = None
     proxy_url: Optional[str] = None
+    exchange_provider: Optional[ExchangeProvider] = None
 
     @field_validator("symbol")
     @classmethod
@@ -60,6 +91,7 @@ class SettingsOut(BaseModel):
     interval: str
     proxy_url: Optional[str]
     connected: bool
+    exchange_provider: ExchangeProvider
 
 
 @router.get("", response_model=SettingsOut)
@@ -69,8 +101,11 @@ def get_settings(db: Session = Depends(get_db)):
 
 
 def _settings_out(s) -> SettingsOut:
+    provider = normalize_exchange_provider(getattr(s, "exchange_provider", None))
     connected = (
-        app_state.client is not None
+        provider == BINANCE_PROVIDER
+        and app_state.exchange_provider == BINANCE_PROVIDER
+        and app_state.client is not None
         and binance_ws_client.is_ready()
         and binance_ws_client.symbol == s.symbol
         and binance_ws_client.testnet == s.testnet
@@ -84,6 +119,7 @@ def _settings_out(s) -> SettingsOut:
         interval=s.interval,
         proxy_url=s.proxy_url or "",
         connected=connected,
+        exchange_provider=provider,
     )
 
 
@@ -91,10 +127,12 @@ def _runtime_snapshot() -> dict:
     return {
         "client": app_state.client,
         "app_symbol": app_state.symbol,
+        "exchange_provider": app_state.exchange_provider,
         "ws_running": getattr(binance_ws_client, "_running", False),
         "ws_symbol": binance_ws_client.symbol,
         "ws_testnet": binance_ws_client.testnet,
         "ws_proxy": binance_ws_client.proxy,
+        "market_agent": market_agent_manager.status(),
     }
 
 
@@ -102,6 +140,7 @@ def _runtime_changed(snapshot: dict) -> bool:
     return (
         app_state.client is not snapshot["client"]
         or app_state.symbol != snapshot["app_symbol"]
+        or app_state.exchange_provider != snapshot["exchange_provider"]
         or getattr(binance_ws_client, "_running", False) != snapshot["ws_running"]
         or binance_ws_client.symbol != snapshot["ws_symbol"]
         or binance_ws_client.testnet != snapshot["ws_testnet"]
@@ -132,14 +171,27 @@ async def _start_ws_and_wait(symbol: str, testnet: bool, proxy_url: Optional[str
 
 
 def _strategy_runtime_running() -> bool:
+    """Fail closed unless the execution engine is fully stopped and released."""
+
     # Local import keeps settings initialization independent of the strategy stack.
     from ..services.bot_engine import bot_engine
 
-    return bool(bot_engine.running)
+    return bool(
+        bot_engine.running
+        or bot_engine.engine_state != "stopped"
+        or bot_engine._task is not None
+        or bot_engine._sar_adx_runtime is not None
+    )
 
 
 def _changes_execution_binding(body: SettingsIn, current) -> bool:
     fields = body.model_fields_set
+    if (
+        "exchange_provider" in fields
+        and body.exchange_provider
+        != normalize_exchange_provider(getattr(current, "exchange_provider", None))
+    ):
+        return True
     if "testnet" in fields and body.testnet != current.testnet:
         return True
     if "symbol" in fields and body.symbol != current.symbol:
@@ -171,21 +223,43 @@ async def _restore_runtime(snapshot: dict) -> None:
         binance_ws_client.proxy = snapshot["ws_proxy"]
         app_state.client = snapshot["client"]
         app_state.symbol = snapshot["app_symbol"]
+        app_state.exchange_provider = snapshot["exchange_provider"]
+    agent = snapshot.get("market_agent") or {}
+    if (
+        snapshot.get("market_agent_was_stopped")
+        and agent.get("desired_enabled")
+        and snapshot["exchange_provider"] == BINANCE_PROVIDER
+        and snapshot["client"] is not None
+        and agent.get("symbol")
+    ):
+        await market_agent_manager.start(symbol=agent["symbol"])
+
+
+async def _disconnect_binance_runtime(provider: str, symbol: str) -> None:
+    await market_agent_manager.stop()
+    await binance_ws_client.stop()
+    app_state.disconnect_exchange(provider, symbol)
 
 
 async def _connect_active(s) -> dict:
     """Validate private account access before activating one exchange session."""
+    if not is_binance_provider(getattr(s, "exchange_provider", None)):
+        raise HTTPException(
+            status_code=503,
+            detail=unavailable_provider_detail(s.exchange_provider),
+        )
     key_enc, sec_enc = active_keys(s)
     if not key_enc:
         raise HTTPException(400, f"当前为{'测试网' if s.testnet else '真实网'}模式，但未配置对应 API Key")
     client = await asyncio.to_thread(
         _build_client, decrypt(key_enc), decrypt(sec_enc), s.testnet, s.proxy_url
     )
-    account = await asyncio.to_thread(client.futures_account)
+    account = await asyncio.to_thread(BinanceUsdMGateway(client).account)
     snapshot = _runtime_snapshot()
     try:
         await _start_ws_and_wait(s.symbol, s.testnet, s.proxy_url)
         app_state.set_client(client, s.symbol)
+        app_state.exchange_provider = BINANCE_PROVIDER
         return await app_state.publish_account(account)
     except (Exception, asyncio.CancelledError):
         if _runtime_changed(snapshot):
@@ -198,6 +272,9 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
     async with _settings_lock:
         s = db.query(Settings).first()
         runtime = _runtime_snapshot()
+        previous_provider = normalize_exchange_provider(
+            getattr(s, "exchange_provider", None)
+        )
         if _strategy_runtime_running() and _changes_execution_binding(body, s):
             raise HTTPException(
                 status_code=409,
@@ -219,11 +296,21 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
             s.interval = body.interval
         if "proxy_url" in body.model_fields_set:
             s.proxy_url = body.proxy_url or None
+        if body.exchange_provider is not None:
+            s.exchange_provider = body.exchange_provider
 
         try:
+            provider = normalize_exchange_provider(
+                getattr(s, "exchange_provider", None)
+            )
             key_enc, _ = active_keys(s)
             account = None
-            if key_enc:
+            if provider != BINANCE_PROVIDER:
+                runtime["market_agent_was_stopped"] = bool(
+                    runtime["market_agent"].get("desired_enabled")
+                )
+                await _disconnect_binance_runtime(provider, s.symbol)
+            elif key_enc:
                 account = await _connect_active(s)
             elif runtime["ws_running"] and _ws_target_changed(
                 runtime, s.symbol, s.testnet, s.proxy_url
@@ -232,34 +319,49 @@ async def save_settings(body: SettingsIn, db: Session = Depends(get_db)):
             db.commit()
             if not key_enc:
                 app_state.symbol = s.symbol
+                app_state.exchange_provider = provider
             message = (
                 f"保存成功，已连接 Binance（{'测试网' if s.testnet else '真实网'}）！"
                 if key_enc
                 else "配置已保存（当前模式未配置 API Key，暂未连接）"
             )
+            if provider != BINANCE_PROVIDER:
+                message = "设置已保存，所选市场将在未来接入。"
             authoritative = _settings_out(s).model_dump()
             return {"ok": True, "message": message, "account": account, **authoritative}
         except (Exception, asyncio.CancelledError) as exc:
             db.rollback()
+            s.exchange_provider = previous_provider
             try:
-                if _runtime_changed(runtime):
+                if _runtime_changed(runtime) or runtime.get("market_agent_was_stopped"):
                     await _restore_runtime(runtime)
-            except Exception as restore_exc:
+            except Exception:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"设置保存失败且运行状态恢复失败: {restore_exc}",
+                    detail=RESTORE_FAILURE_DETAIL,
                 ) from exc
             if isinstance(exc, HTTPException):
                 raise exc
+            if isinstance(exc, BinanceGatewayError):
+                raise HTTPException(
+                    status_code=gateway_error_status(exc),
+                    detail=gateway_error_detail(exc),
+                ) from exc
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            raise HTTPException(status_code=400, detail=f"API 连接失败: {exc}") from exc
+            raise HTTPException(status_code=400, detail=CONNECTION_FAILURE_DETAIL) from exc
 
 
 @router.post("/test-connection")
 async def test_connection(testnet: bool = True, db: Session = Depends(get_db)):
     """独立测试测试网或真实网的 API Key 是否可用（不切换当前活跃连接）。"""
     s = db.query(Settings).first()
+    provider = normalize_exchange_provider(getattr(s, "exchange_provider", None))
+    if provider != BINANCE_PROVIDER:
+        raise HTTPException(
+            status_code=503,
+            detail=unavailable_provider_detail(provider),
+        )
     if testnet:
         key_enc = s.api_key_test_enc or (s.api_key_enc if s.testnet else None)
         sec_enc = s.api_secret_test_enc or (s.api_secret_enc if s.testnet else None)
@@ -275,10 +377,20 @@ async def test_connection(testnet: bool = True, db: Session = Depends(get_db)):
         client = await asyncio.to_thread(
             _build_client, decrypt(key_enc), decrypt(sec_enc), testnet, s.proxy_url
         )
-        await asyncio.to_thread(client.futures_account)
+        await asyncio.to_thread(BinanceUsdMGateway(client).account)
         return {"ok": True, "message": f"{net_name} 连接成功"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"{net_name} 连接失败: {e}")
+    except asyncio.CancelledError:
+        raise
+    except BinanceGatewayError as exc:
+        raise HTTPException(
+            status_code=gateway_error_status(exc),
+            detail=gateway_error_detail(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=CONNECTION_FAILURE_DETAIL,
+        ) from exc
 
 
 @router.get("/myip")
@@ -302,8 +414,13 @@ async def get_my_ip(db: Session = Depends(get_db)):
         )
         ip = resp.json().get("ip", "未知")
         return {"ip": ip, "via_proxy": proxies is not None}
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"IP 检测失败: {e}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=IP_LOOKUP_FAILURE_DETAIL,
+        ) from exc
 
 
 def _rewrite_proxy(url: str) -> str:
@@ -323,17 +440,17 @@ def _build_client(api_key: str, api_secret: str, testnet: bool,
         api_key.strip(),
         api_secret.strip(),
         requests_params=requests_params,
+        testnet=testnet,
     )
-
     if testnet:
-        client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+        client.FUTURES_TESTNET_URL = USD_M_DEMO_REST_URL
 
     # 自动同步时间偏移，解决 -1021 timestamp 错误
     try:
-        server_ts = client.futures_time()["serverTime"]
+        server_ts = BinanceUsdMGateway(client).server_time()
         client.timestamp_offset = server_ts - int(_time.time() * 1000)
     except Exception:
         pass
 
-    client.futures_ping()
+    BinanceUsdMGateway(client).ping()
     return client

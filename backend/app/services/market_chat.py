@@ -14,6 +14,7 @@ import pandas as pd
 
 from ..strategies.sar_pyramid import parabolic_sar
 from .ai_provider import chat_complete
+from .read_only_market_gateway import ReadOnlyMarketGateway
 
 
 KLINE_COLUMNS = (
@@ -222,15 +223,28 @@ def build_market_snapshot(
 
 async def fetch_market_snapshot(client: Any, symbol: str, interval: str) -> dict[str, Any]:
     try:
-        server = await asyncio.to_thread(client.futures_time)
-        server_time_ms = int(server["serverTime"])
+        gateway = (
+            client
+            if isinstance(client, ReadOnlyMarketGateway)
+            else ReadOnlyMarketGateway(client)
+        )
+        server_time_ms = await asyncio.to_thread(gateway.server_time)
+        cutoff_ms = server_time_ms - 1
         current_raw = await asyncio.to_thread(
-            client.futures_klines, symbol=symbol, interval=interval, limit=SNAPSHOT_BAR_LIMIT
+            gateway.klines,
+            symbol=symbol,
+            interval=interval,
+            limit=SNAPSHOT_BAR_LIMIT,
+            end_time=cutoff_ms,
         )
         hourly_raw = current_raw
         if interval != "1h":
             hourly_raw = await asyncio.to_thread(
-                client.futures_klines, symbol=symbol, interval="1h", limit=SNAPSHOT_BAR_LIMIT
+                gateway.klines,
+                symbol=symbol,
+                interval="1h",
+                limit=SNAPSHOT_BAR_LIMIT,
+                end_time=cutoff_ms,
             )
     except MarketDataError:
         raise

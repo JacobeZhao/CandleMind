@@ -2,9 +2,17 @@ import React from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Markets from "./Markets";
+import { mainOverflowClass } from "../App";
+
+const appState = {
+  symbol: "SOLUSDT",
+  exchangeProvider: "binance",
+  exchangeSupported: true,
+  exchangeSwitching: false,
+};
 
 vi.mock("../context/AppContext", () => ({
-  useApp: () => ({ symbol: "SOLUSDT" }),
+  useApp: () => appState,
 }));
 
 vi.mock("../components/MarketSummary", () => ({
@@ -34,6 +42,9 @@ vi.mock("../components/MarketAiPanel", () => ({
 
 describe("Markets workspace", () => {
   beforeEach(() => {
+    appState.exchangeProvider = "binance";
+    appState.exchangeSupported = true;
+    appState.exchangeSwitching = false;
     window.localStorage.clear();
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1200 });
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1100);
@@ -52,6 +63,12 @@ describe("Markets workspace", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("disables page scrolling only for the markets route", () => {
+    expect(mainOverflowClass("/markets")).toBe("min-h-0 overflow-y-hidden");
+    expect(mainOverflowClass("/orders")).toBe("overflow-y-auto");
+    expect(mainOverflowClass("/settings")).toBe("overflow-y-auto");
   });
 
   it("owns chart interval and opens an in-page assistant at the desktop default width", () => {
@@ -87,6 +104,24 @@ describe("Markets workspace", () => {
     expect(window.localStorage.getItem("candlemind.marketAssistant.open")).toBe("false");
   });
 
+  it("shrinks both mobile panes to fit a short workspace", () => {
+    window.innerWidth = 390;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(390);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(360);
+    window.localStorage.setItem("candlemind.marketAssistant.open", "true");
+
+    render(<Markets />);
+
+    const workspace = screen.getByTestId("markets-workspace");
+    const panel = screen.getByRole("complementary", { name: "assistant panel" }).parentElement;
+    const divider = screen.getByRole("separator");
+    expect(workspace.className).toContain("min-h-0");
+    expect(workspace.className).not.toContain("min-h-[640px]");
+    expect(divider.getAttribute("aria-orientation")).toBe("horizontal");
+    expect(parseFloat(panel.style.height)).toBeLessThan(240);
+    expect(parseFloat(panel.style.height) + 8).toBeLessThan(360);
+  });
+
   it("restores the open state after unmount and keeps it across interval changes", () => {
     const view = render(<Markets />);
     fireEvent.click(screen.getByRole("button", { name: "toggle assistant" }));
@@ -106,5 +141,18 @@ describe("Markets workspace", () => {
     render(<Markets />);
     expect(screen.queryByRole("complementary", { name: "assistant panel" })).toBeNull();
     expect(screen.getByTestId("price-chart").dataset.assistantOpen).toBe("false");
+  });
+
+  it("does not mount chart or AI data components for an unavailable exchange", () => {
+    window.localStorage.setItem("candlemind.marketAssistant.open", "true");
+    appState.exchangeProvider = "gateio";
+    appState.exchangeSupported = false;
+
+    render(<Markets />);
+
+    expect(screen.getByRole("heading", { name: "Gate.io 未连接" })).toBeTruthy();
+    expect(screen.getByText("未来会接入，敬请期待")).toBeTruthy();
+    expect(screen.queryByTestId("price-chart")).toBeNull();
+    expect(screen.queryByRole("complementary", { name: "assistant panel" })).toBeNull();
   });
 });

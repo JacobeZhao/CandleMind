@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from "react";
-import { AlertCircle, Loader } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { AlertCircle, Loader, RefreshCw } from "lucide-react";
 import clsx from "clsx";
 import { getAccountTradingAnalytics } from "../api/client";
+import { normalizeApiError } from "../api/errors";
 import { useApp } from "../context/AppContext";
+import { registerRefreshReader } from "../services/refreshCoordinator";
 
 const UNAVAILABLE = "暂无样本";
 const PARTIAL_STATUSES = new Set(["partial", "estimated"]);
@@ -43,38 +45,62 @@ function displayDate(value) {
 }
 
 export default function StrategyAnalyticsPanel() {
-  const { networkTab, refreshRevision, symbol } = useApp();
-  const [state, setState] = useState({ loading: true, error: null, data: null });
+  const { networkTab, symbol } = useApp();
+  const [state, setState] = useState({ phase: "loading", error: null, data: null, scopeKey: null });
   const requestId = useRef(0);
+  const controllerRef = useRef(null);
+
+  const loadAnalytics = useCallback(async (replace = false) => {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const currentRequest = ++requestId.current;
+    const expectedNetwork = networkTab === "main" ? "mainnet" : "testnet";
+    const expectedScope = `${expectedNetwork}:${symbol}`;
+    setState((current) => {
+      const sameScope = current.scopeKey === expectedScope;
+      return {
+        phase: !replace && sameScope && current.data ? "refreshing" : "loading",
+        data: replace || !sameScope ? null : current.data,
+        error: null,
+        scopeKey: expectedScope,
+      };
+    });
+    try {
+      const { data } = await getAccountTradingAnalytics(symbol, controller.signal);
+      if (controller.signal.aborted || requestId.current !== currentRequest) return true;
+      const responseNetwork = String(data?.scope?.network || "").toLowerCase();
+      const normalizedNetwork = responseNetwork === "main" ? "mainnet" : responseNetwork === "test" ? "testnet" : responseNetwork;
+      const responseScope = `${normalizedNetwork}:${data?.scope?.symbol || ""}`;
+      if (responseScope !== expectedScope) {
+        setState((current) => ({
+          ...current,
+          phase: current.data ? "stale" : "error",
+          error: "账户交易统计范围不一致：当前网络或品种已变化，请重试。",
+        }));
+        return false;
+      }
+      setState({ phase: data ? "complete" : "empty", error: null, data: data || null, scopeKey: expectedScope });
+      return true;
+    } catch (error) {
+      const parsed = normalizeApiError(error, "账户交易统计加载失败，请稍后重试。");
+      if (parsed.cancelled || requestId.current !== currentRequest) return true;
+      setState((current) => ({
+        ...current,
+        data: parsed.retryable ? current.data : null,
+        phase: parsed.retryable && current.data ? "stale" : "error",
+        error: parsed.message,
+      }));
+      return false;
+    }
+  }, [networkTab, symbol]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const currentRequest = ++requestId.current;
-    setState({ loading: true, error: null, data: null });
-    getAccountTradingAnalytics(symbol, controller.signal)
-      .then(({ data }) => {
-        const responseNetwork = String(data?.scope?.network || "").toLowerCase();
-        const expectedNetwork = networkTab === "main" ? "mainnet" : "testnet";
-        const normalizedNetwork = responseNetwork === "main" ? "mainnet" : responseNetwork === "test" ? "testnet" : responseNetwork;
-        const responseScope = `${normalizedNetwork}:${data?.scope?.symbol || ""}`;
-        if (
-          !controller.signal.aborted
-          && requestId.current === currentRequest
-          && responseScope === `${expectedNetwork}:${symbol}`
-        ) {
-          setState({ loading: false, error: null, data });
-        } else if (!controller.signal.aborted && requestId.current === currentRequest) {
-          setState({ loading: false, data: null, error: "账户交易统计范围不一致，请重试" });
-        }
-      })
-      .catch((error) => {
-        if (!controller.signal.aborted && requestId.current === currentRequest) {
-          const detail = error?.response?.data?.detail;
-          setState({ loading: false, data: null, error: typeof detail === "string" ? detail : "账户交易统计加载失败" });
-        }
-      });
-    return () => controller.abort();
-  }, [networkTab, refreshRevision, symbol]);
+    loadAnalytics(true);
+    return () => controllerRef.current?.abort();
+  }, [loadAnalytics]);
+
+  useEffect(() => registerRefreshReader("orders:analytics", () => loadAnalytics(false)), [loadAnalytics]);
 
   const analytics = state.data;
   const overall = analytics?.overall || {};
@@ -91,10 +117,15 @@ export default function StrategyAnalyticsPanel() {
           <h1 className="text-sm font-semibold text-white">账户交易统计</h1>
           <p className="mt-1 text-xs text-muted">{symbol} · {networkTab === "main" ? "真实网" : "测试网"}</p>
         </div>
+        <div className="flex items-center gap-2">
+          {["refreshing", "stale"].includes(state.phase) && <span role={state.phase === "stale" ? "alert" : "status"} className={clsx("text-xs", state.phase === "stale" ? "text-accent" : "text-muted")}>{state.phase === "stale" ? "显示上次成功数据" : "更新中"}</span>}
+          <button type="button" aria-label="刷新账户交易统计" title="刷新账户交易统计" onClick={() => loadAnalytics(state.phase === "error")} disabled={["loading", "refreshing"].includes(state.phase)} className="flex h-8 w-8 items-center justify-center text-muted hover:text-white disabled:opacity-40"><RefreshCw size={14} className={["loading", "refreshing"].includes(state.phase) ? "animate-spin" : ""} /></button>
+        </div>
       </div>
-      {state.loading && <div role="status" className="flex h-48 items-center justify-center gap-2 text-sm text-muted"><Loader size={16} className="animate-spin" />正在加载账户交易统计</div>}
-      {state.error && <div role="alert" className="flex h-48 items-center justify-center gap-2 px-4 text-sm text-red"><AlertCircle size={16} />{state.error}</div>}
-      {!state.loading && !state.error && analytics && <>
+      {state.phase === "loading" && <div role="status" className="flex h-48 items-center justify-center gap-2 text-sm text-muted"><Loader size={16} className="animate-spin" />正在加载账户交易统计</div>}
+      {state.phase === "error" && <div role="alert" className="flex h-48 items-center justify-center gap-2 px-4 text-sm text-red"><AlertCircle size={16} />{state.error}</div>}
+      {state.phase === "stale" && <div role="alert" className="border-b border-accent/20 bg-accent/5 px-4 py-2 text-xs text-accent">{state.error}</div>}
+      {analytics && <>
         <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="本周收益" status={analytics.week?.status} value={money(analytics.week?.net_pnl_usdt)} />
           <MetricCard label="本周收益率" status={weekReturnStatus} value={percent(analytics.week?.net_return_pct)} />
@@ -112,7 +143,7 @@ export default function StrategyAnalyticsPanel() {
           {analytics.coverage?.sync_state && <span>同步 <strong className="font-medium text-white">{analytics.coverage.sync_state}</strong></span>}
         </div>
       </>}
-      {!state.loading && !state.error && !analytics && <div className="flex h-48 items-center justify-center text-sm text-muted">{UNAVAILABLE}</div>}
+      {state.phase === "empty" && <div className="flex h-48 items-center justify-center text-sm text-muted">{UNAVAILABLE}</div>}
     </section>
   );
 }

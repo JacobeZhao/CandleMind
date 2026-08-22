@@ -363,8 +363,10 @@ def test_connect_subscribes_to_all_raw_streams(monkeypatch):
 
     monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
 
-    asyncio.run(client._connect())
+    with pytest.raises(ConnectionError, match="disconnected unexpectedly") as error:
+        asyncio.run(client._connect())
 
+    assert error.value.stable is False
     assert connected_urls == ["wss://fstream.binance.com/ws"]
     assert subscriptions == [{
         "method": "SUBSCRIBE",
@@ -604,9 +606,69 @@ def test_connect_rewrites_loopback_http_proxy_in_docker(monkeypatch):
         lambda _url: "http://host.docker.internal:7897",
     )
 
-    asyncio.run(client._connect())
+    with pytest.raises(ConnectionError, match="disconnected unexpectedly") as error:
+        asyncio.run(client._connect())
 
+    assert error.value.stable is False
     assert connect_kwargs == [{
         "heartbeat": 20,
         "proxy": "http://host.docker.internal:7897",
     }]
+
+
+def test_reconnect_backoff_covers_exhaustion_and_resets_after_stable_connection(monkeypatch):
+    client = BinanceWSClient()
+    delays = []
+    outcomes = iter((False, False, True))
+
+    async def disconnect():
+        raise binance_ws._UnexpectedDisconnect(stable=next(outcomes))
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 3:
+            client._running = False
+
+    monkeypatch.setattr(client, "_connect", disconnect)
+    monkeypatch.setattr(binance_ws.asyncio, "sleep", sleep)
+    monkeypatch.setattr(binance_ws.random, "uniform", lambda _low, high: high)
+
+    client._running = True
+    asyncio.run(client._run())
+
+    assert delays == [2.0, 4.0, 2.0]
+
+
+def test_connection_requires_stability_window_before_resetting_backoff(monkeypatch):
+    monkeypatch.setattr(binance_ws.time, "monotonic", lambda: 129.999)
+    assert BinanceWSClient._connection_was_stable(100.0) is False
+
+    monkeypatch.setattr(binance_ws.time, "monotonic", lambda: 130.0)
+    assert BinanceWSClient._connection_was_stable(100.0) is True
+
+
+def test_reconnect_backoff_is_jittered_and_capped(monkeypatch):
+    monkeypatch.setattr(binance_ws.random, "uniform", lambda low, _high: low)
+
+    assert BinanceWSClient._jittered_backoff(2.0) == 1.0
+    assert BinanceWSClient._jittered_backoff(120.0) == 30.0
+
+
+def test_run_preserves_cancellation(monkeypatch):
+    client = BinanceWSClient()
+
+    async def block():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_connect", block)
+
+    async def scenario():
+        client._running = True
+        task = asyncio.create_task(client._run())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+
+    asyncio.run(scenario())
