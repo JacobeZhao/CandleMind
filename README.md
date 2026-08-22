@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/assets/candlemind-logo.png" alt="CandleMind Logo" width="180">
   <h1>CandleMind</h1>
-  <p><strong>面向 Binance Futures 的开源趋势交易研究与自动化执行平台</strong></p>
+  <p><strong>面向多市场的开源趋势交易研究与自动化执行平台</strong></p>
   <p>
     <strong>简体中文</strong> |
     <a href="README_EN.md">English</a> |
@@ -23,13 +23,13 @@
 
 CandleMind 采用 FastAPI 与 React 构建，将实时行情、趋势分析、策略配置、交易所执行运行时和账户统计整合到一个工作台。平台聚焦 **CandleMind 趋势策略**，行情页提供铺满可用视口、支持拖拽调整的 K 线图与实时 AI 行情助手，并保留可复现的离线研究基础设施。
 
-设置页提供全局市场选择器；目前仅 **Binance Futures** 已接入。OKX、Bybit、Gate.io 与 A 股是后续接入占位，选择后业务页面会明确显示未连接，且不会发起 Binance 行情、账户或交易请求。
+CandleMind 面向加密货币交易所与 A 股等多类市场，通过统一的市场选择和交易所适配架构隔离行情、账户与执行能力。目前已上线 **Binance Futures**；OKX、Bybit、Gate.io 与 A 股已纳入产品入口，但尚未开放连接。选择未上线市场时，业务页面会明确显示未连接，且不会错误发起 Binance 请求。
 
 ## 核心能力
 
 | 能力 | 说明 |
 | --- | --- |
-| 实时行情 | Binance WebSocket 行情、K 线、主图指标，以及自适应视口的可拖拽工作区 |
+| 实时行情 | 统一的多市场行情工作区；当前接入 Binance WebSocket、K 线与主图指标 |
 | AI 行情助手 | 基于已收盘多周期 K 线持续解读行情，并支持随时对话 |
 | 策略运行时 | 三种可配置自动化策略，绑定所选品种与交易网络 |
 | 订单与账户 | 挂单、成交、历史订单及收益、胜率、盈亏比统计 |
@@ -98,7 +98,7 @@ Vite 默认运行在 <http://localhost:5173>，并将 API 请求代理至后端�
 ## 配置与交易安全
 
 1. 从 `.env.example` 创建 `.env`，不要提交密钥、数据库或运行日志。
-2. 在设置页录入 Binance 和 AI Provider 凭据；备份时同时保存 `trader.db` 与 `secret.key`。
+2. 在设置页录入当前已上线市场 Binance 和 AI Provider 的凭据；备份时同时保存 `trader.db` 与 `secret.key`。
 3. 设置页打开期间每分钟自动检测出口 IP；该结果仅用于连接诊断，不代替交易所 API 的权限和 IP 白名单配置。
 4. 云端 AI Base URL 仅允许受信任的 HTTPS 主机；本地 Provider 可使用回环或 RFC1918 地址。详见 [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md)。
 5. 真实网交易必须先完成 testnet 验收，并同时启用服务端开关和页面确认。

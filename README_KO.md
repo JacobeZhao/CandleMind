@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/assets/candlemind-logo.png" alt="CandleMind Logo" width="180">
   <h1>CandleMind</h1>
-  <p><strong>Binance Futures를 위한 오픈 소스 추세 추종 연구 및 자동 실행 플랫폼</strong></p>
+  <p><strong>다중 시장을 위한 오픈 소스 추세 추종 연구 및 자동 실행 플랫폼</strong></p>
   <p>
     <a href="README.md">简体中文</a> |
     <a href="README_EN.md">English</a> |
@@ -23,13 +23,13 @@
 
 CandleMind는 FastAPI와 React를 기반으로 실시간 시장 데이터, 추세 분석, 전략 설정, 거래소 주문 실행 및 계정 통계를 하나의 작업 공간에 통합합니다. **CandleMind 추세 전략**을 중심으로 시장 화면에 가용 뷰포트를 채우는 크기 조절형 캔들 차트와 실시간 AI 시장 도우미를 제공하며, 재현 가능한 오프라인 연구 인프라도 유지합니다.
 
-설정 화면에는 전역 거래소 선택기가 있습니다. 현재 구현된 거래소는 **Binance Futures**뿐입니다. OKX, Bybit, Gate.io 및 A주는 향후 연동을 위한 미연결 자리 표시자이며, 선택해도 Binance 시장, 계정 또는 거래 요청을 전송하지 않습니다.
+CandleMind는 암호화폐 거래소와 A주 등 여러 시장을 대상으로 하며, 통합 시장 선택기와 거래소 어댑터 구조로 시장 데이터, 계정 및 주문 실행을 분리합니다. 현재 운영 중인 연동은 **Binance Futures**입니다. OKX, Bybit, Gate.io 및 A주는 제품 화면에 포함되어 있지만 아직 연결되지 않았습니다. 미지원 시장을 선택하면 연결되지 않은 상태가 표시되며 Binance 요청으로 잘못 대체되지 않습니다.
 
 ## 주요 기능
 
 | 기능 | 설명 |
 | --- | --- |
-| 실시간 시장 | Binance WebSocket 시세, 캔들, 메인 차트 지표 및 뷰포트 반응형 크기 조절 작업 영역 |
+| 실시간 시장 | 통합 다중 시장 작업 영역으로, 현재 Binance WebSocket 시세, 캔들 및 메인 차트 지표 제공 |
 | AI 시장 도우미 | 마감된 다중 주기 캔들을 지속적으로 분석하고 사용자 대화 지원 |
 | 전략 런타임 | 선택한 종목과 거래 네트워크에 연결되는 세 가지 자동화 전략 |
 | 주문 및 계정 | 미체결 주문, 체결, 주문 내역, 수익, 승률 및 손익비 통계 |
@@ -94,7 +94,7 @@ Vite는 기본적으로 <http://localhost:5173>에서 실행되며 API 요청을
 ## 설정 및 거래 안전
 
 1. `.env.example`에서 `.env`를 만들고 비밀 정보, 데이터베이스 또는 실행 로그를 커밋하지 마십시오.
-2. 설정 화면에서 Binance 및 AI Provider 자격 증명을 입력하고 `trader.db`와 `secret.key`를 함께 백업하십시오.
+2. 설정 화면에서 현재 운영 중인 Binance 연동 및 AI Provider 자격 증명을 입력하고 `trader.db`와 `secret.key`를 함께 백업하십시오.
 3. 설정 화면을 여는 동안 연결 진단용 출구 IP를 1분마다 감지합니다. 이 결과는 거래소 API 권한이나 IP 허용 목록 설정을 대체하지 않습니다.
 4. 클라우드 AI Base URL은 신뢰할 수 있는 HTTPS 호스트만 허용합니다. 로컬 Provider는 루프백 또는 RFC1918 주소를 사용할 수 있습니다. 자세한 내용은 [`docs/AI_CONFIGURATION.md`](docs/AI_CONFIGURATION.md)를 참고하십시오.
 5. 메인넷 거래에는 testnet 검증, 서버 측 스위치 및 화면의 명시적 확인이 모두 필요합니다.
